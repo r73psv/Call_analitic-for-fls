@@ -1,0 +1,1006 @@
+{
+  "calls": [],
+  "logs": [
+    {
+      "id": "log-1785409346996",
+      "timestamp": "2026-07-30T11:02:26.996Z",
+      "type": "warning",
+      "module": "system",
+      "message": "🛑 Работа приложения и фоновый опрос АТС отключены по запросу пользователя."
+    },
+    {
+      "id": "log-1785219264760-111",
+      "timestamp": "2026-07-28T06:14:24.760Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785219263865-596",
+      "timestamp": "2026-07-28T06:14:23.865Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785219263848-539",
+      "timestamp": "2026-07-28T06:14:23.848Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785219263446-64",
+      "timestamp": "2026-07-28T06:14:23.446Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785219263427-188",
+      "timestamp": "2026-07-28T06:14:23.428Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 09:13:23 по 2026-07-28 10:14:23..."
+    },
+    {
+      "id": "log-1785219204732-626",
+      "timestamp": "2026-07-28T06:13:24.732Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785219203844-389",
+      "timestamp": "2026-07-28T06:13:23.844Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785219203826-458",
+      "timestamp": "2026-07-28T06:13:23.826Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785219203450-276",
+      "timestamp": "2026-07-28T06:13:23.450Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785219203429-241",
+      "timestamp": "2026-07-28T06:13:23.429Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 09:12:23 по 2026-07-28 10:13:23..."
+    },
+    {
+      "id": "log-1785219144780-371",
+      "timestamp": "2026-07-28T06:12:24.780Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785219143881-814",
+      "timestamp": "2026-07-28T06:12:23.881Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785219143863-169",
+      "timestamp": "2026-07-28T06:12:23.863Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785219143448-567",
+      "timestamp": "2026-07-28T06:12:23.448Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785219143427-28",
+      "timestamp": "2026-07-28T06:12:23.427Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 09:11:23 по 2026-07-28 10:12:23..."
+    },
+    {
+      "id": "log-1785219084677-357",
+      "timestamp": "2026-07-28T06:11:24.677Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785219083862-972",
+      "timestamp": "2026-07-28T06:11:23.862Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785219083845-595",
+      "timestamp": "2026-07-28T06:11:23.845Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785219083443-101",
+      "timestamp": "2026-07-28T06:11:23.443Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785219083424-544",
+      "timestamp": "2026-07-28T06:11:23.424Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 09:10:23 по 2026-07-28 10:11:23..."
+    },
+    {
+      "id": "log-1785219024719-952",
+      "timestamp": "2026-07-28T06:10:24.719Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785219023847-640",
+      "timestamp": "2026-07-28T06:10:23.847Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785219023829-931",
+      "timestamp": "2026-07-28T06:10:23.829Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785219023443-634",
+      "timestamp": "2026-07-28T06:10:23.443Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785219023423-419",
+      "timestamp": "2026-07-28T06:10:23.423Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 09:09:23 по 2026-07-28 10:10:23..."
+    },
+    {
+      "id": "log-1785218964709-290",
+      "timestamp": "2026-07-28T06:09:24.709Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785218963860-45",
+      "timestamp": "2026-07-28T06:09:23.860Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218963839-226",
+      "timestamp": "2026-07-28T06:09:23.839Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785218963446-937",
+      "timestamp": "2026-07-28T06:09:23.446Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218963424-74",
+      "timestamp": "2026-07-28T06:09:23.424Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 09:08:23 по 2026-07-28 10:09:23..."
+    },
+    {
+      "id": "log-1785218904713-237",
+      "timestamp": "2026-07-28T06:08:24.713Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785218903870-228",
+      "timestamp": "2026-07-28T06:08:23.870Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218903852-380",
+      "timestamp": "2026-07-28T06:08:23.852Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785218903441-380",
+      "timestamp": "2026-07-28T06:08:23.441Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218903422-955",
+      "timestamp": "2026-07-28T06:08:23.422Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 09:07:23 по 2026-07-28 10:08:23..."
+    },
+    {
+      "id": "log-1785218844693-394",
+      "timestamp": "2026-07-28T06:07:24.693Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785218843838-325",
+      "timestamp": "2026-07-28T06:07:23.838Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218843819-722",
+      "timestamp": "2026-07-28T06:07:23.820Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785218843441-810",
+      "timestamp": "2026-07-28T06:07:23.441Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218843424-981",
+      "timestamp": "2026-07-28T06:07:23.424Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 09:05:53 по 2026-07-28 10:07:23..."
+    },
+    {
+      "id": "log-1785218754754-111",
+      "timestamp": "2026-07-28T06:05:54.754Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785218753854-799",
+      "timestamp": "2026-07-28T06:05:53.854Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218753838-971",
+      "timestamp": "2026-07-28T06:05:53.838Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785218753440-626",
+      "timestamp": "2026-07-28T06:05:53.440Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218753419-696",
+      "timestamp": "2026-07-28T06:05:53.419Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 09:04:53 по 2026-07-28 10:05:53..."
+    },
+    {
+      "id": "log-1785218694686-719",
+      "timestamp": "2026-07-28T06:04:54.686Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785218693861-52",
+      "timestamp": "2026-07-28T06:04:53.861Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218693839-811",
+      "timestamp": "2026-07-28T06:04:53.840Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785218693437-355",
+      "timestamp": "2026-07-28T06:04:53.437Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218693417-640",
+      "timestamp": "2026-07-28T06:04:53.417Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 09:03:23 по 2026-07-28 10:04:53..."
+    },
+    {
+      "id": "log-1785218679475-465",
+      "timestamp": "2026-07-28T06:04:39.475Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос проксирования аудиозаписи: https://record.cp.megafon.ru/system/media/talk/72184540/813669910a1f2b6716820cc20bcda200/?token=eyJhbGciOiJSUzI1NiIsImtpZCI6IjB4NzdBNG9PRWdCOUQxU1pNYkpadzkzODdTT0E0Z1k5R3RHSGhQZUUwX0UiLCJ0eXAiOiJKV1QifQ.eyJqdGkiOiJlODNmMTljMy0xMjhjLTQ0ZjQtYTFhMy1iMmRjY2E4YzUzZjciLCJzaWQiOiJlMGNkY2YyMi03YWE2LTQwMzktYTZkMS0xZDRmZjZkMjI1MGEiLCJpc3MiOiJodHRwczovL3Nzby5jcC5tZWdhZm9uLnJ1IiwiYXVkIjpbImh0dHBzOi8vZGF0YS1hcGkuY3AubWVnYWZvbi5ydSIsImh0dHBzOi8vYmlsbGluZy1hcGkuY3AubWVnYWZvbi5ydSIsImh0dHBzOi8vc2ltcGxlLWFwaS5jcC5tZWdhZm9uLnJ1IiwiaHR0cHM6Ly9jYWxsYXBpLmNwLm1lZ2Fmb24ucnUiXSwic3ViIjoiQ29tYWdpY0RCfG1lZ2Fmb258OTM2MTU0fDMwMDg2Iiwic3ViZCI6eyJwcm9qZWN0IjoibWVnYWZvbiIsImFwcF9pZCI6OTM2MTU0LCJjdXN0b21lcl9pZCI6NDEzNCwidXNlcl9pZCI6MzAwODYsImxvZ2luIjoiQVBJQHN5c3RlbS52YXRzOTM2MTU0LmNwLm1lZ2Fmb24ucnUiLCJpc19zeXN0ZW0iOmZhbHNlfSwiY2xpZW50X2lkIjoiaHR0cHM6Ly9zaW1wbGUtYXBpLmNwLm1lZ2Fmb24ucnUiLCJpYXQiOjE3ODQxNzc2MTUsImFjdCI6eyJjbGllbnRfaWQiOiJodHRwczovL3NpbXBsZS1hcGkuY3AubWVnYWZvbi5ydSJ9LCJub3RfdHJ1c3RlZF9kZXZpY2UiOmZhbHNlLCJleHAiOjQ5Mzc3Nzc2MTV9.mavEv1dWVdR2EutzBGEZUmysfJ0K3KgSKl_UX5963lxeI9alWGVeOmNGGTkUXaTRcQ2lT2PCnMcb_5MfAb0NNuHN22UHh2n9gp94F4KwkDDkq2LkvobUSSBM4HgM9TP7rzYvjwnqJBg0w9ZOy-BrDO80bApkP8BT6hh3BQtxmaEpk9myiXDCzo0TEfsXhHsL_MH0zd5svx4uEoW-VZTSFqJTRzyxfkHifkIRupvqnJkXHonEglUxTQ6mfzdXVgvDWl7ko2TRKoPV5o1LxuTVUlPD5qPrPtVvkFYpNhhoP8Ofx-tNkKXcj7Y5JXCKY_k7xlYJrgxyyC00KWyh-XigBGgbZmmNA6RbLQhJcsHHwOhp4p4KJl724PcLXnSD3_gFdAJYaP77qrllYz7b34SZgJZqD2G4biJ0y444-GME7fSvK5I9HvFdD_Kj04mezMst0z-4oyUQMy9q7hJsnZmWn0uA9YWTZMboNlrzGM_jk1PppGkkNb1gIqjPe1LpuyWvMFf4ZiWAPnL3ZzW80C5PYG0ZcyglHAe_HqzqMMwK0JPhTouBKd6FfYgZMrfZ4WBoPoEDWuGyaOAyj0tZgR99yRdAZdGy3ELbBmG0Mv5fmB11xaLJV3lfzRetDXWhkcKgZZjAdqeulyVZg0UL1Pk6PBQB54OJYlF1vKtzrHjLyZY"
+    },
+    {
+      "id": "log-1785218604739-410",
+      "timestamp": "2026-07-28T06:03:24.739Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785218603854-64",
+      "timestamp": "2026-07-28T06:03:23.854Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218603836-458",
+      "timestamp": "2026-07-28T06:03:23.836Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785218603434-29",
+      "timestamp": "2026-07-28T06:03:23.434Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218603413-279",
+      "timestamp": "2026-07-28T06:03:23.413Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 09:02:23 по 2026-07-28 10:03:23..."
+    },
+    {
+      "id": "log-1785218552271-178",
+      "timestamp": "2026-07-28T06:02:32.271Z",
+      "type": "success",
+      "module": "yclients",
+      "message": "Данные анализа успешно засинхронизированы с CRM Yclients!"
+    },
+    {
+      "id": "log-1785218551751-457",
+      "timestamp": "2026-07-28T06:02:31.751Z",
+      "type": "info",
+      "module": "yclients",
+      "message": "Создание сервисной заметки/задачи для салона 987654 в Yclients по звонку megafon-real-72198085..."
+    },
+    {
+      "id": "log-1785218551729-944",
+      "timestamp": "2026-07-28T06:02:31.729Z",
+      "type": "success",
+      "module": "vk",
+      "message": "Результаты звонка megafon-real-72198085 успешно отправлены в VK! Message ID: 1723"
+    },
+    {
+      "id": "log-1785218551420-648",
+      "timestamp": "2026-07-28T06:02:31.420Z",
+      "type": "info",
+      "module": "vk",
+      "message": "Отправка результатов звонка megafon-real-72198085 в чат VK 586924534..."
+    },
+    {
+      "id": "log-1785218551396-217",
+      "timestamp": "2026-07-28T06:02:31.396Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно импортирован и проанализирован звонок megafon-real-72198085 от Клиент (3311)"
+    },
+    {
+      "id": "log-1785218546609-942",
+      "timestamp": "2026-07-28T06:02:26.609Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Аудиозапись звонка megafon-real-72198085 успешно скачана."
+    },
+    {
+      "id": "log-1785218545117-406",
+      "timestamp": "2026-07-28T06:02:25.117Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "[Авто-Опрос АТС] Найдено и импортировано новых звонков: 1."
+    },
+    {
+      "id": "log-1785218545076-437",
+      "timestamp": "2026-07-28T06:02:25.076Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запуск fetch для скачивания аудиозаписи с https://record.cp.megafon.ru/system/media/talk/72198085/eecac3c33bad04ec1cb410d2d8631470/?token=eyJhbGciOiJSUzI1NiIsImtpZCI6IjB4NzdBNG9PRWdCOUQxU1pNYkpadzkzODdTT0E0Z1k5R3RHSGhQZUUwX0UiLCJ0eXAiOiJKV1QifQ.eyJqdGkiOiJlODNmMTljMy0xMjhjLTQ0ZjQtYTFhMy1iMmRjY2E4YzUzZjciLCJzaWQiOiJlMGNkY2YyMi03YWE2LTQwMzktYTZkMS0xZDRmZjZkMjI1MGEiLCJpc3MiOiJodHRwczovL3Nzby5jcC5tZWdhZm9uLnJ1IiwiYXVkIjpbImh0dHBzOi8vZGF0YS1hcGkuY3AubWVnYWZvbi5ydSIsImh0dHBzOi8vYmlsbGluZy1hcGkuY3AubWVnYWZvbi5ydSIsImh0dHBzOi8vc2ltcGxlLWFwaS5jcC5tZWdhZm9uLnJ1IiwiaHR0cHM6Ly9jYWxsYXBpLmNwLm1lZ2Fmb24ucnUiXSwic3ViIjoiQ29tYWdpY0RCfG1lZ2Fmb258OTM2MTU0fDMwMDg2Iiwic3ViZCI6eyJwcm9qZWN0IjoibWVnYWZvbiIsImFwcF9pZCI6OTM2MTU0LCJjdXN0b21lcl9pZCI6NDEzNCwidXNlcl9pZCI6MzAwODYsImxvZ2luIjoiQVBJQHN5c3RlbS52YXRzOTM2MTU0LmNwLm1lZ2Fmb24ucnUiLCJpc19zeXN0ZW0iOmZhbHNlfSwiY2xpZW50X2lkIjoiaHR0cHM6Ly9zaW1wbGUtYXBpLmNwLm1lZ2Fmb24ucnUiLCJpYXQiOjE3ODQxNzc2MTUsImFjdCI6eyJjbGllbnRfaWQiOiJodHRwczovL3NpbXBsZS1hcGkuY3AubWVnYWZvbi5ydSJ9LCJub3RfdHJ1c3RlZF9kZXZpY2UiOmZhbHNlLCJleHAiOjQ5Mzc3Nzc2MTV9.mavEv1dWVdR2EutzBGEZUmysfJ0K3KgSKl_UX5963lxeI9alWGVeOmNGGTkUXaTRcQ2lT2PCnMcb_5MfAb0NNuHN22UHh2n9gp94F4KwkDDkq2LkvobUSSBM4HgM9TP7rzYvjwnqJBg0w9ZOy-BrDO80bApkP8BT6hh3BQtxmaEpk9myiXDCzo0TEfsXhHsL_MH0zd5svx4uEoW-VZTSFqJTRzyxfkHifkIRupvqnJkXHonEglUxTQ6mfzdXVgvDWl7ko2TRKoPV5o1LxuTVUlPD5qPrPtVvkFYpNhhoP8Ofx-tNkKXcj7Y5JXCKY_k7xlYJrgxyyC00KWyh-XigBGgbZmmNA6RbLQhJcsHHwOhp4p4KJl724PcLXnSD3_gFdAJYaP77qrllYz7b34SZgJZqD2G4biJ0y444-GME7fSvK5I9HvFdD_Kj04mezMst0z-4oyUQMy9q7hJsnZmWn0uA9YWTZMboNlrzGM_jk1PppGkkNb1gIqjPe1LpuyWvMFf4ZiWAPnL3ZzW80C5PYG0ZcyglHAe_HqzqMMwK0JPhTouBKd6FfYgZMrfZ4WBoPoEDWuGyaOAyj0tZgR99yRdAZdGy3ELbBmG0Mv5fmB11xaLJV3lfzRetDXWhkcKgZZjAdqeulyVZg0UL1Pk6PBQB54OJYlF1vKtzrHjLyZY..."
+    },
+    {
+      "id": "log-1785218545050-744",
+      "timestamp": "2026-07-28T06:02:25.050Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Скачивание аудиозаписи звонка megafon-real-72198085 для ИИ-анализа..."
+    },
+    {
+      "id": "log-1785218545027-46",
+      "timestamp": "2026-07-28T06:02:25.027Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Начат импорт записи звонка megafon-real-72198085 от клиента Клиент (3311). Длительность: 21 сек."
+    },
+    {
+      "id": "log-1785218544976-601",
+      "timestamp": "2026-07-28T06:02:24.976Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Пример полей первого полученного звонка: [\"tags\",\"coaches\",\"call_type\",\"employees\",\"call_status\",\"call_records\",\"received_call\",\"call_direction\",\"call_start_date\",\"call_start_time\",\"employee_rating\",\"call_is_internal\",\"communication_id\",\"call_finish_reason\",\"call_talk_duration\",\"call_total_duration\",\"call_start_date_time\",\"contact_phone_number\",\"is_blacklisted_phone\",\"virtual_phone_number\",\"call_finish_date_time\",\"communication_comment\",\"is_coach_handled_call\",\"virtual_number_comment\",\"call_await_talk_duration\",\"call_processed_mark_duration\",\"communication_comment_author\",\"first_employee_for_internal_call\",\"second_employee_for_internal_call\"]"
+    },
+    {
+      "id": "log-1785218544955-346",
+      "timestamp": "2026-07-28T06:02:24.955Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 1 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785218543861-575",
+      "timestamp": "2026-07-28T06:02:23.861Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218543842-582",
+      "timestamp": "2026-07-28T06:02:23.842Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785218543432-190",
+      "timestamp": "2026-07-28T06:02:23.432Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218543410-805",
+      "timestamp": "2026-07-28T06:02:23.410Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 09:01:23 по 2026-07-28 10:02:23..."
+    },
+    {
+      "id": "log-1785218484735-601",
+      "timestamp": "2026-07-28T06:01:24.735Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785218483851-737",
+      "timestamp": "2026-07-28T06:01:23.851Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218483834-264",
+      "timestamp": "2026-07-28T06:01:23.834Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785218483429-686",
+      "timestamp": "2026-07-28T06:01:23.429Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218483410-149",
+      "timestamp": "2026-07-28T06:01:23.410Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 09:00:23 по 2026-07-28 10:01:23..."
+    },
+    {
+      "id": "log-1785218424718-1",
+      "timestamp": "2026-07-28T06:00:24.718Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785218423841-561",
+      "timestamp": "2026-07-28T06:00:23.841Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218423822-869",
+      "timestamp": "2026-07-28T06:00:23.822Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785218423429-862",
+      "timestamp": "2026-07-28T06:00:23.429Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218423409-796",
+      "timestamp": "2026-07-28T06:00:23.409Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 08:59:23 по 2026-07-28 10:00:23..."
+    },
+    {
+      "id": "log-1785218364760-487",
+      "timestamp": "2026-07-28T05:59:24.760Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785218363867-829",
+      "timestamp": "2026-07-28T05:59:23.867Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218363848-942",
+      "timestamp": "2026-07-28T05:59:23.848Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785218363426-184",
+      "timestamp": "2026-07-28T05:59:23.426Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218363407-387",
+      "timestamp": "2026-07-28T05:59:23.407Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 08:57:53 по 2026-07-28 09:59:23..."
+    },
+    {
+      "id": "log-1785218274718-903",
+      "timestamp": "2026-07-28T05:57:54.718Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785218273866-756",
+      "timestamp": "2026-07-28T05:57:53.866Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218273843-601",
+      "timestamp": "2026-07-28T05:57:53.843Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785218273431-681",
+      "timestamp": "2026-07-28T05:57:53.431Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218273409-330",
+      "timestamp": "2026-07-28T05:57:53.409Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 08:56:53 по 2026-07-28 09:57:53..."
+    },
+    {
+      "id": "log-1785218214782-446",
+      "timestamp": "2026-07-28T05:56:54.782Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785218213847-665",
+      "timestamp": "2026-07-28T05:56:53.847Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218213830-319",
+      "timestamp": "2026-07-28T05:56:53.830Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785218213422-402",
+      "timestamp": "2026-07-28T05:56:53.422Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218213403-336",
+      "timestamp": "2026-07-28T05:56:53.403Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 08:55:53 по 2026-07-28 09:56:53..."
+    },
+    {
+      "id": "log-1785218154704-578",
+      "timestamp": "2026-07-28T05:55:54.704Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785218153817-466",
+      "timestamp": "2026-07-28T05:55:53.817Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218153798-387",
+      "timestamp": "2026-07-28T05:55:53.798Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785218153420-441",
+      "timestamp": "2026-07-28T05:55:53.420Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218153399-950",
+      "timestamp": "2026-07-28T05:55:53.399Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 08:54:53 по 2026-07-28 09:55:53..."
+    },
+    {
+      "id": "log-1785218100511-999",
+      "timestamp": "2026-07-28T05:55:00.511Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 0 звонков из АТС Мегафон."
+    },
+    {
+      "id": "log-1785218099667-233",
+      "timestamp": "2026-07-28T05:54:59.668Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218099650-919",
+      "timestamp": "2026-07-28T05:54:59.650Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785218099258-781",
+      "timestamp": "2026-07-28T05:54:59.258Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218099241-321",
+      "timestamp": "2026-07-28T05:54:59.241Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запрос реальных звонков из АТС Мегафон за период с 2026-07-28 08:53:53 по 2026-07-28 09:54:53..."
+    },
+    {
+      "id": "log-1785218099223-738",
+      "timestamp": "2026-07-28T05:54:59.223Z",
+      "type": "success",
+      "module": "yclients",
+      "message": "Данные анализа успешно засинхронизированы с CRM Yclients!"
+    },
+    {
+      "id": "log-1785218099104-28",
+      "timestamp": "2026-07-28T05:54:59.104Z",
+      "type": "info",
+      "module": "yclients",
+      "message": "Создание сервисной заметки/задачи для салона 987654 в Yclients по звонку megafon-real-72184540..."
+    },
+    {
+      "id": "log-1785218099086-210",
+      "timestamp": "2026-07-28T05:54:59.086Z",
+      "type": "success",
+      "module": "vk",
+      "message": "Результаты звонка megafon-real-72184540 успешно отправлены в VK! Message ID: 1722"
+    },
+    {
+      "id": "log-1785218098788-108",
+      "timestamp": "2026-07-28T05:54:58.788Z",
+      "type": "info",
+      "module": "vk",
+      "message": "Отправка результатов звонка megafon-real-72184540 в чат VK 586924534..."
+    },
+    {
+      "id": "log-1785218095218-510",
+      "timestamp": "2026-07-28T05:54:55.218Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "[Переанализ/Авто-Повтор] Аудиозапись успешно скачана."
+    },
+    {
+      "id": "log-1785218094827-899",
+      "timestamp": "2026-07-28T05:54:54.827Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запуск fetch для скачивания аудиозаписи с https://record.cp.megafon.ru/system/media/talk/72184540/813669910a1f2b6716820cc20bcda200/?token=eyJhbGciOiJSUzI1NiIsImtpZCI6IjB4NzdBNG9PRWdCOUQxU1pNYkpadzkzODdTT0E0Z1k5R3RHSGhQZUUwX0UiLCJ0eXAiOiJKV1QifQ.eyJqdGkiOiJlODNmMTljMy0xMjhjLTQ0ZjQtYTFhMy1iMmRjY2E4YzUzZjciLCJzaWQiOiJlMGNkY2YyMi03YWE2LTQwMzktYTZkMS0xZDRmZjZkMjI1MGEiLCJpc3MiOiJodHRwczovL3Nzby5jcC5tZWdhZm9uLnJ1IiwiYXVkIjpbImh0dHBzOi8vZGF0YS1hcGkuY3AubWVnYWZvbi5ydSIsImh0dHBzOi8vYmlsbGluZy1hcGkuY3AubWVnYWZvbi5ydSIsImh0dHBzOi8vc2ltcGxlLWFwaS5jcC5tZWdhZm9uLnJ1IiwiaHR0cHM6Ly9jYWxsYXBpLmNwLm1lZ2Fmb24ucnUiXSwic3ViIjoiQ29tYWdpY0RCfG1lZ2Fmb258OTM2MTU0fDMwMDg2Iiwic3ViZCI6eyJwcm9qZWN0IjoibWVnYWZvbiIsImFwcF9pZCI6OTM2MTU0LCJjdXN0b21lcl9pZCI6NDEzNCwidXNlcl9pZCI6MzAwODYsImxvZ2luIjoiQVBJQHN5c3RlbS52YXRzOTM2MTU0LmNwLm1lZ2Fmb24ucnUiLCJpc19zeXN0ZW0iOmZhbHNlfSwiY2xpZW50X2lkIjoiaHR0cHM6Ly9zaW1wbGUtYXBpLmNwLm1lZ2Fmb24ucnUiLCJpYXQiOjE3ODQxNzc2MTUsImFjdCI6eyJjbGllbnRfaWQiOiJodHRwczovL3NpbXBsZS1hcGkuY3AubWVnYWZvbi5ydSJ9LCJub3RfdHJ1c3RlZF9kZXZpY2UiOmZhbHNlLCJleHAiOjQ5Mzc3Nzc2MTV9.mavEv1dWVdR2EutzBGEZUmysfJ0K3KgSKl_UX5963lxeI9alWGVeOmNGGTkUXaTRcQ2lT2PCnMcb_5MfAb0NNuHN22UHh2n9gp94F4KwkDDkq2LkvobUSSBM4HgM9TP7rzYvjwnqJBg0w9ZOy-BrDO80bApkP8BT6hh3BQtxmaEpk9myiXDCzo0TEfsXhHsL_MH0zd5svx4uEoW-VZTSFqJTRzyxfkHifkIRupvqnJkXHonEglUxTQ6mfzdXVgvDWl7ko2TRKoPV5o1LxuTVUlPD5qPrPtVvkFYpNhhoP8Ofx-tNkKXcj7Y5JXCKY_k7xlYJrgxyyC00KWyh-XigBGgbZmmNA6RbLQhJcsHHwOhp4p4KJl724PcLXnSD3_gFdAJYaP77qrllYz7b34SZgJZqD2G4biJ0y444-GME7fSvK5I9HvFdD_Kj04mezMst0z-4oyUQMy9q7hJsnZmWn0uA9YWTZMboNlrzGM_jk1PppGkkNb1gIqjPe1LpuyWvMFf4ZiWAPnL3ZzW80C5PYG0ZcyglHAe_HqzqMMwK0JPhTouBKd6FfYgZMrfZ4WBoPoEDWuGyaOAyj0tZgR99yRdAZdGy3ELbBmG0Mv5fmB11xaLJV3lfzRetDXWhkcKgZZjAdqeulyVZg0UL1Pk6PBQB54OJYlF1vKtzrHjLyZY..."
+    },
+    {
+      "id": "log-1785218094809-153",
+      "timestamp": "2026-07-28T05:54:54.809Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "[Переанализ/Авто-Повтор] Скачивание аудиозаписи с https://record.cp.megafon.ru/system/media/talk/72184540/813669910a1f2b6716820cc20bcda200/..."
+    },
+    {
+      "id": "log-1785218094789-833",
+      "timestamp": "2026-07-28T05:54:54.789Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "[Авто-Поиск] Кеширована прямая ссылка в БД для звонка 72184540"
+    },
+    {
+      "id": "log-1785218094754-216",
+      "timestamp": "2026-07-28T05:54:54.754Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "[Авто-Поиск] Найдена прямая ссылка на аудиозапись: https://record.cp.megafon.ru/system/media/talk/72184540/813669910a1f2b6716820cc20bcda200/"
+    },
+    {
+      "id": "log-1785218093919-913",
+      "timestamp": "2026-07-28T05:54:53.919Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218093898-279",
+      "timestamp": "2026-07-28T05:54:53.898Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "[Авто-Поиск] Поиск реальной ссылки записи для ID 72184540 (интервал: 2026-07-27 20:53:23 - 2026-07-28 20:53:23)..."
+    },
+    {
+      "id": "log-1785218093865-558",
+      "timestamp": "2026-07-28T05:54:53.865Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785218093480-879",
+      "timestamp": "2026-07-28T05:54:53.480Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218093460-127",
+      "timestamp": "2026-07-28T05:54:53.460Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "[Переанализ/Авто-Повтор] Поиск актуальной ссылки для звонка 72184540..."
+    },
+    {
+      "id": "log-1785218093420-922",
+      "timestamp": "2026-07-28T05:54:53.420Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "[Авто-Опрос АТС] Авто-повтор анализа звонка megafon-real-72184540..."
+    },
+    {
+      "id": "log-1785218093401-794",
+      "timestamp": "2026-07-28T05:54:53.401Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "[Авто-Опрос АТС] Обнаружено звонков с ошибкой загрузки записи: 1. Запуск автоматического повторного анализа..."
+    },
+    {
+      "id": "log-1785218040105-992",
+      "timestamp": "2026-07-28T05:54:00.105Z",
+      "type": "success",
+      "module": "yclients",
+      "message": "Данные анализа успешно засинхронизированы с CRM Yclients!"
+    },
+    {
+      "id": "log-1785218039664-336",
+      "timestamp": "2026-07-28T05:53:59.664Z",
+      "type": "info",
+      "module": "yclients",
+      "message": "Создание сервисной заметки/задачи для салона 987654 в Yclients по звонку megafon-real-72184540..."
+    },
+    {
+      "id": "log-1785218039648-368",
+      "timestamp": "2026-07-28T05:53:59.648Z",
+      "type": "info",
+      "module": "vk",
+      "message": "[Интеграция VK] Отправка звонка megafon-real-72184540 отложена: аудиозапись ещё не сформирована или произошла ошибка МегаФона. Отправка в ВК произойдет автоматически после успешной повторной попытки загрузки."
+    },
+    {
+      "id": "log-1785218039630-893",
+      "timestamp": "2026-07-28T05:53:59.630Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно импортирован и проанализирован звонок megafon-real-72184540 от Клиент (3834)"
+    },
+    {
+      "id": "log-1785218036534-662",
+      "timestamp": "2026-07-28T05:53:56.534Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Аудиозапись звонка megafon-real-72184540 успешно скачана."
+    },
+    {
+      "id": "log-1785218036176-444",
+      "timestamp": "2026-07-28T05:53:56.176Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Запуск fetch для скачивания аудиозаписи с https://vats.cp.megafon.ru/api/v1.0/records?uuid=72184540&token=eyJhbGciOiJSUzI1NiIsImtpZCI6IjB4NzdBNG9PRWdCOUQxU1pNYkpadzkzODdTT0E0Z1k5R3RHSGhQZUUwX0UiLCJ0eXAiOiJKV1QifQ.eyJqdGkiOiJlODNmMTljMy0xMjhjLTQ0ZjQtYTFhMy1iMmRjY2E4YzUzZjciLCJzaWQiOiJlMGNkY2YyMi03YWE2LTQwMzktYTZkMS0xZDRmZjZkMjI1MGEiLCJpc3MiOiJodHRwczovL3Nzby5jcC5tZWdhZm9uLnJ1IiwiYXVkIjpbImh0dHBzOi8vZGF0YS1hcGkuY3AubWVnYWZvbi5ydSIsImh0dHBzOi8vYmlsbGluZy1hcGkuY3AubWVnYWZvbi5ydSIsImh0dHBzOi8vc2ltcGxlLWFwaS5jcC5tZWdhZm9uLnJ1IiwiaHR0cHM6Ly9jYWxsYXBpLmNwLm1lZ2Fmb24ucnUiXSwic3ViIjoiQ29tYWdpY0RCfG1lZ2Fmb258OTM2MTU0fDMwMDg2Iiwic3ViZCI6eyJwcm9qZWN0IjoibWVnYWZvbiIsImFwcF9pZCI6OTM2MTU0LCJjdXN0b21lcl9pZCI6NDEzNCwidXNlcl9pZCI6MzAwODYsImxvZ2luIjoiQVBJQHN5c3RlbS52YXRzOTM2MTU0LmNwLm1lZ2Fmb24ucnUiLCJpc19zeXN0ZW0iOmZhbHNlfSwiY2xpZW50X2lkIjoiaHR0cHM6Ly9zaW1wbGUtYXBpLmNwLm1lZ2Fmb24ucnUiLCJpYXQiOjE3ODQxNzc2MTUsImFjdCI6eyJjbGllbnRfaWQiOiJodHRwczovL3NpbXBsZS1hcGkuY3AubWVnYWZvbi5ydSJ9LCJub3RfdHJ1c3RlZF9kZXZpY2UiOmZhbHNlLCJleHAiOjQ5Mzc3Nzc2MTV9.mavEv1dWVdR2EutzBGEZUmysfJ0K3KgSKl_UX5963lxeI9alWGVeOmNGGTkUXaTRcQ2lT2PCnMcb_5MfAb0NNuHN22UHh2n9gp94F4KwkDDkq2LkvobUSSBM4HgM9TP7rzYvjwnqJBg0w9ZOy-BrDO80bApkP8BT6hh3BQtxmaEpk9myiXDCzo0TEfsXhHsL_MH0zd5svx4uEoW-VZTSFqJTRzyxfkHifkIRupvqnJkXHonEglUxTQ6mfzdXVgvDWl7ko2TRKoPV5o1LxuTVUlPD5qPrPtVvkFYpNhhoP8Ofx-tNkKXcj7Y5JXCKY_k7xlYJrgxyyC00KWyh-XigBGgbZmmNA6RbLQhJcsHHwOhp4p4KJl724PcLXnSD3_gFdAJYaP77qrllYz7b34SZgJZqD2G4biJ0y444-GME7fSvK5I9HvFdD_Kj04mezMst0z-4oyUQMy9q7hJsnZmWn0uA9YWTZMboNlrzGM_jk1PppGkkNb1gIqjPe1LpuyWvMFf4ZiWAPnL3ZzW80C5PYG0ZcyglHAe_HqzqMMwK0JPhTouBKd6FfYgZMrfZ4WBoPoEDWuGyaOAyj0tZgR99yRdAZdGy3ELbBmG0Mv5fmB11xaLJV3lfzRetDXWhkcKgZZjAdqeulyVZg0UL1Pk6PBQB54OJYlF1vKtzrHjLyZY..."
+    },
+    {
+      "id": "log-1785218035436-17",
+      "timestamp": "2026-07-28T05:53:55.436Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.mgf_calls на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218035420-570",
+      "timestamp": "2026-07-28T05:53:55.420Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "[Авто-Поиск] Поиск реальной ссылки записи для ID 72184540 (интервал: 2026-07-27 20:53:23 - 2026-07-28 20:53:23)..."
+    },
+    {
+      "id": "log-1785218035390-267",
+      "timestamp": "2026-07-28T05:53:55.390Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Найден динамический ID отчета истории звонков: 133186"
+    },
+    {
+      "id": "log-1785218035070-222",
+      "timestamp": "2026-07-28T05:53:55.070Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "[Авто-Опрос АТС] Найдено и импортировано новых звонков: 1."
+    },
+    {
+      "id": "log-1785218035035-731",
+      "timestamp": "2026-07-28T05:53:55.035Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Отправка JSON-RPC запроса get.reports_list на https://data-api.cp.megafon.ru/v2.0..."
+    },
+    {
+      "id": "log-1785218035014-271",
+      "timestamp": "2026-07-28T05:53:55.014Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Скачивание аудиозаписи звонка megafon-real-72184540 для ИИ-анализа..."
+    },
+    {
+      "id": "log-1785218034997-859",
+      "timestamp": "2026-07-28T05:53:54.997Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Начат импорт записи звонка megafon-real-72184540 от клиента Клиент (3834). Длительность: 11 сек."
+    },
+    {
+      "id": "log-1785218034955-977",
+      "timestamp": "2026-07-28T05:53:54.955Z",
+      "type": "info",
+      "module": "megafon",
+      "message": "Пример полей первого полученного звонка: [\"tags\",\"coaches\",\"call_type\",\"employees\",\"call_status\",\"call_records\",\"received_call\",\"call_direction\",\"call_start_date\",\"call_start_time\",\"employee_rating\",\"call_is_internal\",\"communication_id\",\"call_finish_reason\",\"call_talk_duration\",\"call_total_duration\",\"call_start_date_time\",\"contact_phone_number\",\"is_blacklisted_phone\",\"virtual_phone_number\",\"call_finish_date_time\",\"communication_comment\",\"is_coach_handled_call\",\"virtual_number_comment\",\"call_await_talk_duration\",\"call_processed_mark_duration\",\"communication_comment_author\",\"first_employee_for_internal_call\",\"second_employee_for_internal_call\"]"
+    },
+    {
+      "id": "log-1785218034939-207",
+      "timestamp": "2026-07-28T05:53:54.939Z",
+      "type": "success",
+      "module": "megafon",
+      "message": "Успешно получено 1 звонков из АТС Мегафон."
+    }
+  ],
+  "config": {
+    "activeModel": "GigaChat:Lite",
+    "megafon": {
+      "token": "eyJhbGciOiJSUzI1NiIsImtpZCI6IjB4NzdBNG9PRWdCOUQxU1pNYkpadzkzODdTT0E0Z1k5R3RHSGhQZUUwX0UiLCJ0eXAiOiJKV1QifQ.eyJqdGkiOiJlODNmMTljMy0xMjhjLTQ0ZjQtYTFhMy1iMmRjY2E4YzUzZjciLCJzaWQiOiJlMGNkY2YyMi03YWE2LTQwMzktYTZkMS0xZDRmZjZkMjI1MGEiLCJpc3MiOiJodHRwczovL3Nzby5jcC5tZWdhZm9uLnJ1IiwiYXVkIjpbImh0dHBzOi8vZGF0YS1hcGkuY3AubWVnYWZvbi5ydSIsImh0dHBzOi8vYmlsbGluZy1hcGkuY3AubWVnYWZvbi5ydSIsImh0dHBzOi8vc2ltcGxlLWFwaS5jcC5tZWdhZm9uLnJ1IiwiaHR0cHM6Ly9jYWxsYXBpLmNwLm1lZ2Fmb24ucnUiXSwic3ViIjoiQ29tYWdpY0RCfG1lZ2Fmb258OTM2MTU0fDMwMDg2Iiwic3ViZCI6eyJwcm9qZWN0IjoibWVnYWZvbiIsImFwcF9pZCI6OTM2MTU0LCJjdXN0b21lcl9pZCI6NDEzNCwidXNlcl9pZCI6MzAwODYsImxvZ2luIjoiQVBJQHN5c3RlbS52YXRzOTM2MTU0LmNwLm1lZ2Fmb24ucnUiLCJpc19zeXN0ZW0iOmZhbHNlfSwiY2xpZW50X2lkIjoiaHR0cHM6Ly9zaW1wbGUtYXBpLmNwLm1lZ2Fmb24ucnUiLCJpYXQiOjE3ODQxNzc2MTUsImFjdCI6eyJjbGllbnRfaWQiOiJodHRwczovL3NpbXBsZS1hcGkuY3AubWVnYWZvbi5ydSJ9LCJub3RfdHJ1c3RlZF9kZXZpY2UiOmZhbHNlLCJleHAiOjQ5Mzc3Nzc2MTV9.mavEv1dWVdR2EutzBGEZUmysfJ0K3KgSKl_UX5963lxeI9alWGVeOmNGGTkUXaTRcQ2lT2PCnMcb_5MfAb0NNuHN22UHh2n9gp94F4KwkDDkq2LkvobUSSBM4HgM9TP7rzYvjwnqJBg0w9ZOy-BrDO80bApkP8BT6hh3BQtxmaEpk9myiXDCzo0TEfsXhHsL_MH0zd5svx4uEoW-VZTSFqJTRzyxfkHifkIRupvqnJkXHonEglUxTQ6mfzdXVgvDWl7ko2TRKoPV5o1LxuTVUlPD5qPrPtVvkFYpNhhoP8Ofx-tNkKXcj7Y5JXCKY_k7xlYJrgxyyC00KWyh-XigBGgbZmmNA6RbLQhJcsHHwOhp4p4KJl724PcLXnSD3_gFdAJYaP77qrllYz7b34SZgJZqD2G4biJ0y444-GME7fSvK5I9HvFdD_Kj04mezMst0z-4oyUQMy9q7hJsnZmWn0uA9YWTZMboNlrzGM_jk1PppGkkNb1gIqjPe1LpuyWvMFf4ZiWAPnL3ZzW80C5PYG0ZcyglHAe_HqzqMMwK0JPhTouBKd6FfYgZMrfZ4WBoPoEDWuGyaOAyj0tZgR99yRdAZdGy3ELbBmG0Mv5fmB11xaLJV3lfzRetDXWhkcKgZZjAdqeulyVZg0UL1Pk6PBQB54OJYlF1vKtzrHjLyZY",
+      "webhookUrl": "/api/calls/webhook",
+      "autoImport": true,
+      "active": true,
+      "pollingEnabled": true,
+      "pollingIntervalMinutes": 15,
+      "lastPollingTime": "2026-07-28T06:14:23.415Z",
+      "lkLogin": "admin@vats936154.cp.megafon.ru ",
+      "lkPassword": "LIQ28liq28!"
+    },
+    "vk": {
+      "token": "vk1.a.vNHA5T7pI2bCALnx-AN9GHZZ1eJd8g4h5tJxyac1RJP6iS0dl3HDqslLx-fjZFyB1k8YL5-3HxAJRdOqAlDx7cyRZXoDsucB2St_NA3KkbwbphRl1cFZXcRz4BaMLkDAYAeKOqOJ3sz6UTeDY-3CdOzWw-T_BBDLtKMpr711L8mLW4l9Qh8nN8aDPBjWHj3tt15IwRGw6QcyermveUJtJw",
+      "chatId": "586924534",
+      "enabled": true,
+      "template": "🔔 *Анализ звонка #{call_id}*\n📅 *Дата и время (UTC+4):* {call_date_time}\n⏱️ *Длительность:* {duration}\n\n👤 *Клиент:* {client_name}\n📞 *Оценка оператора:* {operator_score}/10\n💬 *Резюме:* {summary}\n⚠️ *Конфликт:* {is_dispute_text} ({dispute_reason})\n📋 *Обещания менеджера:* {promises}\n💡 *Рекомендации:* {recommendations}"
+    },
+    "yclients": {
+      "userToken": "yclients_user_token_example_777",
+      "partnerToken": "yclients_partner_token_example_888",
+      "salonId": "987654",
+      "enabled": true
+    },
+    "isServerStopped": true,
+    "default_gigachat_model": "GigaChat:Lite"
+  }
+}

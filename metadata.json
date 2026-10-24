@@ -1,0 +1,10 @@
+{
+  "name": "Remix Remix CallQA AI_RU",
+  "description": "ИИ-помощник по расшифровке телефонных звонков, автоматическому анализу, оценке работы операторов и интеграции с АТС Мегафон, VK и Yclients  с использованием Yandex.GPT",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
