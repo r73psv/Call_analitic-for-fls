@@ -84,7 +84,12 @@ adminRouter.get('/credentials', async (req: Request, res: Response) => {
       s3Configured: !!(creds.s3AccessKey || process.env.S3_ACCESS_KEY),
 
       // Мегафон ВАТС
+      megafonApiVersion: creds.megafonApiVersion || store.config.megafon.apiVersion || process.env.MEGAFON_API_VERSION || 'json_rpc',
       megafonToken: creds.megafonToken || store.config.megafon.token || '',
+      megafonRestDomain: creds.megafonRestDomain || store.config.megafon.restDomain || process.env.MEGAFON_REST_DOMAIN || '',
+      megafonRestToken: creds.megafonRestToken || store.config.megafon.restToken || process.env.MEGAFON_REST_TOKEN || '',
+      megafonCrmToken: creds.megafonCrmToken || store.config.megafon.crmToken || process.env.MEGAFON_CRM_TOKEN || '',
+      megafonRestPollingPeriod: store.config.megafon.restPollingPeriod || 'today',
       megafonLkLogin: creds.megafonLkLogin || store.config.megafon.lkLogin || '',
       megafonLkPassword: creds.megafonLkPassword || store.config.megafon.lkPassword || '',
       megafonWebhookUrl: store.config.megafon.webhookUrl || '/api/calls/webhook',
@@ -323,10 +328,34 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
     }
 
     // 4. Мегафон ВАТС
+    if (body.megafonApiVersion !== undefined) {
+      const v = body.megafonApiVersion === 'rest_wcgp' ? 'rest_wcgp' : 'json_rpc';
+      store.config.megafon.apiVersion = v;
+      creds.megafonApiVersion = v;
+      process.env.MEGAFON_API_VERSION = v;
+    }
     if (body.megafonToken !== undefined) {
       creds.megafonToken = String(body.megafonToken).trim();
       store.config.megafon.token = creds.megafonToken;
       process.env.MEGAFON_TOKEN = creds.megafonToken;
+    }
+    if (body.megafonRestDomain !== undefined) {
+      creds.megafonRestDomain = String(body.megafonRestDomain).trim();
+      store.config.megafon.restDomain = creds.megafonRestDomain;
+      process.env.MEGAFON_REST_DOMAIN = creds.megafonRestDomain;
+    }
+    if (body.megafonRestToken !== undefined) {
+      creds.megafonRestToken = String(body.megafonRestToken).trim();
+      store.config.megafon.restToken = creds.megafonRestToken;
+      process.env.MEGAFON_REST_TOKEN = creds.megafonRestToken;
+    }
+    if (body.megafonCrmToken !== undefined) {
+      creds.megafonCrmToken = String(body.megafonCrmToken).trim();
+      store.config.megafon.crmToken = creds.megafonCrmToken;
+      process.env.MEGAFON_CRM_TOKEN = creds.megafonCrmToken;
+    }
+    if (body.megafonRestPollingPeriod !== undefined) {
+      store.config.megafon.restPollingPeriod = body.megafonRestPollingPeriod;
     }
     if (body.megafonLkLogin !== undefined) {
       creds.megafonLkLogin = String(body.megafonLkLogin).trim();

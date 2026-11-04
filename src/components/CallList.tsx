@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { CallRecord } from '../types.js';
 import { getTagBadgeStyle } from './CallDetails.js';
+import { deduplicateCalls } from '../services/callUtils.js';
 
 interface CallListProps {
   calls: CallRecord[];
@@ -41,15 +42,20 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
   const [showExtendedFilters, setShowExtendedFilters] = useState(true);
   const [isClearingDemo, setIsClearingDemo] = useState(false);
 
+  // Clean deduplicated calls list
+  const uniqueCalls = useMemo(() => {
+    return deduplicateCalls(calls || []);
+  }, [calls]);
+
   // Check if any demo calls exist
   const hasDemoCalls = useMemo(() => {
-    return calls.some(c => c.is_demo || c.call_id === 'megafon-call-89101' || c.call_id === 'megafon-call-89102');
-  }, [calls]);
+    return uniqueCalls.some(c => c.is_demo || c.call_id === 'megafon-call-89101' || c.call_id === 'megafon-call-89102');
+  }, [uniqueCalls]);
 
   // Available unique tags across all calls
   const availableTags = useMemo(() => {
     const tagSet = new Set<string>();
-    calls.forEach(c => {
+    uniqueCalls.forEach(c => {
       if (Array.isArray(c.tags)) {
         c.tags.forEach(t => {
           if (t && typeof t === 'string' && t.trim()) {
@@ -59,7 +65,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
       }
     });
     return Array.from(tagSet).sort((a, b) => a.localeCompare(b, 'ru'));
-  }, [calls]);
+  }, [uniqueCalls]);
 
   // Quick statistics calculation for preset chip badges
   const presetStats = useMemo(() => {
@@ -71,7 +77,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
     let missed = 0;
     let processing = 0;
 
-    calls.forEach(call => {
+    uniqueCalls.forEach(call => {
       if (call.key_facts?.is_dispute) disputes++;
       if (call.booking_status === 'согласие' || call.key_facts?.call_outcome === 'запись') booked++;
       if (call.booking_status === 'отказ' || call.key_facts?.call_outcome === 'отказ') declined++;
@@ -84,13 +90,17 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
     });
 
     return { disputes, booked, declined, lowScore, topScore, missed, processing };
-  }, [calls]);
+  }, [uniqueCalls]);
 
-  // Main filter engine
+  // Main filter engine with deduplication protection
   const filteredCalls = useMemo(() => {
     const term = searchTerm.toLowerCase().trim();
+    const seenIds = new Set<string>();
 
-    return calls.filter(call => {
+    return uniqueCalls.filter(call => {
+      if (!call || !call.call_id) return false;
+      if (seenIds.has(call.call_id)) return false;
+
       // 1. Keyword search (client name, masked phone, operator, ID, summary, transcript, issues, comments, promises)
       if (term) {
         const maskedPhone = (call.client_phone_masked || '').toLowerCase();
@@ -190,9 +200,10 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
         if (!Array.isArray(call.tags) || !call.tags.includes(tagFilter)) return false;
       }
 
+      seenIds.add(call.call_id);
       return true;
     });
-  }, [calls, searchTerm, quickPreset, statusFilter, scoreFilter, modelFilter, disputeFilter, tagFilter]);
+  }, [uniqueCalls, searchTerm, quickPreset, statusFilter, scoreFilter, modelFilter, disputeFilter, tagFilter]);
 
   // Count active filters
   const activeFiltersCount = useMemo(() => {
@@ -338,7 +349,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
           >
             <span>Все</span>
             <span className={`text-[10px] px-1 py-0.2 rounded-full ${quickPreset === 'all' ? 'bg-slate-700 text-slate-200' : 'bg-slate-200/60 text-slate-600'}`}>
-              {calls.length}
+              {uniqueCalls.length}
             </span>
           </button>
 

@@ -978,6 +978,7 @@
   "config": {
     "activeModel": "GigaChat:Lite",
     "megafon": {
+      "apiVersion": "rest_wcgp",
       "token": "eyJhbGciOiJSUzI1NiIsImtpZCI6IjB4NzdBNG9PRWdCOUQxU1pNYkpadzkzODdTT0E0Z1k5R3RHSGhQZUUwX0UiLCJ0eXAiOiJKV1QifQ.eyJqdGkiOiJlODNmMTljMy0xMjhjLTQ0ZjQtYTFhMy1iMmRjY2E4YzUzZjciLCJzaWQiOiJlMGNkY2YyMi03YWE2LTQwMzktYTZkMS0xZDRmZjZkMjI1MGEiLCJpc3MiOiJodHRwczovL3Nzby5jcC5tZWdhZm9uLnJ1IiwiYXVkIjpbImh0dHBzOi8vZGF0YS1hcGkuY3AubWVnYWZvbi5ydSIsImh0dHBzOi8vYmlsbGluZy1hcGkuY3AubWVnYWZvbi5ydSIsImh0dHBzOi8vc2ltcGxlLWFwaS5jcC5tZWdhZm9uLnJ1IiwiaHR0cHM6Ly9jYWxsYXBpLmNwLm1lZ2Fmb24ucnUiXSwic3ViIjoiQ29tYWdpY0RCfG1lZ2Fmb258OTM2MTU0fDMwMDg2Iiwic3ViZCI6eyJwcm9qZWN0IjoibWVnYWZvbiIsImFwcF9pZCI6OTM2MTU0LCJjdXN0b21lcl9pZCI6NDEzNCwidXNlcl9pZCI6MzAwODYsImxvZ2luIjoiQVBJQHN5c3RlbS52YXRzOTM2MTU0LmNwLm1lZ2Fmb24ucnUiLCJpc19zeXN0ZW0iOmZhbHNlfSwiY2xpZW50X2lkIjoiaHR0cHM6Ly9zaW1wbGUtYXBpLmNwLm1lZ2Fmb24ucnUiLCJpYXQiOjE3ODQxNzc2MTUsImFjdCI6eyJjbGllbnRfaWQiOiJodHRwczovL3NpbXBsZS1hcGkuY3AubWVnYWZvbi5ydSJ9LCJub3RfdHJ1c3RlZF9kZXZpY2UiOmZhbHNlLCJleHAiOjQ5Mzc3Nzc2MTV9.mavEv1dWVdR2EutzBGEZUmysfJ0K3KgSKl_UX5963lxeI9alWGVeOmNGGTkUXaTRcQ2lT2PCnMcb_5MfAb0NNuHN22UHh2n9gp94F4KwkDDkq2LkvobUSSBM4HgM9TP7rzYvjwnqJBg0w9ZOy-BrDO80bApkP8BT6hh3BQtxmaEpk9myiXDCzo0TEfsXhHsL_MH0zd5svx4uEoW-VZTSFqJTRzyxfkHifkIRupvqnJkXHonEglUxTQ6mfzdXVgvDWl7ko2TRKoPV5o1LxuTVUlPD5qPrPtVvkFYpNhhoP8Ofx-tNkKXcj7Y5JXCKY_k7xlYJrgxyyC00KWyh-XigBGgbZmmNA6RbLQhJcsHHwOhp4p4KJl724PcLXnSD3_gFdAJYaP77qrllYz7b34SZgJZqD2G4biJ0y444-GME7fSvK5I9HvFdD_Kj04mezMst0z-4oyUQMy9q7hJsnZmWn0uA9YWTZMboNlrzGM_jk1PppGkkNb1gIqjPe1LpuyWvMFf4ZiWAPnL3ZzW80C5PYG0ZcyglHAe_HqzqMMwK0JPhTouBKd6FfYgZMrfZ4WBoPoEDWuGyaOAyj0tZgR99yRdAZdGy3ELbBmG0Mv5fmB11xaLJV3lfzRetDXWhkcKgZZjAdqeulyVZg0UL1Pk6PBQB54OJYlF1vKtzrHjLyZY",
       "webhookUrl": "/api/calls/webhook",
       "autoImport": true,
@@ -986,7 +987,11 @@
       "pollingIntervalMinutes": 15,
       "lastPollingTime": "2026-07-28T06:14:23.415Z",
       "lkLogin": "admin@vats936154.cp.megafon.ru ",
-      "lkPassword": "LIQ28liq28!"
+      "lkPassword": "LIQ28liq28!",
+      "restDomain": "https://vats903670.megapbx.ru/crmapi/v1",
+      "restToken": "8f3cc1ee-0c96-4a8d-a1cf-19286c09b850",
+      "crmToken": "8f3cc1ee-0c96-4a8d-a1cf-19286c09b850",
+      "restPollingPeriod": "today"
     },
     "vk": {
       "token": "vk1.a.vNHA5T7pI2bCALnx-AN9GHZZ1eJd8g4h5tJxyac1RJP6iS0dl3HDqslLx-fjZFyB1k8YL5-3HxAJRdOqAlDx7cyRZXoDsucB2St_NA3KkbwbphRl1cFZXcRz4BaMLkDAYAeKOqOJ3sz6UTeDY-3CdOzWw-T_BBDLtKMpr711L8mLW4l9Qh8nN8aDPBjWHj3tt15IwRGw6QcyermveUJtJw",

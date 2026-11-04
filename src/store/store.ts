@@ -10,6 +10,7 @@ import { encrypt, decrypt } from './crypto-store.js';
 import { CallRecord, LogEntry, SystemConfig, AccessLogEntry, User, SystemNotification, ConsentRecord } from '../types.js';
 import { getInitialUsers } from './user-store.js';
 import { readConsentStoreSync, setConsentStoreDirect } from './consent-store.js';
+import { deduplicateCalls } from '../services/callUtils.js';
 
 const DATA_PATH_ENC = process.env.DATA_PATH_ENC || path.join(process.cwd(), 'data', 'data-store.enc');
 const DATA_PATH_JSON = process.env.DATA_PATH || path.join(process.cwd(), 'data', 'data-store.json');
@@ -27,6 +28,10 @@ export interface AppDatabase {
 
 export function getDefaultConfig(): SystemConfig {
   const megafonToken = (process.env.MEGAFON_TOKEN || '').trim();
+  const megafonApiVersion = ((process.env.MEGAFON_API_VERSION as any) === 'rest_wcgp' ? 'rest_wcgp' : 'json_rpc');
+  const megafonRestDomain = (process.env.MEGAFON_REST_DOMAIN || '').trim();
+  const megafonRestToken = (process.env.MEGAFON_REST_TOKEN || '').trim();
+  const megafonCrmToken = (process.env.MEGAFON_CRM_TOKEN || '').trim();
   const vkToken = (process.env.VK_TOKEN || '').trim();
   const vkChatId = (process.env.VK_CHAT_ID || '').trim();
   const yclientsUserToken = (process.env.YCLIENTS_USER_TOKEN || '').trim();
@@ -38,13 +43,18 @@ export function getDefaultConfig(): SystemConfig {
     default_gigachat_model: (process.env.GIGACHAT_MODEL as any) || 'GigaChat:Lite',
     salonName: (process.env.SALON_NAME || 'Лик 28').trim(),
     megafon: {
+      apiVersion: megafonApiVersion,
       token: megafonToken,
       webhookUrl: '/api/calls/webhook',
-      autoImport: Boolean(megafonToken),
-      active: Boolean(megafonToken),
-      pollingEnabled: Boolean(megafonToken),
+      autoImport: Boolean(megafonToken || megafonRestToken),
+      active: Boolean(megafonToken || megafonRestToken),
+      pollingEnabled: Boolean(megafonToken || megafonRestToken),
       pollingIntervalMinutes: 5,
       lastPollingTime: new Date().toISOString(),
+      restDomain: megafonRestDomain,
+      restToken: megafonRestToken,
+      crmToken: megafonCrmToken,
+      restPollingPeriod: 'today',
     },
     vk: {
       token: vkToken,
@@ -158,6 +168,9 @@ export function readStoreSync(): AppDatabase {
       if (payload && payload.encrypted && payload.iv && payload.tag) {
         const decryptedStr = decrypt(payload);
         const parsed: AppDatabase = JSON.parse(decryptedStr);
+        if (Array.isArray(parsed.calls)) {
+          parsed.calls = deduplicateCalls(parsed.calls);
+        }
         if (!parsed.users || parsed.users.length === 0) {
           parsed.users = getInitialUsers();
         }
@@ -186,6 +199,7 @@ export function readStoreSync(): AppDatabase {
         return memCache;
       } else if (payload && Array.isArray(payload.calls)) {
         // Raw JSON accidentally stored as .enc
+        payload.calls = deduplicateCalls(payload.calls);
         if (!payload.users || payload.users.length === 0) {
           payload.users = getInitialUsers();
         }
@@ -225,6 +239,9 @@ export function readStoreSync(): AppDatabase {
       const parsed: AppDatabase = JSON.parse(raw);
       if (parsed && (Array.isArray(parsed.calls) || Array.isArray(parsed.users))) {
         console.log('[Store] Восстановлена база данных из локального backup mirror (data-store.backup.json)');
+        if (Array.isArray(parsed.calls)) {
+          parsed.calls = deduplicateCalls(parsed.calls);
+        }
         if (Array.isArray(parsed.consents) && parsed.consents.length > 0) {
           const currentStore = readConsentStoreSync();
           if (currentStore.consents.length === 0) {
@@ -251,6 +268,7 @@ export function readStoreSync(): AppDatabase {
       const raw = readFileSync(legacyPath, 'utf-8');
       const parsed: AppDatabase = JSON.parse(raw);
       if (parsed && Array.isArray(parsed.calls)) {
+        parsed.calls = deduplicateCalls(parsed.calls);
         if (!parsed.users || parsed.users.length === 0) {
           parsed.users = getInitialUsers();
         }
@@ -300,6 +318,9 @@ export async function readStore(): Promise<AppDatabase> {
       if (payload && payload.encrypted && payload.iv && payload.tag) {
         const decryptedStr = decrypt(payload);
         const parsed: AppDatabase = JSON.parse(decryptedStr);
+        if (Array.isArray(parsed.calls)) {
+          parsed.calls = deduplicateCalls(parsed.calls);
+        }
         if (!parsed.users || parsed.users.length === 0) {
           parsed.users = getInitialUsers();
         }
@@ -312,6 +333,7 @@ export async function readStore(): Promise<AppDatabase> {
         memCache = parsed;
         return memCache;
       } else if (payload && Array.isArray(payload.calls)) {
+        payload.calls = deduplicateCalls(payload.calls);
         if (!payload.users || payload.users.length === 0) {
           payload.users = getInitialUsers();
         }
@@ -331,6 +353,9 @@ export async function readStore(): Promise<AppDatabase> {
       const parsed: AppDatabase = JSON.parse(raw);
       if (parsed && (Array.isArray(parsed.calls) || Array.isArray(parsed.users))) {
         console.log('[Store] Асинхронно восстановлена база данных из backup mirror');
+        if (Array.isArray(parsed.calls)) {
+          parsed.calls = deduplicateCalls(parsed.calls);
+        }
         memCache = parsed;
         return memCache;
       }
@@ -346,6 +371,7 @@ export async function readStore(): Promise<AppDatabase> {
       const raw = readFileSync(legacyPath, 'utf-8');
       const parsed: AppDatabase = JSON.parse(raw);
       if (parsed && Array.isArray(parsed.calls)) {
+        parsed.calls = deduplicateCalls(parsed.calls);
         if (!parsed.users || parsed.users.length === 0) {
           parsed.users = getInitialUsers();
         }
@@ -389,6 +415,11 @@ export async function writeStore(data: AppDatabase): Promise<void> {
     data.consents = cs.consents;
   }
 
+  // Always deduplicate calls before saving to memCache or disk
+  if (Array.isArray(data.calls)) {
+    data.calls = deduplicateCalls(data.calls);
+  }
+
   memCache = data;
   const dir = path.dirname(DATA_PATH_ENC);
   if (!existsSync(dir)) {
@@ -399,6 +430,7 @@ export async function writeStore(data: AppDatabase): Promise<void> {
   writeQueue = writeQueue.then(async () => {
     // Sort calls newest first
     if (Array.isArray(data.calls)) {
+      data.calls = deduplicateCalls(data.calls);
       data.calls.sort((a, b) => {
         const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
         const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;

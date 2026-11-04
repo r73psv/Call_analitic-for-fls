@@ -9,9 +9,9 @@ import {
   HelpCircle, Calendar, RefreshCw, Clock, Globe, Zap, 
   CheckCircle2, AlertTriangle, Trash2, Cpu, Eye, EyeOff, Save, AlertCircle,
   Upload, FileCode, Folder, Copy, Check, FileCheck, ChevronDown, ChevronUp,
-  Building2, RotateCcw
+  Building2, RotateCcw, Users, PhoneCall, Radio
 } from 'lucide-react';
-import { GigaChatModel } from '../../types.js';
+import { GigaChatModel, MegafonApiVersion } from '../../types.js';
 import { S3SyncPanel } from '../S3SyncPanel.js';
 
 interface CredentialsSettingsProps {
@@ -88,13 +88,29 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
   const [s3TestResult, setS3TestResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
   // Мегафон ВАТС
+  const [megafonApiVersion, setMegafonApiVersion] = useState<MegafonApiVersion>('json_rpc');
   const [megafonToken, setMegafonToken] = useState('');
+  const [megafonRestDomain, setMegafonRestDomain] = useState('');
+  const [megafonRestToken, setMegafonRestToken] = useState('');
+  const [megafonCrmToken, setMegafonCrmToken] = useState('');
+  const [megafonRestPollingPeriod, setMegafonRestPollingPeriod] = useState<'today' | 'yesterday' | 'this_week' | 'last_week' | 'this_month' | 'last_month'>('today');
   const [megafonLkLogin, setMegafonLkLogin] = useState('');
   const [megafonLkPassword, setMegafonLkPassword] = useState('');
   const [megafonWebhookUrl, setMegafonWebhookUrl] = useState('/api/calls/webhook');
   const [megafonAutoImport, setMegafonAutoImport] = useState(true);
   const [megafonPollingEnabled, setMegafonPollingEnabled] = useState(false);
   const [megafonPollingIntervalMinutes, setMegafonPollingIntervalMinutes] = useState(15);
+  const [copiedWebhook, setCopiedWebhook] = useState(false);
+
+  // WCGP REST testing & actions
+  const [testingWcgp, setTestingWcgp] = useState(false);
+  const [wcgpTestResult, setWcgpTestResult] = useState<{ ok: boolean; message: string; accounts?: any[]; tip?: string } | null>(null);
+  const [syncingWcgpHistory, setSyncingWcgpHistory] = useState(false);
+  const [wcgpHistoryResult, setWcgpHistoryResult] = useState<string | null>(null);
+  const [testCallPhone, setTestCallPhone] = useState('+79');
+  const [testCallUser, setTestCallUser] = useState('');
+  const [makingCall, setMakingCall] = useState(false);
+  const [makeCallResult, setMakeCallResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   // Период ручного опроса Мегафон
   const [fromDate, setFromDate] = useState(() => {
@@ -178,7 +194,12 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
       setS3KeyPrefix(data.s3KeyPrefix || 'lik28/data/');
       setS3Region(data.s3Region || 'ru-1');
 
+      setMegafonApiVersion(data.megafonApiVersion || 'json_rpc');
       setMegafonToken(data.megafonToken || '');
+      setMegafonRestDomain(data.megafonRestDomain || '');
+      setMegafonRestToken(data.megafonRestToken || '');
+      setMegafonCrmToken(data.megafonCrmToken || '');
+      setMegafonRestPollingPeriod(data.megafonRestPollingPeriod || 'today');
       setMegafonLkLogin(data.megafonLkLogin || '');
       setMegafonLkPassword(data.megafonLkPassword || '');
       setMegafonWebhookUrl(data.megafonWebhookUrl || '/api/calls/webhook');
@@ -254,7 +275,12 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
         s3BucketName,
         s3KeyPrefix,
         s3Region,
+        megafonApiVersion,
         megafonToken,
+        megafonRestDomain,
+        megafonRestToken,
+        megafonCrmToken,
+        megafonRestPollingPeriod,
         megafonLkLogin,
         megafonLkPassword,
         megafonWebhookUrl,
@@ -519,6 +545,114 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
       setVkTestResult({ ok: false, msg: err.message });
     } finally {
       setTestingVk(false);
+    }
+  };
+
+  const handleCopyWebhookUrl = (path: string = '/crm_integration.php') => {
+    try {
+      const fullUrl = `${window.location.origin}${path}`;
+      navigator.clipboard.writeText(fullUrl);
+      setCopiedWebhook(true);
+      setTimeout(() => setCopiedWebhook(false), 2500);
+    } catch {
+      // fallback
+    }
+  };
+
+  const handleTestWcgpConnection = async () => {
+    setTestingWcgp(true);
+    setWcgpTestResult(null);
+    try {
+      const res = await fetch('/api/megafon/rest/test-connection', {
+        method: 'POST',
+        headers: {
+          ...getHeaders(),
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          domain: megafonRestDomain,
+          token: megafonRestToken || megafonToken
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setWcgpTestResult({
+          ok: true,
+          message: data.message || `Связь установлена! Найдено сотрудников: ${data.count}`,
+          accounts: data.accounts
+        });
+      } else {
+        setWcgpTestResult({
+          ok: false,
+          message: data.error || 'Ошибка подключения к ВАТС',
+          tip: data.tip
+        });
+      }
+    } catch (err: any) {
+      setWcgpTestResult({ ok: false, message: err.message || 'Ошибка сети' });
+    } finally {
+      setTestingWcgp(false);
+    }
+  };
+
+  const handleFetchWcgpHistory = async () => {
+    setSyncingWcgpHistory(true);
+    setWcgpHistoryResult(null);
+    try {
+      const res = await fetch('/api/megafon/rest/fetch-history', {
+        method: 'POST',
+        headers: {
+          ...getHeaders(),
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          domain: megafonRestDomain,
+          token: megafonRestToken || megafonToken,
+          period: megafonRestPollingPeriod
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setWcgpHistoryResult(data.message || `Выгружено звонков: ${data.found}, новых: ${data.importedCount}`);
+        setTimeout(() => window.location.reload(), 2000);
+      } else {
+        setWcgpHistoryResult(`Ошибка: ${data.error || 'Не удалось выгрузить историю'}`);
+      }
+    } catch (err: any) {
+      setWcgpHistoryResult(`Ошибка: ${err.message || err}`);
+    } finally {
+      setSyncingWcgpHistory(false);
+    }
+  };
+
+  const handleMakeTestCall = async () => {
+    if (!testCallUser || !testCallPhone) return;
+    setMakingCall(true);
+    setMakeCallResult(null);
+    try {
+      const res = await fetch('/api/megafon/rest/make-call', {
+        method: 'POST',
+        headers: {
+          ...getHeaders(),
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          user: testCallUser,
+          phone: testCallPhone,
+          domain: megafonRestDomain,
+          token: megafonRestToken || megafonToken
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setMakeCallResult({ ok: true, message: `Вызов инициирован! ID: ${data.callId}` });
+      } else {
+        setMakeCallResult({ ok: false, message: data.error || 'Ошибка инициации звонка' });
+      }
+    } catch (err: any) {
+      setMakeCallResult({ ok: false, message: err.message || 'Ошибка сети' });
+    } finally {
+      setMakingCall(false);
     }
   };
 
@@ -1395,14 +1529,23 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
 
         {/* 4. ВАТС Мегафон */}
         <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs space-y-4">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-3 border-b border-slate-100 gap-3">
             <div className="flex items-center gap-2.5">
               <div className="p-2 bg-green-50 text-green-700 rounded-xl">
                 <Globe className="w-5 h-5" />
               </div>
               <div>
-                <h4 className="font-bold text-slate-900 text-xs">ВАТС Мегафон</h4>
-                <p className="text-[11px] text-slate-500">Автоматический импорт аудиозаписей звонков</p>
+                <div className="flex items-center gap-2">
+                  <h4 className="font-bold text-slate-900 text-xs">ВАТС Мегафон</h4>
+                  <span className={`text-[10px] font-semibold uppercase px-2 py-0.5 rounded-md border ${
+                    megafonApiVersion === 'rest_wcgp' 
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200' 
+                      : 'bg-blue-50 text-blue-800 border-blue-200'
+                  }`}>
+                    {megafonApiVersion === 'rest_wcgp' ? 'REST CRM API (WCGP)' : 'JSON-RPC 2.0 (Классика)'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500">Автоматический импорт аудиозаписей звонков и двухсторонний обмен</p>
               </div>
             </div>
             <label className="flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer">
@@ -1416,18 +1559,405 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
             </label>
           </div>
 
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">
-              Токен авторизации вебхуков Мегафон (MEGAFON_TOKEN)
+          {/* Переключатель протокола ВАТС Мегафон */}
+          <div className="p-3 bg-slate-50 rounded-xl border border-slate-200/90 space-y-2">
+            <label className="block text-xs font-bold text-slate-800">
+              Переключатель версии протокола АТС:
             </label>
-            <input
-              type={showKeys ? 'text' : 'password'}
-              value={megafonToken}
-              onChange={(e) => setMegafonToken(e.target.value)}
-              placeholder="Токен из раздела интеграции АТС Мегафон"
-              className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono"
-            />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setMegafonApiVersion('json_rpc')}
+                className={`p-3 rounded-xl text-left transition-all border flex flex-col gap-1 cursor-pointer ${
+                  megafonApiVersion === 'json_rpc'
+                    ? 'bg-white text-slate-900 border-indigo-400 shadow-xs ring-2 ring-indigo-200/60'
+                    : 'bg-white/60 text-slate-600 border-slate-200 hover:bg-white'
+                }`}
+                id="btn-switch-megafon-json-rpc"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-xs text-slate-900 flex items-center gap-1.5">
+                    <Radio className={`w-3.5 h-3.5 ${megafonApiVersion === 'json_rpc' ? 'text-indigo-600' : 'text-slate-400'}`} />
+                    Версия 1: JSON-RPC 2.0 (Классика)
+                  </span>
+                  <span className="text-[9px] bg-slate-100 text-slate-600 px-1.5 py-0.2 rounded font-mono">
+                    data-api.cp.megafon.ru
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  Классическая версия. Работает через отчеты <code>get.mgf_calls</code>, API-токен и фоновый опрос.
+                </p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setMegafonApiVersion('rest_wcgp')}
+                className={`p-3 rounded-xl text-left transition-all border flex flex-col gap-1 cursor-pointer ${
+                  megafonApiVersion === 'rest_wcgp'
+                    ? 'bg-white text-slate-900 border-emerald-400 shadow-xs ring-2 ring-emerald-200/60'
+                    : 'bg-white/60 text-slate-600 border-slate-200 hover:bg-white'
+                }`}
+                id="btn-switch-megafon-rest-wcgp"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-xs text-slate-900 flex items-center gap-1.5">
+                    <Radio className={`w-3.5 h-3.5 ${megafonApiVersion === 'rest_wcgp' ? 'text-emerald-600' : 'text-slate-400'}`} />
+                    Версия 2: REST CRM API (WCGP)
+                  </span>
+                  <span className="text-[9px] bg-emerald-100 text-emerald-800 px-1.5 py-0.2 rounded font-mono font-bold">
+                    По документации
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  Новая версия. Мгновенные вебхуки (<code>history</code>, <code>event</code>, <code>contact</code>) и выгрузка CSV.
+                </p>
+              </button>
+            </div>
           </div>
+
+          {/* Конфигурация для Версии 1: JSON-RPC */}
+          {megafonApiVersion === 'json_rpc' && (
+            <div className="p-4 bg-slate-50/80 rounded-xl border border-slate-200 space-y-3">
+              <div className="flex items-center justify-between font-bold text-slate-800 pb-2 border-b border-slate-200">
+                <span>Параметры подключения JSON-RPC 2.0:</span>
+                <span className="text-[10px] font-mono text-slate-500">https://data-api.cp.megafon.ru/v2.0</span>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Токен авторизации вебхуков Мегафон (MEGAFON_TOKEN)
+                </label>
+                <input
+                  type={showKeys ? 'text' : 'password'}
+                  value={megafonToken}
+                  onChange={(e) => setMegafonToken(e.target.value)}
+                  placeholder="Токен из раздела интеграции АТС Мегафон"
+                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Логин ЛК Мегафон</label>
+                  <input
+                    type="text"
+                    value={megafonLkLogin}
+                    onChange={(e) => setMegafonLkLogin(e.target.value)}
+                    placeholder="+79..."
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Пароль ЛК Мегафон</label>
+                  <input
+                    type={showKeys ? 'text' : 'password'}
+                    value={megafonLkPassword}
+                    onChange={(e) => setMegafonLkPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
+                  />
+                </div>
+              </div>
+
+              {/* Ручной опрос за период */}
+              <div className="bg-white p-3 rounded-xl border border-slate-200 space-y-2">
+                <span className="text-[11px] font-bold text-slate-700 block">
+                  Импорт звонков Мегафон за диапазон дат (JSON-RPC):
+                </span>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div>
+                    <span className="text-[10px] text-slate-500">С:</span>
+                    <input
+                      type="datetime-local"
+                      value={fromDate}
+                      onChange={(e) => setFromDate(e.target.value)}
+                      className="w-full p-1.5 bg-slate-50 border border-slate-300 rounded-lg text-[11px]"
+                    />
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-500">По:</span>
+                    <input
+                      type="datetime-local"
+                      value={toDate}
+                      onChange={(e) => setToDate(e.target.value)}
+                      className="w-full p-1.5 bg-slate-50 border border-slate-300 rounded-lg text-[11px]"
+                    />
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleManualPeriodSync}
+                  disabled={syncingPeriod}
+                  className="w-full py-1.5 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg text-xs font-bold text-indigo-700 transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <Calendar className="w-3.5 h-3.5" />
+                  {syncingPeriod ? 'Загрузка звонков...' : 'Запустить импорт за период'}
+                </button>
+                {syncPeriodResult && (
+                  <p className="text-[11px] text-center font-medium text-emerald-700">{syncPeriodResult}</p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Конфигурация для Версии 2: REST CRM API (WCGP) */}
+          {megafonApiVersion === 'rest_wcgp' && (
+            <div className="space-y-4">
+              <div className="p-4 bg-emerald-50/50 rounded-xl border border-emerald-200 space-y-3">
+                <div className="flex items-center justify-between font-bold text-slate-800 pb-2 border-b border-emerald-200/80">
+                  <span className="flex items-center gap-1.5 text-emerald-950 font-bold">
+                    <Globe className="w-4 h-4 text-emerald-600" />
+                    Параметры REST API Виртуальной АТС (WCGP):
+                  </span>
+                  <span className="text-[10px] font-mono text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded font-semibold">
+                    crmapi/v1 или /sys/crm_api.wcgp
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Адрес API или домен Виртуальной АТС:
+                    </label>
+                    <input
+                      type="text"
+                      value={megafonRestDomain}
+                      onChange={(e) => setMegafonRestDomain(e.target.value)}
+                      placeholder="https://vats903670.megapbx.ru/crmapi/v1 или vats903670.megapbx.ru"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono"
+                      id="input-megafon-rest-domain"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      Поддерживается полный URL из кабинета ВАТС (<code>https://vatsXXXXX.megapbx.ru/crmapi/v1</code>) или домен.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Ключ (token) Виртуальной АТС:
+                    </label>
+                    <input
+                      type={showKeys ? 'text' : 'password'}
+                      value={megafonRestToken}
+                      onChange={(e) => setMegafonRestToken(e.target.value)}
+                      placeholder="Ключ авторизации из ЛК ВАТС..."
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono"
+                      id="input-megafon-rest-token"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      Ключ авторизации из раздела интеграции АТС Мегафон.
+                    </p>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-bold text-slate-700">
+                      Ключ для авторизации в CRM (crm_token):
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const token = Array.from(window.crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
+                        setMegafonCrmToken(token);
+                      }}
+                      className="text-[10px] text-emerald-700 hover:underline font-semibold"
+                    >
+                      Сгенерировать случайный токен
+                    </button>
+                  </div>
+                  <input
+                    type={showKeys ? 'text' : 'password'}
+                    value={megafonCrmToken}
+                    onChange={(e) => setMegafonCrmToken(e.target.value)}
+                    placeholder="Токен для валидации входящих вебхуков от Мегафон..."
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono"
+                    id="input-megafon-crm-token"
+                  />
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    Этот же токен укажите в поле «Ключ для авторизации в CRM» в веб-кабинете Мегафон.
+                  </p>
+                </div>
+
+                {/* Проверка связи с ВАТС Мегафон */}
+                <div className="pt-2 border-t border-emerald-200/70">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={handleTestWcgpConnection}
+                      disabled={testingWcgp}
+                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition-all shadow-xs flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                      id="btn-test-wcgp-connection"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${testingWcgp ? 'animate-spin' : ''}`} />
+                      {testingWcgp ? 'Проверка соединения...' : 'Проверить связь с ВАТС (список сотрудников)'}
+                    </button>
+
+                    {wcgpTestResult && (
+                      <div className="flex flex-col gap-1 w-full sm:w-auto">
+                        <span className={`text-[11px] font-semibold px-2.5 py-1 rounded-md ${
+                          wcgpTestResult.ok ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
+                        }`}>
+                          {wcgpTestResult.message}
+                        </span>
+                        {wcgpTestResult.tip && (
+                          <p className="text-[10px] text-amber-700 bg-amber-50 p-2 rounded border border-amber-200 leading-relaxed max-w-xl">
+                            💡 <strong>Пояснение:</strong> {wcgpTestResult.tip}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Список сотрудников, если загружен */}
+                  {wcgpTestResult?.accounts && wcgpTestResult.accounts.length > 0 && (
+                    <div className="mt-2.5 p-3 bg-white rounded-lg border border-emerald-200 space-y-1.5 max-h-40 overflow-y-auto">
+                      <div className="font-bold text-slate-800 text-[11px] flex items-center gap-1">
+                        <Users className="w-3.5 h-3.5 text-emerald-600" />
+                        Сотрудники в АТС Мегафон ({wcgpTestResult.accounts.length}):
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                        {wcgpTestResult.accounts.map((acc: any, idx: number) => (
+                          <div key={idx} className="p-1.5 bg-slate-50 rounded border border-slate-100 text-[11px] flex items-center justify-between">
+                            <span className="font-medium text-slate-800">{acc.realName || acc.name}</span>
+                            <span className="font-mono text-[10px] text-slate-500 bg-white px-1.5 py-0.5 rounded border border-slate-200">
+                              {acc.ext ? `доб. ${acc.ext}` : (acc.telnum || acc.name)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Адрес Webhook для веб-кабинета Мегафон */}
+              <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
+                    <Key className="w-4 h-4 text-indigo-600" />
+                    Webhook URL для настройки в веб-кабинете Мегафон ВАТС:
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleCopyWebhookUrl('/crm_integration.php')}
+                    className="px-2.5 py-1 bg-white hover:bg-slate-100 text-indigo-700 border border-slate-200 rounded-md text-[11px] font-semibold flex items-center gap-1 transition-all cursor-pointer"
+                    id="btn-copy-wcgp-webhook-url"
+                  >
+                    {copiedWebhook ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                    {copiedWebhook ? 'Скопировано!' : 'Скопировать URL'}
+                  </button>
+                </div>
+
+                <div className="p-2 bg-white rounded-lg border border-slate-200 font-mono text-[11px] text-indigo-900 break-all select-all">
+                  {typeof window !== 'undefined' ? `${window.location.origin}/crm_integration.php` : '/crm_integration.php'}
+                </div>
+
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  Скопируйте этот URL и вставьте в поле <b>«Адрес вашей CRM»</b> в личном кабинете Виртуальной АТС Мегафон. Также поддерживаются адреса <code>/api/calls/webhook</code> и <code>/api/vats/webhook</code>.
+                </p>
+              </div>
+
+              {/* Ручная выгрузка истории звонков по REST (cmd=history CSV) */}
+              <div className="p-4 bg-white rounded-xl border border-slate-200 space-y-2.5">
+                <div className="flex items-center justify-between font-bold text-slate-800 text-xs">
+                  <span className="flex items-center gap-1.5">
+                    <Calendar className="w-4 h-4 text-slate-500" />
+                    Выгрузка истории звонков из ВАТС (команда cmd=history CSV):
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <select
+                    value={megafonRestPollingPeriod}
+                    onChange={(e: any) => setMegafonRestPollingPeriod(e.target.value)}
+                    className="p-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-medium"
+                    id="select-megafon-rest-period"
+                  >
+                    <option value="today">Сегодня (today)</option>
+                    <option value="yesterday">Вчера (yesterday)</option>
+                    <option value="this_week">Текущая неделя (this_week)</option>
+                    <option value="last_week">Прошлая неделя (last_week)</option>
+                    <option value="this_month">Текущий месяц (this_month)</option>
+                    <option value="last_month">Прошлый месяц (last_month)</option>
+                  </select>
+
+                  <button
+                    type="button"
+                    onClick={handleFetchWcgpHistory}
+                    disabled={syncingWcgpHistory}
+                    className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                    id="btn-fetch-wcgp-history"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${syncingWcgpHistory ? 'animate-spin' : ''}`} />
+                    {syncingWcgpHistory ? 'Загрузка истории...' : 'Выгрузить звонки по REST (CSV)'}
+                  </button>
+                </div>
+
+                {wcgpHistoryResult && (
+                  <p className={`text-[11px] font-medium p-2 rounded border ${
+                    wcgpHistoryResult.startsWith('Ошибка') 
+                      ? 'bg-rose-50 border-rose-200 text-rose-800' 
+                      : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  }`}>
+                    {wcgpHistoryResult}
+                  </p>
+                )}
+              </div>
+
+              {/* Тестовый вызов из CRM (команда cmd=makeCall) */}
+              <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-2.5">
+                <div className="flex items-center gap-1.5 font-bold text-slate-800 text-xs">
+                  <PhoneCall className="w-4 h-4 text-emerald-600" />
+                  Тестирование исходящего звонка из CRM (команда makeCall):
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                  <div>
+                    <label className="block text-[11px] text-slate-600 mb-0.5">Логин сотрудника в АТС:</label>
+                    <input
+                      type="text"
+                      value={testCallUser}
+                      onChange={(e) => setTestCallUser(e.target.value)}
+                      placeholder="Например: andy или 701"
+                      className="w-full p-2 bg-white border border-slate-300 rounded-lg text-xs"
+                      id="input-test-call-user"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-600 mb-0.5">Номер телефона клиента:</label>
+                    <input
+                      type="text"
+                      value={testCallPhone}
+                      onChange={(e) => setTestCallPhone(e.target.value)}
+                      placeholder="+79..."
+                      className="w-full p-2 bg-white border border-slate-300 rounded-lg text-xs font-mono"
+                      id="input-test-call-phone"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleMakeTestCall}
+                  disabled={makingCall || !testCallUser || !testCallPhone}
+                  className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                  id="btn-test-make-call"
+                >
+                  <PhoneCall className={`w-3.5 h-3.5 ${makingCall ? 'animate-pulse' : ''}`} />
+                  {makingCall ? 'Инициация...' : 'Совершить тестовый вызов (makeCall)'}
+                </button>
+
+                {makeCallResult && (
+                  <p className={`text-[11px] font-medium p-2 rounded border ${
+                    makeCallResult.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-rose-50 border-rose-200 text-rose-800'
+                  }`}>
+                    {makeCallResult.message}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Настройка автоопроса АТС и регулировка интервала */}
           <div className="p-3.5 bg-emerald-50/70 rounded-xl border border-emerald-200 space-y-2.5">
@@ -1440,7 +1970,7 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
                   className="rounded-sm text-emerald-600 focus:ring-emerald-500 w-4 h-4"
                   id="megafon-auto-poll-checkbox"
                 />
-                <span>Автоматический опрос АТС Мегафон</span>
+                <span>Автоматический регулярный опрос АТС Мегафон</span>
               </label>
               <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
                 megafonPollingEnabled ? 'bg-emerald-200 text-emerald-800' : 'bg-slate-200 text-slate-600'
@@ -1453,7 +1983,7 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
               <div className="flex items-center justify-between mb-1.5">
                 <label className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
                   <Clock className="w-3.5 h-3.5 text-emerald-600" />
-                  Интервал автоопроса АТС:
+                  Интервал фонового опроса АТС:
                 </label>
                 <span className="text-xs font-bold text-emerald-700 font-mono">
                   {megafonPollingIntervalMinutes} мин.
@@ -1478,7 +2008,7 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
                       key={mins}
                       type="button"
                       onClick={() => setMegafonPollingIntervalMinutes(mins)}
-                      className={`px-2.5 py-1 text-[11px] rounded-lg font-semibold transition-all ${
+                      className={`px-2.5 py-1 text-[11px] rounded-lg font-semibold transition-all cursor-pointer ${
                         megafonPollingIntervalMinutes === mins
                           ? 'bg-emerald-600 text-white shadow-3xs'
                           : 'bg-white hover:bg-emerald-100 text-slate-700 border border-slate-200'
@@ -1490,71 +2020,9 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
                 </div>
               </div>
               <p className="text-[10px] text-slate-500 mt-1.5 leading-relaxed">
-                Сервер автоматически обращается к API АТС Мегафон каждые {megafonPollingIntervalMinutes} мин. и загружает новые поступившие звонки.
+                Сервер автоматически обращается к API АТС Мегафон каждые {megafonPollingIntervalMinutes} мин. и загружает новые звонки.
               </p>
             </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Логин ЛК Мегафон</label>
-              <input
-                type="text"
-                value={megafonLkLogin}
-                onChange={(e) => setMegafonLkLogin(e.target.value)}
-                placeholder="+79..."
-                className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Пароль ЛК Мегафон</label>
-              <input
-                type={showKeys ? 'text' : 'password'}
-                value={megafonLkPassword}
-                onChange={(e) => setMegafonLkPassword(e.target.value)}
-                placeholder="••••••••"
-                className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs"
-              />
-            </div>
-          </div>
-
-          {/* Ручной опрос за период */}
-          <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-2">
-            <span className="text-[11px] font-bold text-slate-700 block">
-              Импорт звонков Мегафон за диапазон дат:
-            </span>
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <div>
-                <span className="text-[10px] text-slate-500">С:</span>
-                <input
-                  type="datetime-local"
-                  value={fromDate}
-                  onChange={(e) => setFromDate(e.target.value)}
-                  className="w-full p-1.5 bg-white border border-slate-300 rounded-lg text-[11px]"
-                />
-              </div>
-              <div>
-                <span className="text-[10px] text-slate-500">По:</span>
-                <input
-                  type="datetime-local"
-                  value={toDate}
-                  onChange={(e) => setToDate(e.target.value)}
-                  className="w-full p-1.5 bg-white border border-slate-300 rounded-lg text-[11px]"
-                />
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={handleManualPeriodSync}
-              disabled={syncingPeriod}
-              className="w-full py-1.5 bg-white hover:bg-slate-100 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 transition-colors flex items-center justify-center gap-1.5"
-            >
-              <Calendar className="w-3.5 h-3.5" />
-              {syncingPeriod ? 'Загрузка звонков...' : 'Запустить импорт за период'}
-            </button>
-            {syncPeriodResult && (
-              <p className="text-[11px] text-center font-medium text-emerald-700">{syncPeriodResult}</p>
-            )}
           </div>
         </div>
 

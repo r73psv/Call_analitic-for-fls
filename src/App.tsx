@@ -27,6 +27,7 @@ import { NotificationsBell } from './components/NotificationsBell.js';
 import { EditSalonNameModal } from './components/EditSalonNameModal.js';
 
 import { CallRecord, DashboardStats, SystemConfig, LogEntry, GigaChatModel, UserRole } from './types.js';
+import { deduplicateCalls } from './services/callUtils.js';
 
 interface CurrentUserInfo {
   id: string;
@@ -168,13 +169,14 @@ export default function App() {
         safeFetchJson<LogEntry[]>('/api/logs', {}, authToken, userRole).catch(() => [])
       ]);
 
-      setCalls(callsData);
+      const uniqueCalls = deduplicateCalls(callsData || []);
+      setCalls(uniqueCalls);
       setStats(statsData);
       setConfig(configData);
       setLogs(logsData || []);
 
-      if (callsData.length > 0 && !selectedCallId) {
-        setSelectedCallId(callsData[0].call_id);
+      if (uniqueCalls.length > 0 && !selectedCallId) {
+        setSelectedCallId(uniqueCalls[0].call_id);
       }
       setError(null);
     } catch (err: any) {

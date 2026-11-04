@@ -63,6 +63,10 @@ export interface SystemCredentials {
   storeEncryptionKey?: string;
   salonName?: string;
   megafonToken?: string;
+  megafonApiVersion?: MegafonApiVersion;
+  megafonRestDomain?: string;
+  megafonRestToken?: string;
+  megafonCrmToken?: string;
   megafonLkLogin?: string;
   megafonLkPassword?: string;
   vkToken?: string;
@@ -175,7 +179,10 @@ export interface AccessLogEntry {
   ip: string;
 }
 
+export type MegafonApiVersion = 'json_rpc' | 'rest_wcgp';
+
 export interface MegafonConfig {
+  apiVersion?: MegafonApiVersion;
   token: string;
   webhookUrl: string;
   autoImport: boolean;
@@ -185,6 +192,12 @@ export interface MegafonConfig {
   lastPollingTime?: string;
   lkLogin?: string;
   lkPassword?: string;
+
+  // Режим REST API ВАТС (WCGP)
+  restDomain?: string;
+  restToken?: string;
+  crmToken?: string;
+  restPollingPeriod?: 'today' | 'yesterday' | 'this_week' | 'last_week' | 'this_month' | 'last_month';
 }
 
 export interface VkConfig {
@@ -311,7 +324,7 @@ export interface AnalysisResult {
   recommendations: string | string[];
 }
 
-export type NotificationType = 'call_analyzed' | 'dispute_detected' | 'booking_confirmed' | 'call_failed';
+export type NotificationType = 'call_analyzed' | 'dispute_detected' | 'booking_confirmed' | 'call_failed' | 'incoming_call';
 
 export interface SystemNotification {
   id: string;

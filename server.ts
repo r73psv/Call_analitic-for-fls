@@ -27,6 +27,16 @@ import { isGigaChatConfigured } from './src/services/gigachat-auth.js';
 import { hydrateFromS3, scheduleSyncToS3, manualSync, getSyncStatus } from './src/services/s3-sync.js';
 import { generateCallAuditPdf, generatePeriodStatsPdf, PeriodStatsReportData } from './src/services/pdfReport.js';
 import { generateCallCsv } from './src/services/csvExport.js';
+import { deduplicateCalls } from './src/services/callUtils.js';
+import {
+  getWcgpAccounts,
+  getWcgpGroups,
+  makeWcgpCall,
+  getWcgpHistory,
+  parseWcgpDate,
+  normalizeWcgpDomain,
+  sendWcgpRequest
+} from './src/services/megafonRest.js';
 
 // Setup environment variables
 dotenv.config();
@@ -2247,7 +2257,13 @@ async function importCallRecord(extCall: any): Promise<boolean> {
       console.warn('[152-ФЗ] Ошибка регистрации согласия короткого звонка:', cErr);
     }
 
-    db.calls.unshift(newCall);
+    const shortIdx = db.calls.findIndex((c: any) => c.call_id === newCall.call_id);
+    if (shortIdx !== -1) {
+      db.calls[shortIdx] = newCall;
+    } else {
+      db.calls.unshift(newCall);
+    }
+    db.calls = deduplicateCalls(db.calls);
     writeDb(db);
     appendLog('info', 'megafon', `Импортирован короткий звонок ${extCall.call_id} (${extCall.duration_seconds} сек < 10 сек): разговор не состоялся, оценка не выставляется.`);
     return true;
@@ -2294,7 +2310,13 @@ async function importCallRecord(extCall: any): Promise<boolean> {
       console.warn('[152-ФЗ] Ошибка авто-регистрации согласия:', cErr);
     }
 
-    db.calls.unshift(newCall);
+    const fullIdx = db.calls.findIndex((c: any) => c.call_id === newCall.call_id);
+    if (fullIdx !== -1) {
+      db.calls[fullIdx] = newCall;
+    } else {
+      db.calls.unshift(newCall);
+    }
+    db.calls = deduplicateCalls(db.calls);
     writeDb(db);
     appendLog('info', 'megafon', `Начат импорт записи звонка ${extCall.call_id} от клиента ${extCall.client_name}. Длительность: ${extCall.duration_seconds} сек.`);
 
@@ -2435,7 +2457,38 @@ setInterval(async () => {
 
       // 2. Query Megafon API for calls from lastPollDate (with 1h safety overlap) to now
       const queryFromDate = hasCallsInDb ? new Date(lastPollDate.getTime() - 1 * 3600000) : new Date(Date.now() - 86400000 * 30);
-      const newCalls = await getRealMegafonCalls(queryFromDate, now, token);
+      let newCalls: any[] = [];
+
+      if (megafon?.apiVersion === 'rest_wcgp') {
+        const domain = megafon.restDomain || process.env.MEGAFON_REST_DOMAIN || '';
+        const restToken = megafon.restToken || token;
+        if (domain && restToken) {
+          const rows = await getWcgpHistory(domain, restToken, {
+            period: megafon.restPollingPeriod || undefined,
+            start: !megafon.restPollingPeriod ? queryFromDate : undefined,
+            end: !megafon.restPollingPeriod ? now : undefined
+          });
+          for (const row of rows) {
+            const isAnswered = row.type !== 'missed' && row.duration > 0;
+            const lastFour = row.client ? row.client.slice(-4) : '';
+            newCalls.push({
+              call_id: row.uid.startsWith('megafon-') ? row.uid : `megafon-real-${row.uid}`,
+              timestamp: row.start,
+              duration_seconds: row.duration,
+              is_answered: isAnswered,
+              type: row.type === 'out' ? 'outgoing' : 'incoming',
+              client_phone: row.client,
+              full_phone: row.client,
+              client_name: lastFour ? `Клиент (${lastFour})` : 'Клиент',
+              operator_name: row.account || 'Администратор',
+              record_play_uri: row.record && row.record.startsWith('http') ? row.record : undefined,
+              status: isAnswered ? 'запись готова' : 'пропущен'
+            });
+          }
+        }
+      } else {
+        newCalls = await getRealMegafonCalls(queryFromDate, now, token);
+      }
 
       let importedCount = 0;
       for (const extCall of newCalls) {
@@ -2475,7 +2528,7 @@ async function performS3Hydration(): Promise<boolean> {
     const data = await hydrateFromS3();
     if (data) {
       const db = readStoreSync();
-      if (Array.isArray(data.calls)) db.calls = data.calls;
+      if (Array.isArray(data.calls)) db.calls = deduplicateCalls(data.calls);
       if (Array.isArray(data.logs)) db.logs = data.logs;
       if (data.config) db.config = { ...db.config, ...data.config };
       if (Array.isArray(data.users) && data.users.length > 0) db.users = data.users;
@@ -2715,15 +2768,30 @@ app.post('/api/calls/fetch-period', async (req, res) => {
 const handleAtsPoll = async (req: express.Request, res: express.Response) => {
   const db = readDb();
   const token = getEffectiveMegafonToken(db);
+  const isRestMode = db.config?.megafon?.apiVersion === 'rest_wcgp';
+  const effectiveRestDomain = db.config?.megafon?.restDomain || process.env.MEGAFON_REST_DOMAIN || '';
+  const effectiveRestToken = db.config?.megafon?.restToken || token;
 
-  if (!token || token.includes('example') || token.includes('token') || token.length < 10) {
-    appendLog('warning', 'megafon', 'Попытка опроса АТС: токен Мегафон не настроен или содержит шаблонное значение.');
-    return res.status(400).json({
-      success: false,
-      error: 'Токен АТС Мегафон не настроен. Пожалуйста, укажите действующий токен в панели администратора (вкладка «Токены и ключи»).',
-      imported: 0,
-      importedCount: 0
-    });
+  if (isRestMode) {
+    if (!effectiveRestDomain || !effectiveRestToken) {
+      appendLog('warning', 'megafon', 'Попытка опроса ВАТС REST: не настроен домен или токен ВАТС.');
+      return res.status(400).json({
+        success: false,
+        error: 'В режиме REST API Мегафон необходимо указать домен ВАТС (например: vatsXXXXX.megapbx.ru) и токен.',
+        imported: 0,
+        importedCount: 0
+      });
+    }
+  } else {
+    if (!token || token.includes('example') || token.includes('token') || token.length < 10) {
+      appendLog('warning', 'megafon', 'Попытка опроса АТС: токен Мегафон не настроен или содержит шаблонное значение.');
+      return res.status(400).json({
+        success: false,
+        error: 'Токен АТС Мегафон не настроен. Пожалуйста, укажите действующий токен в панели администратора (вкладка «Токены и ключи»).',
+        imported: 0,
+        importedCount: 0
+      });
+    }
   }
 
   let fromDate: Date;
@@ -2742,10 +2810,40 @@ const handleAtsPoll = async (req: express.Request, res: express.Response) => {
     toDate = new Date();
   }
 
-  appendLog('info', 'megafon', `Ручной запуск опроса АТС с ${fromDate.toLocaleString()} по ${toDate.toLocaleString()}`);
+  appendLog('info', 'megafon', `Ручной запуск опроса АТС (${isRestMode ? 'REST WCGP' : 'JSON-RPC'}) с ${fromDate.toLocaleString()} по ${toDate.toLocaleString()}`);
 
   try {
-    const newCalls = await getRealMegafonCalls(fromDate, toDate, token);
+    let newCalls: any[] = [];
+
+    if (isRestMode) {
+      appendLog('info', 'megafon', `[ВАТС REST] Выгрузка истории звонков из ${effectiveRestDomain}...`);
+      const period = req.body?.period || db.config?.megafon?.restPollingPeriod;
+      const rows = await getWcgpHistory(effectiveRestDomain, effectiveRestToken, {
+        period: period || undefined,
+        start: !period ? fromDate : undefined,
+        end: !period ? toDate : undefined
+      });
+      appendLog('info', 'megafon', `[ВАТС REST] Получено записей звонков из истории: ${rows.length}`);
+      for (const row of rows) {
+        const isAnswered = row.type !== 'missed' && row.duration > 0;
+        const lastFour = row.client ? row.client.slice(-4) : '';
+        newCalls.push({
+          call_id: row.uid.startsWith('megafon-') ? row.uid : `megafon-real-${row.uid}`,
+          timestamp: row.start,
+          duration_seconds: row.duration,
+          is_answered: isAnswered,
+          type: row.type === 'out' ? 'outgoing' : 'incoming',
+          client_phone: row.client,
+          full_phone: row.client,
+          client_name: lastFour ? `Клиент (${lastFour})` : 'Клиент',
+          operator_name: row.account || 'Администратор',
+          record_play_uri: row.record && row.record.startsWith('http') ? row.record : undefined,
+          status: isAnswered ? 'запись готова' : 'пропущен'
+        });
+      }
+    } else {
+      newCalls = await getRealMegafonCalls(fromDate, toDate, token);
+    }
 
     let importedCount = 0;
     for (const extCall of newCalls) {
@@ -2778,6 +2876,296 @@ const handleAtsPoll = async (req: express.Request, res: express.Response) => {
   }
 };
 
+// Megafon VATS REST CRM API Webhook Handler (по приложенной документации REST API ВАТС)
+async function handleMegafonWcgpWebhook(req: express.Request, res: express.Response) {
+  const db = readDb();
+  const megafon = db.config?.megafon;
+
+  // Extract parameters (support urlencoded body, json body, query)
+  const body = req.body || {};
+  const query = req.query || {};
+  const cmd = String(body.cmd || query.cmd || '').trim().toLowerCase();
+
+  // Validate crm_token if configured
+  const incomingCrmToken = String(body.crm_token || query.crm_token || '').trim();
+  const expectedCrmToken = String(megafon?.crmToken || process.env.MEGAFON_CRM_TOKEN || '').trim();
+
+  if (expectedCrmToken && incomingCrmToken && incomingCrmToken !== expectedCrmToken) {
+    appendLog('warning', 'megafon', `[ВАТС REST] Отклонен вебхук ${cmd}: передан неверный crm_token (${incomingCrmToken}).`);
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+
+  appendLog('info', 'megafon', `[ВАТС REST Webhook] Получена команда: cmd=${cmd || 'не указан'}`);
+
+  // 4.1 Команда history (POST)
+  if (cmd === 'history') {
+    const callid = String(body.callid || query.callid || '').trim();
+    if (!callid) {
+      return res.status(400).json({ error: 'Invalid parameters: missing callid' });
+    }
+
+    const typeStr = String(body.type || query.type || 'in').toLowerCase();
+    const status = String(body.status || query.status || 'Success').trim();
+    const phone = String(body.phone || query.phone || '').trim();
+    const user = String(body.user || query.user || '').trim();
+    const groupRealName = String(body.groupRealName || query.groupRealName || '').trim();
+    const ext = String(body.ext || query.ext || '').trim();
+    const duration = Number(body.duration || query.duration || 0);
+    const link = String(body.link || query.link || '').trim();
+    const start = String(body.start || query.start || '').trim();
+
+    const isAnswered = status === 'Success' && duration > 0;
+    const direction = typeStr === 'out' ? 'outgoing' : 'incoming';
+
+    const lastFour = phone.slice(-4);
+    const clientName = lastFour ? `Клиент (${lastFour})` : 'Клиент';
+    const operatorName = user ? (ext ? `${user} (доб. ${ext})` : user) : (groupRealName || 'Администратор');
+
+    const extCall: any = {
+      call_id: callid.startsWith('megafon-') ? callid : `megafon-real-${callid}`,
+      timestamp: parseWcgpDate(start),
+      duration_seconds: duration,
+      is_answered: isAnswered,
+      type: direction,
+      client_phone: phone,
+      full_phone: phone,
+      client_name: clientName,
+      operator_name: operatorName,
+      record_play_uri: link && link.startsWith('http') ? link : undefined,
+      status: isAnswered ? 'запись готова' : 'пропущен'
+    };
+
+    try {
+      const imported = await importCallRecord(extCall);
+      appendLog(
+        'success',
+        'megafon',
+        `[ВАТС REST Webhook] Звонок #${callid} успешно принят (статус: ${status}, длит: ${duration}с, ${imported ? 'новый' : 'обновлен'}).`
+      );
+      return res.status(200).send('OK');
+    } catch (err: any) {
+      appendLog('error', 'megafon', `[ВАТС REST Webhook] Ошибка сохранения #${callid}: ${err.message || err}`);
+      return res.status(500).json({ error: 'Internal server error', details: err.message });
+    }
+  }
+
+  // 4.2 Команда event (POST)
+  if (cmd === 'event') {
+    const eventType = String(body.type || query.type || '').trim().toUpperCase();
+    const phone = String(body.phone || query.phone || '').trim();
+    const user = String(body.user || query.user || '').trim();
+    const callid = String(body.callid || query.callid || '').trim();
+
+    appendLog('info', 'megafon', `[ВАТС Событие] ${eventType}: звонок #${callid}, клиент ${maskPhone(phone)}, сотрудник ${user || 'не указан'}`);
+
+    if (eventType === 'INCOMING') {
+      broadcastNotification({
+        id: `ev-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        call_id: callid ? `megafon-real-${callid}` : `call-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        type: 'incoming_call',
+        title: 'Входящий звонок в салон',
+        message: `Поступил входящий звонок от клиента ${maskPhone(phone)}. Ответственный сотрудник: ${user || 'свободный администратор'}.`,
+        client_name: maskPhone(phone),
+        client_phone_masked: maskPhone(phone),
+        operator_name: user || 'Администратор',
+        read: false
+      });
+    }
+
+    return res.status(200).send('OK');
+  }
+
+  // 4.3 Команда contact (POST)
+  if (cmd === 'contact') {
+    const phone = String(body.phone || query.phone || '').trim();
+    let contactName = 'Клиент';
+    let responsible = 'admin';
+
+    if (phone) {
+      const cleanPhone = phone.replace(/[^0-9]/g, '');
+      const existingCall = db.calls.find((c: any) => {
+        const p = String(c.client_phone || c.full_phone || '').replace(/[^0-9]/g, '');
+        return p && cleanPhone && (p.endsWith(cleanPhone) || cleanPhone.endsWith(p));
+      });
+
+      if (existingCall) {
+        contactName = existingCall.client_name || `Клиент (${cleanPhone.slice(-4)})`;
+        responsible = existingCall.operator_name || 'admin';
+      } else {
+        contactName = `Клиент (${cleanPhone.slice(-4)})`;
+      }
+    }
+
+    return res.status(200).json({
+      contact_name: contactName,
+      responsible
+    });
+  }
+
+  // 4.4 Команда rating (POST)
+  if (cmd === 'rating') {
+    const callid = String(body.callid || query.callid || '').trim();
+    const ratingVal = Number(body.rating || query.rating || 0);
+
+    if (callid) {
+      const targetId = callid.startsWith('megafon-') ? callid : `megafon-real-${callid}`;
+      const cIdx = db.calls.findIndex((c: any) => c.call_id === targetId || c.call_id === callid);
+      if (cIdx !== -1) {
+        db.calls[cIdx].operator_score = ratingVal;
+        writeDb(db);
+        appendLog('info', 'megafon', `[ВАТС Оценка] Для звонка #${callid} зафиксирована оценка клиента: ${ratingVal}/10`);
+      }
+    }
+
+    return res.status(200).send('OK');
+  }
+
+  if (req.method === 'GET' && !cmd) {
+    return res.status(200).json({
+      status: 'ok',
+      service: 'CallQA Megafon REST Integration Webhook',
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  return res.status(400).json({ error: 'Invalid parameters: unsupported cmd' });
+}
+
+// REST Webhook endpoints (поддерживаются все пути из документации и настроек)
+app.all('/crm_integration.php', handleMegafonWcgpWebhook);
+app.all('/api/calls/webhook', handleMegafonWcgpWebhook);
+app.all('/api/vats/webhook', handleMegafonWcgpWebhook);
+app.all('/api/megafon/rest/webhook', handleMegafonWcgpWebhook);
+
+// Dedicated endpoints for REST WCGP testing and management
+app.post('/api/megafon/rest/test-connection', async (req, res) => {
+  const db = readDb();
+  const domain = req.body?.domain || db.config.megafon?.restDomain || process.env.MEGAFON_REST_DOMAIN || '';
+  const token = req.body?.token || db.config.megafon?.restToken || db.config.megafon?.token || process.env.MEGAFON_REST_TOKEN || '';
+
+  if (!domain || !token) {
+    return res.status(400).json({
+      success: false,
+      error: 'Укажите домен ВАТС (например: vatsXXXXX.megapbx.ru) и токен авторизации.'
+    });
+  }
+
+  try {
+    const accounts = await getWcgpAccounts(domain, token);
+    appendLog('success', 'megafon', `[ВАТС REST] Проверка связи успешна. Загружено сотрудников: ${accounts.length}`);
+    return res.json({
+      success: true,
+      domain,
+      accounts,
+      count: accounts.length,
+      message: `Связь с ВАТС Мегафон установлена. Найдено сотрудников: ${accounts.length}.`
+    });
+  } catch (err: any) {
+    const msg = err.message || String(err);
+    const isTimeout = msg.toLowerCase().includes('таймаут') || msg.toLowerCase().includes('timeout') || msg.toLowerCase().includes('econnrefused') || msg.toLowerCase().includes('etimedout');
+    const tip = isTimeout
+      ? 'Сервер ВАТС Мегафон (megapbx.ru) не ответил на прямой запрос из текущего облачного окружения: шлюз Мегафона фильтрует входящий трафик по GeoIP (разрешает подключения только с IP-адресов РФ). Входящие вебхуки от ВАТС на /crm_integration.php при этом принимаются штатно. На боевом сервере в РФ оба направления работают без ограничений.'
+      : undefined;
+
+    appendLog('error', 'megafon', `[ВАТС REST] Ошибка проверки связи: ${msg}`);
+    return res.status(500).json({
+      success: false,
+      error: msg,
+      tip
+    });
+  }
+});
+
+app.post('/api/megafon/rest/groups', async (req, res) => {
+  const db = readDb();
+  const domain = req.body?.domain || db.config.megafon?.restDomain || process.env.MEGAFON_REST_DOMAIN || '';
+  const token = req.body?.token || db.config.megafon?.restToken || db.config.megafon?.token || process.env.MEGAFON_REST_TOKEN || '';
+
+  try {
+    const groups = await getWcgpGroups(domain, token);
+    return res.json({ success: true, groups });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/megafon/rest/make-call', async (req, res) => {
+  const db = readDb();
+  const domain = req.body?.domain || db.config.megafon?.restDomain || process.env.MEGAFON_REST_DOMAIN || '';
+  const token = req.body?.token || db.config.megafon?.restToken || db.config.megafon?.token || process.env.MEGAFON_REST_TOKEN || '';
+  const user = req.body?.user;
+  const phone = req.body?.phone;
+
+  if (!user || !phone) {
+    return res.status(400).json({ success: false, error: 'Параметры user и phone обязательны' });
+  }
+
+  try {
+    const result = await makeWcgpCall(domain, token, user, phone);
+    if (result.success) {
+      appendLog('info', 'megafon', `[ВАТС REST] Инициирован звонок от ${user} на ${phone} (callId: ${result.callId})`);
+    }
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/megafon/rest/fetch-history', async (req, res) => {
+  const db = readDb();
+  const domain = req.body?.domain || db.config.megafon?.restDomain || process.env.MEGAFON_REST_DOMAIN || '';
+  const token = req.body?.token || db.config.megafon?.restToken || db.config.megafon?.token || process.env.MEGAFON_REST_TOKEN || '';
+  const period = req.body?.period || 'today';
+  const type = req.body?.type || 'all';
+
+  if (!domain || !token) {
+    return res.status(400).json({ success: false, error: 'Укажите домен ВАТС и токен авторизации.' });
+  }
+
+  appendLog('info', 'megafon', `[ВАТС REST] Ручной запрос истории звонков за период "${period}"...`);
+
+  try {
+    const rows = await getWcgpHistory(domain, token, { period, type });
+    let importedCount = 0;
+
+    for (const row of rows) {
+      const isAnswered = row.type !== 'missed' && row.duration > 0;
+      const lastFour = row.client ? row.client.slice(-4) : '';
+      const extCall: any = {
+        call_id: row.uid.startsWith('megafon-') ? row.uid : `megafon-real-${row.uid}`,
+        timestamp: row.start,
+        duration_seconds: row.duration,
+        is_answered: isAnswered,
+        type: row.type === 'out' ? 'outgoing' : 'incoming',
+        client_phone: row.client,
+        full_phone: row.client,
+        client_name: lastFour ? `Клиент (${lastFour})` : 'Клиент',
+        operator_name: row.account || 'Администратор',
+        record_play_uri: row.record && row.record.startsWith('http') ? row.record : undefined,
+        status: isAnswered ? 'запись готова' : 'пропущен'
+      };
+      const imported = await importCallRecord(extCall);
+      if (imported) importedCount++;
+    }
+
+    const updatedDb = readDb();
+    await syncConsentsFromCalls(updatedDb.calls);
+    writeDb(updatedDb);
+
+    appendLog('success', 'megafon', `[ВАТС REST] Выгрузка истории завершена: найдено ${rows.length}, импортировано новых ${importedCount}.`);
+    return res.json({
+      success: true,
+      found: rows.length,
+      importedCount,
+      message: `Выгрузка завершена. Найдено звонков: ${rows.length}, импортировано новых: ${importedCount}.`
+    });
+  } catch (err: any) {
+    appendLog('error', 'megafon', `[ВАТС REST] Ошибка выгрузки истории: ${err.message || err}`);
+    return res.status(500).json({ success: false, error: err.message || 'Ошибка выгрузки истории' });
+  }
+});
+
 app.post('/api/calls/fetch-poll', handleAtsPoll);
 app.post('/api/calls/poll-now', handleAtsPoll);
 
@@ -2785,8 +3173,9 @@ app.post('/api/calls/poll-now', handleAtsPoll);
 app.get('/api/calls', (req, res) => {
   const db = readDb();
   const userRole = getCurrentUserRole(req);
+  const rawCalls = deduplicateCalls(db.calls || []);
 
-  const mappedCalls = (db.calls || []).map((c: any) => {
+  const mappedCalls = rawCalls.map((c: any) => {
     const rawPhone = c.client_phone || c.full_phone || '';
     const masked = c.client_phone_masked || maskPhone(rawPhone);
     const consent = getConsentForPhone(rawPhone);
