@@ -620,13 +620,13 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
             )}
           </div>
         ) : (
-          filteredCalls.map((call) => {
+          filteredCalls.map((call, idx) => {
             const isSelected = call.call_id === selectedCallId;
             const displayName = call.client_phone_masked || call.client_name || 'Неизвестный клиент';
 
             return (
               <div
-                key={call.call_id}
+                key={`${call.call_id}-${idx}`}
                 id={`call-card-${call.call_id}`}
                 onClick={() => onSelectCall(call.call_id)}
                 className={`p-4 cursor-pointer text-left transition-all duration-150 relative border-l-3 ${

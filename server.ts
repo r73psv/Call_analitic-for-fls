@@ -2415,9 +2415,11 @@ setInterval(async () => {
     const db = readDb();
     const megafon = db.config?.megafon;
     const token = megafon?.token || (db.config as any)?.credentials?.megafonToken || process.env.MEGAFON_TOKEN || '';
+    const restToken = megafon?.restToken || token || process.env.MEGAFON_REST_TOKEN || '';
+    const activeToken = megafon?.apiVersion === 'rest_wcgp' ? restToken : token;
     const isPollingEnabled = megafon ? (megafon.pollingEnabled !== false && megafon.active !== false) : false;
 
-    if (token && isPollingEnabled) {
+    if (activeToken && isPollingEnabled) {
       const hasCallsInDb = Array.isArray(db.calls) && db.calls.length > 0;
       const defaultPastMs = hasCallsInDb ? 3600000 * 24 : 86400000 * 30;
       const lastPollStr = megafon.lastPollingTime || new Date(Date.now() - defaultPastMs).toISOString();
@@ -2461,9 +2463,8 @@ setInterval(async () => {
 
       if (megafon?.apiVersion === 'rest_wcgp') {
         const domain = megafon.restDomain || process.env.MEGAFON_REST_DOMAIN || '';
-        const restToken = megafon.restToken || token;
         if (domain && restToken) {
-          const rows = await getWcgpHistory(domain, restToken, {
+          const { calls: rows } = await getWcgpHistory(domain, restToken, {
             period: megafon.restPollingPeriod || undefined,
             start: !megafon.restPollingPeriod ? queryFromDate : undefined,
             end: !megafon.restPollingPeriod ? now : undefined
@@ -2818,7 +2819,7 @@ const handleAtsPoll = async (req: express.Request, res: express.Response) => {
     if (isRestMode) {
       appendLog('info', 'megafon', `[ВАТС REST] Выгрузка истории звонков из ${effectiveRestDomain}...`);
       const period = req.body?.period || db.config?.megafon?.restPollingPeriod;
-      const rows = await getWcgpHistory(effectiveRestDomain, effectiveRestToken, {
+      const { calls: rows } = await getWcgpHistory(effectiveRestDomain, effectiveRestToken, {
         period: period || undefined,
         start: !period ? fromDate : undefined,
         end: !period ? toDate : undefined
@@ -3052,20 +3053,33 @@ app.post('/api/megafon/rest/test-connection', async (req, res) => {
   }
 
   try {
-    const accounts = await getWcgpAccounts(domain, token);
-    appendLog('success', 'megafon', `[ВАТС REST] Проверка связи успешна. Загружено сотрудников: ${accounts.length}`);
+    const { accounts, endpointUsed, methodUsed, diagnostics } = await getWcgpAccounts(domain, token);
+    const count = accounts.length;
+    const msg = count > 0
+      ? `Связь с ВАТС Мегафон установлена (${endpointUsed}, ${methodUsed}). Загружено сотрудников: ${count}.`
+      : `Связь с ВАТС Мегафон установлена (${endpointUsed}, ${methodUsed}), но АТС вернула 0 сотрудников. Убедитесь, что в личном кабинете ВАТС заведены пользователи и токен имеет права доступа.`;
+
+    appendLog(
+      count > 0 ? 'success' : 'warning',
+      'megafon',
+      `[ВАТС REST] ${msg}`
+    );
+
     return res.json({
       success: true,
       domain,
       accounts,
-      count: accounts.length,
-      message: `Связь с ВАТС Мегафон установлена. Найдено сотрудников: ${accounts.length}.`
+      count,
+      endpointUsed,
+      methodUsed,
+      diagnostics,
+      message: msg
     });
   } catch (err: any) {
     const msg = err.message || String(err);
     const isTimeout = msg.toLowerCase().includes('таймаут') || msg.toLowerCase().includes('timeout') || msg.toLowerCase().includes('econnrefused') || msg.toLowerCase().includes('etimedout');
     const tip = isTimeout
-      ? 'Сервер ВАТС Мегафон (megapbx.ru) не ответил на прямой запрос из текущего облачного окружения: шлюз Мегафона фильтрует входящий трафик по GeoIP (разрешает подключения только с IP-адресов РФ). Входящие вебхуки от ВАТС на /crm_integration.php при этом принимаются штатно. На боевом сервере в РФ оба направления работают без ограничений.'
+      ? 'Сервер ВАТС Мегафон (megapbx.ru) не ответил на прямой запрос из текущего окружения: шлюз Мегафона фильтрует входящий трафик по GeoIP (разрешает подключения только с IP-адресов РФ). Входящие вебхуки от ВАТС на /crm_integration.php при этом принимаются штатно. На боевом сервере в РФ (Timeweb Cloud) оба направления работают без ограничений.'
       : undefined;
 
     appendLog('error', 'megafon', `[ВАТС REST] Ошибка проверки связи: ${msg}`);
@@ -3116,17 +3130,17 @@ app.post('/api/megafon/rest/fetch-history', async (req, res) => {
   const db = readDb();
   const domain = req.body?.domain || db.config.megafon?.restDomain || process.env.MEGAFON_REST_DOMAIN || '';
   const token = req.body?.token || db.config.megafon?.restToken || db.config.megafon?.token || process.env.MEGAFON_REST_TOKEN || '';
-  const period = req.body?.period || 'today';
+  const period = req.body?.period || db.config.megafon?.restPollingPeriod || 'today';
   const type = req.body?.type || 'all';
 
   if (!domain || !token) {
     return res.status(400).json({ success: false, error: 'Укажите домен ВАТС и токен авторизации.' });
   }
 
-  appendLog('info', 'megafon', `[ВАТС REST] Ручной запрос истории звонков за период "${period}"...`);
+  appendLog('info', 'megafon', `[ВАТС REST] Ручной запрос истории звонков за период "${period}" (домен: ${domain})...`);
 
   try {
-    const rows = await getWcgpHistory(domain, token, { period, type });
+    const { calls: rows, endpointUsed, methodUsed, rawPreview } = await getWcgpHistory(domain, token, { period, type });
     let importedCount = 0;
 
     for (const row of rows) {
@@ -3153,12 +3167,21 @@ app.post('/api/megafon/rest/fetch-history', async (req, res) => {
     await syncConsentsFromCalls(updatedDb.calls);
     writeDb(updatedDb);
 
-    appendLog('success', 'megafon', `[ВАТС REST] Выгрузка истории завершена: найдено ${rows.length}, импортировано новых ${importedCount}.`);
+    const logMsg = rows.length > 0
+      ? `[ВАТС REST] Выгрузка истории успешна (${endpointUsed}, ${methodUsed}): найдено ${rows.length}, импортировано новых ${importedCount}.`
+      : `[ВАТС REST] Выгрузка истории завершена (${endpointUsed}, ${methodUsed}): найдено 0 звонков за период "${period}". (Сырой ответ: ${rawPreview || 'пусто'}).`;
+
+    appendLog(rows.length > 0 ? 'success' : 'info', 'megafon', logMsg);
     return res.json({
       success: true,
       found: rows.length,
       importedCount,
-      message: `Выгрузка завершена. Найдено звонков: ${rows.length}, импортировано новых: ${importedCount}.`
+      endpointUsed,
+      methodUsed,
+      period,
+      message: rows.length > 0
+        ? `Выгрузка завершена (${endpointUsed}). Найдено звонков: ${rows.length}, импортировано новых: ${importedCount}.`
+        : `АТС ответила (${endpointUsed}), но за период "${period}" звонков не найдено. Попробуйте выбрать период «Текущая неделя» или «Текущий месяц».`
     });
   } catch (err: any) {
     appendLog('error', 'megafon', `[ВАТС REST] Ошибка выгрузки истории: ${err.message || err}`);
