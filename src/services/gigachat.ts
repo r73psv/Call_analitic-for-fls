@@ -608,12 +608,12 @@ export async function analyzeWithGigaChat(
   // Жёсткий предохранитель: при длительности менее 10 секунд LLM не вызываем —
   // возвращаем результат «разговор не состоялся», чтобы исключить фантазии модели.
   if (callDurationSeconds !== undefined && callDurationSeconds < 10) {
-    return generateLocalFallbackAnalysis(transcript, model, callDurationSeconds);
+    return generateLocalFallbackAnalysis(transcript, model, callDurationSeconds, customSalonName);
   }
 
   if (!isGigaChatConfigured()) {
     // Если GigaChat не настроен — возвращаем локальный резервный анализ.
-    return generateLocalFallbackAnalysis(transcript, model, callDurationSeconds);
+    return generateLocalFallbackAnalysis(transcript, model, callDurationSeconds, customSalonName);
   }
 
   const token = await getGigaChatToken();
@@ -653,7 +653,7 @@ export async function analyzeWithGigaChat(
 
   // Пытаемся распарсить JSON, при неудаче — просим модель исправить формат.
   try {
-    return parseGigaChatJson(rawContent);
+    return parseGigaChatJson(rawContent, customSalonName);
   } catch (parseErr) {
     console.warn('[GigaChat] Первый парсинг JSON не удался, отправка запроса на исправление формата...');
     const retryRes = await axios.post(
@@ -679,7 +679,7 @@ export async function analyzeWithGigaChat(
     );
 
     const retryContent = retryRes.data.choices?.[0]?.message?.content || '';
-    return parseGigaChatJson(retryContent);
+    return parseGigaChatJson(retryContent, customSalonName);
   }
 }
 
@@ -687,7 +687,8 @@ export async function analyzeWithGigaChat(
  * Разбирает ответ модели, опираясь на явные поля (is_conversation, call_outcome, booking_status),
  * а не на хрупкий поиск ключевых слов. Возвращает согласованный AnalysisResult.
  */
-function parseGigaChatJson(text: string): AnalysisResult {
+function parseGigaChatJson(text: string, customSalonName?: string): AnalysisResult {
+  const salon = customSalonName || process.env.SALON_NAME || 'Fashion Look Studio';
   // Убираем markdown-обёртки, если они есть
   let clean = text.trim();
   if (clean.startsWith('```json')) {
@@ -754,7 +755,7 @@ function parseGigaChatJson(text: string): AnalysisResult {
       },
       operator_score: null,
       operator_comment: 'Разговор не состоялся (диалог отсутствует).',
-      recommendations: 'Повторить попытку дозвона клиенту в рабочее время салона «Лик 28».',
+      recommendations: `Повторить попытку дозвона клиенту в рабочее время салона «${salon}».`,
     };
   }
 
@@ -792,8 +793,8 @@ function parseGigaChatJson(text: string): AnalysisResult {
   const comment =
     parsed.operator_comment && parsed.operator_comment.trim().length > 0
       ? parsed.operator_comment
-      : 'Администратор обработал обращение по регламенту салона «Лик 28».';
-  const recommendations = parsed.recommendations || 'Соблюдать стандарты сервиса салона «Лик 28».';
+      : `Администратор обработал обращение по регламенту салона «${salon}».`;
+  const recommendations = parsed.recommendations || `Соблюдать стандарты сервиса салона «${salon}».`;
 
   const result: AnalysisResult = {
     transcript_summary: summary,
@@ -806,7 +807,7 @@ function parseGigaChatJson(text: string): AnalysisResult {
       tone_manager: parsed.key_facts?.tone_manager || 'нейтральный',
       call_outcome: outcome,
       booking_status: bookingStatus,
-      client_issue: parsed.key_facts?.client_issue || 'Обращение в салон «Лик 28»',
+      client_issue: parsed.key_facts?.client_issue || `Обращение в салон «${salon}»`,
     },
     operator_score: score,
     operator_comment: comment,
@@ -826,8 +827,10 @@ function parseGigaChatJson(text: string): AnalysisResult {
 function generateLocalFallbackAnalysis(
   transcript: string,
   model: GigaChatModel,
-  callDurationSeconds?: number
+  callDurationSeconds?: number,
+  customSalonName?: string
 ): AnalysisResult {
+  const salon = customSalonName || process.env.SALON_NAME || 'Fashion Look Studio';
   const clean = (transcript || '').trim();
   const lower = clean.toLowerCase();
 
@@ -848,7 +851,7 @@ function generateLocalFallbackAnalysis(
       },
       operator_score: null,
       operator_comment: `Оценка не выставляется: разговор не состоялся (длительность ${callDurationSeconds} сек менее 10 секунд).`,
-      recommendations: 'Повторить попытку дозвона клиенту в рабочее время салона «Лик 28».',
+      recommendations: `Повторить попытку дозвона клиенту в рабочее время салона «${salon}».`,
     };
   }
 
@@ -909,7 +912,7 @@ function generateLocalFallbackAnalysis(
       },
       operator_score: null,
       operator_comment: 'Разговор не состоялся: зафиксирован автоответчик (оценка не выставляется).',
-      recommendations: 'Повторить звонок клиенту в рабочие часы салона «Лик 28».',
+      recommendations: `Повторить звонок клиенту в рабочие часы салона «${salon}».`,
     };
   }
 
@@ -940,9 +943,9 @@ function generateLocalFallbackAnalysis(
 
   let summaryText = '';
   if (isBooking) {
-    summaryText = `${durPrefix}Клиент обратился в салон «Fashion Look Studio». Достигнута договоренность о записи на услуги. Статус: согласие.`;
+    summaryText = `${durPrefix}Клиент обратился в салон «${salon}». Достигнута договоренность о записи на услуги. Статус: согласие.`;
   } else if (isDeclined) {
-    summaryText = `${durPrefix}Клиент обратился в салон «Fashion Look Studio», но предложенное время не подошло. Статус: отказ от записи.`;
+    summaryText = `${durPrefix}Клиент обратился в салон «${salon}», но предложенное время не подошло. Статус: отказ от записи.`;
   } else if (isDispute) {
     summaryText = `${durPrefix}Обращение клиента с вопросом/претензией по обслуживанию. Требуется перезвон.`;
   } else {
@@ -953,7 +956,7 @@ function generateLocalFallbackAnalysis(
   const comment = hasDialogue
     ? (isDispute
         ? 'Администратор принял претензию/отмену, соблюдая вежливый тон.'
-        : 'Администратор вежливо проконсультировал клиента по регламенту «Fashion Look Studio».')
+        : `Администратор вежливо проконсультировал клиента по регламенту «${salon}».`)
     : 'Краткий обмен репликами. Полноценная оценка регламента не выставляется.';
 
   return {
@@ -971,7 +974,7 @@ function generateLocalFallbackAnalysis(
     },
     operator_score: score,
     operator_comment: comment,
-    recommendations: 'Соблюдать стандарты сервиса и вежливого общения салона «Fashion Look Studio».',
+    recommendations: `Соблюдать стандарты сервиса и вежливого общения салона «${salon}».`,
   };
 }
 

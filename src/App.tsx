@@ -395,6 +395,8 @@ export default function App() {
     }
   };
 
+  const currentSalonName = config?.salonName?.trim() || 'Fashion Look Studio';
+
   return (
     <div className="min-h-screen bg-slate-50/70 flex flex-col text-slate-800" id="applet-viewport">
       {/* App Header */}
@@ -419,7 +421,7 @@ export default function App() {
                   title="Нажмите, чтобы ввести или изменить название салона красоты вручную"
                   id="header-edit-salon-name-btn"
                 >
-                  <span>салон «{config?.salonName || 'Лик 28'}»</span>
+                  <span>салон «{currentSalonName}»</span>
                   <Pencil className="w-2.5 h-2.5 text-slate-400 group-hover:text-emerald-600 transition-colors" />
                 </button>
               </div>
@@ -510,7 +512,7 @@ export default function App() {
       <main className="flex-1 p-4 md:p-6 max-w-7xl mx-auto w-full space-y-5" id="applet-main-container">
         
         {/* 152-FZ Auto-Inform Notification Notice */}
-        <RecordingNotice salonName={config?.salonName || 'Лик 28'} />
+        <RecordingNotice salonName={currentSalonName} />
 
         {/* Error Alert */}
         {error && (
@@ -710,7 +712,7 @@ export default function App() {
                   transition={{ duration: 0.12 }}
                   className="min-h-[500px]"
                 >
-                  <StatsGrid stats={stats} calls={calls} authToken={authToken} userRole={userRole} />
+                  <StatsGrid stats={stats} calls={calls} authToken={authToken} userRole={userRole} salonName={currentSalonName} />
                 </motion.div>
               )}
 
@@ -723,7 +725,7 @@ export default function App() {
                   transition={{ duration: 0.12 }}
                   className="min-h-[500px]"
                 >
-                  <ConsentsTable userRole={userRole} />
+                  <ConsentsTable userRole={userRole} salonName={currentSalonName} />
                 </motion.div>
               )}
 
@@ -757,6 +759,7 @@ export default function App() {
         isOpen={isLoginModalOpen}
         onLoginSuccess={handleLoginSuccess}
         onOpenChangePassword={() => setIsChangePasswordModalOpen(true)}
+        salonName={currentSalonName}
       />
 
       {/* User Self-Service Password Change Modal */}
@@ -773,6 +776,7 @@ export default function App() {
         authToken={authToken}
         onSuccess={handleAdminPasswordSuccess}
         onCancel={() => setIsAdminPasswordModalOpen(false)}
+        salonName={currentSalonName}
       />
 
       {/* Real-time Toast Notifications for Admins and Managers */}
@@ -788,7 +792,7 @@ export default function App() {
       <EditSalonNameModal
         isOpen={isEditSalonModalOpen}
         onClose={() => setIsEditSalonModalOpen(false)}
-        currentName={config?.salonName || 'Лик 28'}
+        currentName={currentSalonName}
         onSave={handleSaveSalonName}
         userRole={userRole}
       />
@@ -796,7 +800,7 @@ export default function App() {
       {/* Footer */}
       <footer className="bg-white border-t border-slate-200 py-4 text-center text-xs text-slate-500 mt-auto" id="applet-main-footer">
         <div className="max-w-7xl mx-auto px-6 flex flex-col sm:flex-row justify-between items-center gap-2">
-          <p>© 2026 Салон красоты «{config?.salonName || 'Лик 28'}». Все права защищены. Обработка ПДн в строгом соответствии с 152-ФЗ.</p>
+          <p>© 2026 Салон красоты «{currentSalonName}». Все права защищены. Обработка ПДн в строгом соответствии с 152-ФЗ.</p>
           <div className="flex items-center gap-3 font-mono text-[11px] text-slate-600">
             <span className="flex items-center gap-1 text-emerald-700">
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> AES-256-GCM

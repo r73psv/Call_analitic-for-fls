@@ -14,9 +14,11 @@ import { ConsentModal } from './ConsentModal.js';
 
 interface ConsentsTableProps {
   userRole?: string;
+  salonName?: string;
 }
 
-export const ConsentsTable: React.FC<ConsentsTableProps> = ({ userRole = 'admin' }) => {
+export const ConsentsTable: React.FC<ConsentsTableProps> = ({ userRole = 'admin', salonName }) => {
+  const effectiveSalonName = salonName?.trim() || 'Fashion Look Studio';
   const [consents, setConsents] = useState<ConsentRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
@@ -179,7 +181,7 @@ export const ConsentsTable: React.FC<ConsentsTableProps> = ({ userRole = 'admin'
             )}
           </div>
           <p className="text-xs text-slate-500 mt-1">
-            Зашифрованный журнал фиксации голосовых, письменных и электронных согласий салона «Лик 28» (ст. 9 152-ФЗ)
+            Зашифрованный журнал фиксации голосовых, письменных и электронных согласий салона «{effectiveSalonName}» (ст. 9 152-ФЗ)
           </p>
         </div>
 
@@ -424,6 +426,7 @@ export const ConsentsTable: React.FC<ConsentsTableProps> = ({ userRole = 'admin'
           }}
           initialPhone={selectedPhoneForLoyalty}
           userRole={userRole}
+          salonName={effectiveSalonName}
         />
       )}
     </div>

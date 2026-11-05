@@ -13,6 +13,7 @@ interface ConsentModalProps {
   onConsentCreated: (consent: ConsentRecord) => void;
   initialPhone?: string;
   userRole?: string;
+  salonName?: string;
 }
 
 export const ConsentModal: React.FC<ConsentModalProps> = ({
@@ -21,7 +22,9 @@ export const ConsentModal: React.FC<ConsentModalProps> = ({
   onConsentCreated,
   initialPhone = '',
   userRole = 'admin',
+  salonName,
 }) => {
+  const effectiveSalonName = salonName?.trim() || 'Fashion Look Studio';
   const [phone, setPhone] = useState(initialPhone);
   const [method, setMethod] = useState<'written' | 'digital'>('written');
   const [isLoyaltyOnly, setIsLoyaltyOnly] = useState(true);
@@ -175,7 +178,7 @@ export const ConsentModal: React.FC<ConsentModalProps> = ({
                 className="w-4 h-4 text-emerald-600 rounded"
               />
               <span className="text-slate-700 text-[11px]">
-                Программа лояльности салона «Лик 28» (loyalty_program)
+                Программа лояльности салона «{effectiveSalonName}» (loyalty_program)
               </span>
             </label>
             <div className="text-[10px] text-slate-500 pl-6">

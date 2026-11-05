@@ -11,9 +11,11 @@ interface LoginModalProps {
   onLoginSuccess: (user: { id: string; username: string; name: string; role: UserRole }, token: string) => void;
   isOpen: boolean;
   onOpenChangePassword?: () => void;
+  salonName?: string;
 }
 
-export function LoginModal({ onLoginSuccess, isOpen, onOpenChangePassword }: LoginModalProps) {
+export function LoginModal({ onLoginSuccess, isOpen, onOpenChangePassword, salonName }: LoginModalProps) {
+  const effectiveSalonName = salonName?.trim() || 'Fashion Look Studio';
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('admin123');
   const [loading, setLoading] = useState(false);
@@ -66,7 +68,7 @@ export function LoginModal({ onLoginSuccess, isOpen, onOpenChangePassword }: Log
           </div>
           <h2 className="text-lg font-bold tracking-tight">Вход в систему Remix CallQA</h2>
           <p className="text-xs text-emerald-100/90 mt-1">
-            Салон красоты «Лик 28» • Защита ПДн по 152-ФЗ
+            Салон красоты «{effectiveSalonName}» • Защита ПДн по 152-ФЗ
           </p>
           <div className="inline-flex items-center gap-1.5 bg-emerald-900/50 px-2.5 py-1 rounded-full text-[11px] font-medium text-emerald-200 mt-3 border border-emerald-500/30">
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />

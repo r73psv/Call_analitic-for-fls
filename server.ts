@@ -85,7 +85,7 @@ function getFullDataForSync() {
 const DEFAULT_CONFIG: SystemConfig = {
   activeModel: 'GigaChat:Lite',
   default_gigachat_model: 'GigaChat:Lite',
-  salonName: (process.env.SALON_NAME || 'Лик 28').trim(),
+  salonName: (process.env.SALON_NAME || 'Fashion Look Studio').trim(),
   megafon: {
     token: 'megafon_ats_auth_token_example_123',
     webhookUrl: '/api/calls/webhook',
@@ -110,7 +110,15 @@ const DEFAULT_CONFIG: SystemConfig = {
 };
 
 export function getEffectiveSalonName(cfg?: SystemConfig): string {
-  return (cfg?.salonName || cfg?.credentials?.salonName || process.env.SALON_NAME || 'Лик 28').trim();
+  if (cfg) {
+    return (cfg.salonName || cfg.credentials?.salonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
+  }
+  try {
+    const db = readDb();
+    return (db.config?.salonName || db.config?.credentials?.salonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
+  } catch {
+    return (process.env.SALON_NAME || 'Fashion Look Studio').trim();
+  }
 }
 
 const DEFAULT_LOGS: LogEntry[] = [
@@ -319,7 +327,7 @@ function notifyCallAnalyzed(call: CallRecord): SystemNotification {
 // Helper function to normalize and fix salon brand name spelling variants
 function normalizeSalonNames(text: string, customSalonName?: string): string {
   if (!text || typeof text !== 'string') return text;
-  const currentSalon = customSalonName || process.env.SALON_NAME || 'Лик 28';
+  const currentSalon = customSalonName || getEffectiveSalonName();
   
   let result = text
     // Replace erroneous variants like "Ликс 28", "Ликс28", "Лик28", "Лик-28", "Лик двадцать восемь", "Лайк 28", "Лайк28", "Лиг 28", "Элик 28"
@@ -840,13 +848,15 @@ async function analyzeCallTextOrAudio(
     modelToUse = 'GigaChat:Lite';
   }
 
-  appendLog('info', 'gigachat', `Отправка обезличенной стенограммы на анализ в ${modelToUse} (длительность: ${callDurationSeconds ?? 'н/д'} сек)...`);
+  const currentSalon = getEffectiveSalonName(db.config);
+  appendLog('info', 'gigachat', `Отправка обезличенной стенограммы на анализ в ${modelToUse} (салон «${currentSalon}», длительность: ${callDurationSeconds ?? 'н/д'} сек)...`);
   try {
     const analysis = await analyzeWithRetry(
       anonymizedText,
       modelToUse,
       (type, msg) => appendLog(type, 'gigachat', msg),
-      callDurationSeconds
+      callDurationSeconds,
+      currentSalon
     );
     appendLog('success', 'gigachat', `Анализ звонка успешно выполнен моделью ${modelToUse}.`);
     return {
@@ -871,7 +881,8 @@ async function analyzeCallTextOrAudio(
 }
 
 // Local simulation analysis with error-reporting support or premium dynamic transcript parsing
-function getFallbackAnalysis(transcript: string, errorReason?: string, callDurationSeconds?: number): Partial<CallRecord> {
+function getFallbackAnalysis(transcript: string, errorReason?: string, callDurationSeconds?: number, customSalonName?: string): Partial<CallRecord> {
+  const currentSalon = customSalonName || getEffectiveSalonName();
   if (errorReason) {
     let readableError = 'Технический сбой аналитики.';
     if (errorReason === 'не удавалось скачать') {
@@ -986,7 +997,7 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
       },
       trigger_phrases: [],
       recommendations: [
-        'Повторить попытку дозвона клиенту в рабочее время салона «Лик 28».'
+        `Повторить попытку дозвона клиенту в рабочее время салона «${currentSalon}».`
       ],
       operator_score: null,
       operator_comment: 'Разговор не состоялся: зафиксирован автоответчик (оценка оператора не выставляется).'
@@ -1037,9 +1048,9 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
 
   let summary = '';
   if (isBooked) {
-    summary = `${durPrefix}Клиент обратился в салон «Лик 28». Достигнута договоренность о записи на процедуры. Итог: ${outcomeText}`;
+    summary = `${durPrefix}Клиент обратился в салон «${currentSalon}». Достигнута договоренность о записи на процедуры. Итог: ${outcomeText}`;
   } else if (isDeclined) {
-    summary = `${durPrefix}Клиент обратился в салон «Лик 28». Итог: ${outcomeText}`;
+    summary = `${durPrefix}Клиент обратился в салон «${currentSalon}». Итог: ${outcomeText}`;
   } else if (isDispute) {
     summary = `${durPrefix}Обращение клиента с вопросом/претензией по обслуживанию. Требуется перезвон.`;
   } else {
@@ -1048,7 +1059,7 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
 
   const score = hasDialogue ? (isDispute ? 7 : 9) : null;
   const operatorComment = hasDialogue
-    ? `Оценка сформирована по тексту стенограммы (${cleanTranscript.length} символов). Администратор вежливо проконсультировал клиента по регламенту «Лик 28».`
+    ? `Оценка сформирована по тексту стенограммы (${cleanTranscript.length} символов). Администратор вежливо проконсультировал клиента по регламенту «${currentSalon}».`
     : `Краткий обмен репликами. Полноценная оценка регламента не выставляется.`;
 
   const bookingStatus = isBooked ? 'согласие' : (isDeclined ? 'отказ' : (isDispute ? 'консультация' : 'консультация'));
@@ -1069,7 +1080,7 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
     },
     trigger_phrases: triggerPhrases,
     recommendations: [
-      'Следовать стандартам общения и вежливости при обслуживании в салоне «Лик 28».'
+      `Следовать стандартам общения и вежливости при обслуживании в салоне «${currentSalon}».`
     ],
     operator_score: score,
     operator_comment: operatorComment
@@ -3740,8 +3751,10 @@ app.get('/api/calls/:id/export-csv', (req, res) => {
   };
 
   try {
-    const csvContent = generateCallCsv(callForReport, userRole);
-    const filename = `Otchet_Lik28_${call.call_id}.csv`;
+    const salonName = getEffectiveSalonName(db.config);
+    const csvContent = generateCallCsv(callForReport, userRole, salonName);
+    const safeSalonFile = salonName.replace(/[^a-zA-Zа-яА-Я0-9_-]/g, '_');
+    const filename = `Otchet_${safeSalonFile}_${call.call_id}.csv`;
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -4211,7 +4224,7 @@ app.post('/api/config', (req, res) => {
   }
 
   if (body.salonName !== undefined) {
-    const cleanSalon = String(body.salonName).trim() || 'Лик 28';
+    const cleanSalon = String(body.salonName).trim() || 'Fashion Look Studio';
     db.config.salonName = cleanSalon;
     process.env.SALON_NAME = cleanSalon;
     if (!db.config.credentials) db.config.credentials = {};

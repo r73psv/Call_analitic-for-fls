@@ -46,7 +46,7 @@ function formatDuration(sec?: number): string {
 }
 
 export function generateCallAuditPdf(call: CallRecord, userRole: string = 'manager', customSalonName?: string): InstanceType<typeof PDFDocument> {
-  const salonName = customSalonName || process.env.SALON_NAME || 'Лик 28';
+  const salonName = customSalonName || process.env.SALON_NAME || 'Fashion Look Studio';
   const doc = new PDFDocument({
     size: 'A4',
     margin: 36,
@@ -134,7 +134,7 @@ export function generateCallAuditPdf(call: CallRecord, userRole: string = 'manag
   doc.font('AppFont').text(clientPhone);
 
   doc.font('AppFontBold').text('Администратор: ', col2X, tableY + 44, { continued: true });
-  doc.font('AppFont').text(call.operator_name || 'Администратор Лик 28');
+  doc.font('AppFont').text(call.operator_name || `Администратор «${salonName}»`);
 
   doc.font('AppFontBold').text('Тип вызова: ', col3X, tableY + 44, { continued: true });
   doc.font('AppFont').text(call.type === 'outgoing' ? 'Исходящий' : 'Входящий');
@@ -336,7 +336,7 @@ export function generateCallAuditPdf(call: CallRecord, userRole: string = 'manag
     const footerY = doc.page.height - margin + 12;
     doc.font('AppFont').fontSize(7.5).fillColor('#94a3b8');
     doc.text(
-      `Салон красоты «Лик 28» • Автоматический аудит GigaChat & SpeechKit • Звонок: ${call.call_id}`,
+      `Салон красоты «${salonName}» • Автоматический аудит GigaChat & SpeechKit • Звонок: ${call.call_id}`,
       margin,
       footerY
     );
@@ -403,7 +403,7 @@ export interface PeriodStatsReportData {
  * Генерация комплексного PDF-отчета за период со сравнительным анализом
  */
 export function generatePeriodStatsPdf(data: PeriodStatsReportData, customSalonName?: string): InstanceType<typeof PDFDocument> {
-  const salonName = customSalonName || process.env.SALON_NAME || 'Лик 28';
+  const salonName = customSalonName || process.env.SALON_NAME || 'Fashion Look Studio';
   const doc = new PDFDocument({
     size: 'A4',
     margin: 36,
@@ -705,7 +705,7 @@ export function generatePeriodStatsPdf(data: PeriodStatsReportData, customSalonN
     const footerY = doc.page.height - margin + 12;
     doc.font('AppFont').fontSize(7.5).fillColor('#94a3b8');
     doc.text(
-      `Салон красоты «Лик 28» • Сводный отчет по звонкам • ${data.periodDates}`,
+      `Салон красоты «${salonName}» • Сводный отчет по звонкам • ${data.periodDates}`,
       margin,
       footerY
     );

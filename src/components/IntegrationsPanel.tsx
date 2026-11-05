@@ -20,7 +20,7 @@ interface IntegrationsPanelProps {
 }
 
 export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: IntegrationsPanelProps) {
-  const [salonName, setSalonName] = useState(config.salonName || 'Лик 28');
+  const [salonName, setSalonName] = useState(config.salonName || 'Fashion Look Studio');
   const [defaultModel, setDefaultModel] = useState<GigaChatModel>(
     config.default_gigachat_model || (config.activeModel as GigaChatModel) || 'GigaChat:Lite'
   );
@@ -336,7 +336,7 @@ export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: 
     try {
       const updatedConfig: SystemConfig = {
         ...config,
-        salonName: salonName.trim() || 'Лик 28',
+        salonName: salonName.trim() || 'Fashion Look Studio',
         activeModel: defaultModel,
         default_gigachat_model: defaultModel,
         megafon: {
@@ -441,11 +441,11 @@ export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: 
             value={salonName}
             disabled={userRole !== 'admin'}
             onChange={(e) => setSalonName(e.target.value)}
-            placeholder="Например: Лик 28..."
+            placeholder="Например: Fashion Look Studio, FLS, Лик 28..."
             className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 disabled:opacity-60 transition-all"
           />
           <p className="text-[11px] text-slate-500">
-            Отображается в шапке, колонтитулах PDF-отчетов аудита звонков и речевых стандартах.
+            Отображается в шапке, реестре согласий, колонтитулах PDF/CSV отчетов аудита звонков и речевых стандартах.
           </p>
         </div>
       </div>
@@ -460,7 +460,7 @@ export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: 
               </div>
               <div>
                 <h3 className="text-sm font-bold text-slate-800">GigaChat (Сбер)</h3>
-                <p className="text-xs text-slate-500">Анализ звонков для салона «Лик 28»</p>
+                <p className="text-xs text-slate-500">Анализ звонков для салона «{salonName || 'Fashion Look Studio'}»</p>
               </div>
             </div>
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">

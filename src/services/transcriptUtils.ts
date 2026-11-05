@@ -107,12 +107,15 @@ export function refineTranscriptRoles(raw: string): string {
       continue;
     }
 
-    // Маркеры администратора / менеджера салона «Лик 28»
+    // Маркеры администратора / менеджера салона красоты
     const isManager =
       (i === 0 && (lower.includes('добрый') || lower.includes('слушаю') || lower.includes('салон') || lower.includes('здравствуйте'))) ||
       lower.includes('менеджер') ||
       lower.includes('администратор') ||
       lower.includes('салон красоты') ||
+      lower.includes('fashion look') ||
+      lower.includes('фешен лук') ||
+      lower.includes('fls') ||
       lower.includes('лик 28') ||
       lower.includes('слушаю вас') ||
       lower.includes('чем могу помочь') ||

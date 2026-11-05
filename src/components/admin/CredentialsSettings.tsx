@@ -28,7 +28,7 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
   const [showKeys, setShowKeys] = useState(false);
 
   // Название салона красоты
-  const [salonName, setSalonName] = useState('Лик 28');
+  const [salonName, setSalonName] = useState('Fashion Look Studio');
   const [savingSalonOnly, setSavingSalonOnly] = useState(false);
   const [salonSaveSuccess, setSalonSaveSuccess] = useState<string | null>(null);
 
@@ -159,7 +159,7 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
       if (!res.ok) throw new Error('Не удалось загрузить системные настройки');
       const data = await res.json();
 
-      setSalonName(data.salonName || 'Лик 28');
+      setSalonName(data.salonName || 'Fashion Look Studio');
       setGigachatAuthKey(data.gigachatAuthKey || '');
       setGigachatModel(data.gigachatModel || 'GigaChat:Lite');
       if (data.gigachatScope) {
@@ -254,7 +254,7 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
 
     try {
       const body = {
-        salonName: salonName.trim() || 'Лик 28',
+        salonName: salonName.trim() || 'Fashion Look Studio',
         gigachatAuthKey,
         gigachatModel,
         gigachatScope,
@@ -780,17 +780,17 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
                   type="text"
                   value={salonName}
                   onChange={(e) => setSalonName(e.target.value)}
-                  placeholder="Введите название салона красоты (например: Лик 28)..."
+                  placeholder="Введите название салона красоты (например: Fashion Look Studio)..."
                   className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600 transition-all placeholder:text-slate-400"
                   maxLength={100}
                   id="admin-salon-name-input"
                 />
-                {salonName.trim() !== 'Лик 28' && (
+                {salonName.trim() !== 'Fashion Look Studio' && (
                   <button
                     type="button"
-                    onClick={() => setSalonName('Лик 28')}
+                    onClick={() => setSalonName('Fashion Look Studio')}
                     className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700 rounded-md transition-colors text-[10px] flex items-center gap-1"
-                    title="Сбросить на значение по умолчанию («Лик 28»)"
+                    title="Сбросить на значение по умолчанию («Fashion Look Studio»)"
                   >
                     <RotateCcw className="w-3 h-3" />
                     <span>Сброс</span>
@@ -818,7 +818,7 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
 
           <div className="flex items-center flex-wrap gap-1.5 pt-1">
             <span className="text-[11px] text-slate-500 font-medium">Быстрые варианты:</span>
-            {['Лик 28', 'Лик 28 Премиум', 'Beauty Studio', 'Mon Amie', 'Магия Красоты', 'Этуаль'].map((preset) => (
+            {['Fashion Look Studio', 'FLS', 'Лик 28', 'Лик 28 Премиум', 'Beauty Studio', 'Mon Amie', 'Магия Красоты'].map((preset) => (
               <button
                 key={preset}
                 type="button"
@@ -1522,7 +1522,7 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
             </div>
 
             <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 text-[11px] text-slate-600 leading-relaxed">
-              <span className="font-bold text-slate-800">🔒 Требования 152-ФЗ «О персональных данных»:</span> Все данные клиентов салона красоты «Лик 28», телефонные номера, записи разговоров и аудиофайлы хранятся в зашифрованном виде. При переносе файла <code className="font-mono bg-white px-1 py-0.5 rounded border border-slate-200">data-store.enc</code> на другой сервер необходимо указать идентичный <code className="font-mono bg-white px-1 py-0.5 rounded border border-slate-200">STORE_ENCRYPTION_KEY</code>.
+              <span className="font-bold text-slate-800">🔒 Требования 152-ФЗ «О персональных данных»:</span> Все данные клиентов салона красоты «{salonName || 'Fashion Look Studio'}», телефонные номера, записи разговоров и аудиофайлы хранятся в зашифрованном виде. При переносе файла <code className="font-mono bg-white px-1 py-0.5 rounded border border-slate-200">data-store.enc</code> на другой сервер необходимо указать идентичный <code className="font-mono bg-white px-1 py-0.5 rounded border border-slate-200">STORE_ENCRYPTION_KEY</code>.
             </div>
           </div>
         </div>
@@ -2115,7 +2115,7 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">ID салона «Лик 28»</label>
+              <label className="block text-xs font-bold text-slate-700 mb-1">ID салона «{salonName || 'Fashion Look Studio'}» (YClients)</label>
               <input
                 type="text"
                 value={yclientsSalonId}

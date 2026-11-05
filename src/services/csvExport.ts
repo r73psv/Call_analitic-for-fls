@@ -7,7 +7,8 @@ function escapeCsv(val: any): string {
   return `"${str}"`;
 }
 
-export function generateCallCsv(call: CallRecord, userRole: string = 'manager'): string {
+export function generateCallCsv(call: CallRecord, userRole: string = 'manager', customSalonName?: string): string {
+  const salonName = (customSalonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
   const rawPhone = call.client_phone || (call as any).full_phone || '';
   const maskedPhone = call.client_phone_masked || maskPhone(rawPhone);
 
@@ -53,7 +54,7 @@ export function generateCallCsv(call: CallRecord, userRole: string = 'manager'):
   const rows: string[] = [];
 
   // Блок 1: Метаданные и паспорт отчета
-  rows.push(['# САЛОН КРАСОТЫ «ЛИК 28» - ДЕТАЛЬНЫЙ ОТЧЕТ АУДИТА ЗВОНКА', '', ''].map(escapeCsv).join(';'));
+  rows.push([`# САЛОН КРАСОТЫ «${salonName.toUpperCase()}» - ДЕТАЛЬНЫЙ ОТЧЕТ АУДИТА ЗВОНКА`, '', ''].map(escapeCsv).join(';'));
   rows.push(['# Режим соответствия 152-ФЗ: ВСЕ ПЕРСОНАЛЬНЫЕ ДАННЫЕ МАСКИРОВАНЫ', '', ''].map(escapeCsv).join(';'));
   rows.push(['# Роль пользователя при выгрузке', userRole, ''].map(escapeCsv).join(';'));
   rows.push(['', '', ''].join(';'));
@@ -65,7 +66,7 @@ export function generateCallCsv(call: CallRecord, userRole: string = 'manager'):
     ['Длительность', durationText, `${call.duration_seconds || 0} сек.`],
     ['Тип вызова', call.type === 'outgoing' ? 'Исходящий' : 'Входящий', 'Направление звонка'],
     ['Статус звонка', call.status || 'completed', 'Технический статус соединения'],
-    ['Администратор / Оператор', call.operator_name || 'Не указан', 'Сотрудник салона «Лик 28»'],
+    ['Администратор / Оператор', call.operator_name || 'Не указан', `Сотрудник салона «${salonName}»`],
     ['Клиент (152-ФЗ)', clientPhone, 'Телефон (маскирован согласно 152-ФЗ)'],
     ['Согласие на обработку (152-ФЗ)', call.consent_status || 'active', 'Правовое основание записи'],
     ['Цели обработки ПДн', (call.consent_purposes || ['quality_control', 'training']).join(', '), 'Контроль качества'],

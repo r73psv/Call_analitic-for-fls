@@ -15,7 +15,7 @@ settingsRouter.get('/', async (req: Request, res: Response) => {
   try {
     const store = await readStore();
     const defaultModel = store.config.default_gigachat_model || (process.env.GIGACHAT_DEFAULT_MODEL as GigaChatModel) || 'GigaChat:Lite';
-    const salonName = store.config.salonName || process.env.SALON_NAME || 'Лик 28';
+    const salonName = store.config.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
     res.json({
       salonName,
       default_gigachat_model: defaultModel,
@@ -63,7 +63,7 @@ settingsRouter.put('/', requireRole(['admin']), async (req: Request, res: Respon
 
     res.json({
       success: true,
-      salonName: store.config.salonName || 'Лик 28',
+      salonName: store.config.salonName || 'Fashion Look Studio',
       default_gigachat_model: store.config.default_gigachat_model,
     });
   } catch (err: any) {

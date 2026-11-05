@@ -57,7 +57,7 @@ export function getInitialUsers(): User[] {
     {
       id: 'usr-manager-1',
       username: 'manager',
-      name: 'Управляющий салона (Лик 28)',
+      name: 'Управляющий салона',
       role: 'manager',
       passwordHash: managerH.hash,
       salt: managerH.salt,

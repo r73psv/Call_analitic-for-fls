@@ -10,7 +10,7 @@ interface RecordingNoticeProps {
   salonName?: string;
 }
 
-export const RecordingNotice: React.FC<RecordingNoticeProps> = ({ salonName = 'Лик 28' }) => {
+export const RecordingNotice: React.FC<RecordingNoticeProps> = ({ salonName = 'Fashion Look Studio' }) => {
   return (
     <div className="bg-gradient-to-r from-emerald-50 via-teal-50 to-blue-50 border border-emerald-200/80 rounded-xl p-3.5 shadow-2xs flex items-start gap-3 text-xs text-slate-700">
       <div className="p-1.5 bg-emerald-100/70 text-emerald-700 rounded-lg shrink-0 mt-0.5">

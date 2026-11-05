@@ -41,7 +41,7 @@ adminRouter.get('/credentials', async (req: Request, res: Response) => {
 
     res.json({
       // Салон красоты
-      salonName: store.config.salonName || creds.salonName || process.env.SALON_NAME || 'Лик 28',
+      salonName: store.config.salonName || creds.salonName || process.env.SALON_NAME || 'Fashion Look Studio',
 
       // GigaChat
       gigachatAuthKey: creds.gigachatAuthKey || process.env.GIGACHAT_AUTH_KEY || '',
@@ -271,7 +271,7 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
 
     // Название салона красоты
     if (body.salonName !== undefined) {
-      const cleanSalonName = String(body.salonName).trim() || 'Лик 28';
+      const cleanSalonName = String(body.salonName).trim() || 'Fashion Look Studio';
       store.config.salonName = cleanSalonName;
       creds.salonName = cleanSalonName;
       process.env.SALON_NAME = cleanSalonName;
@@ -674,7 +674,8 @@ adminRouter.post('/test/vk', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'Токен VK или ID чата не указаны' });
     }
 
-    const message = `🔔 [Лик 28 Тест] Проверка интеграции уведомлений аналитики звонков салона красоты «Лик 28» (${new Date().toLocaleString('ru-RU')})`;
+    const currentSalon = store.config.salonName || store.config.credentials?.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
+    const message = `🔔 [${currentSalon} Тест] Проверка интеграции уведомлений аналитики звонков салона красоты «${currentSalon}» (${new Date().toLocaleString('ru-RU')})`;
     const params = new URLSearchParams();
     params.append('v', '5.131');
     params.append('access_token', token);

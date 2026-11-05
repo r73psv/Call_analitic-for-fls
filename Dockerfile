@@ -1,5 +1,5 @@
 # ==============================================================================
-# Dockerfile: Remix CallQA AI_RU (Салон красоты «Лик 28»)
+# Dockerfile: Remix CallQA AI_RU (Салон красоты «Fashion Look Studio»)
 # Multi-stage production container with 152-FZ encryption and Russian CA support
 # ==============================================================================
 
@@ -56,7 +56,7 @@ ENV PORT=3000
 ENV HOST=0.0.0.0
 ENV TZ=Europe/Moscow
 ENV ADMIN_PASSWORD=admin123
-ENV SALON_NAME="FLS"
+ENV SALON_NAME="Fashion Look Studio"
 ENV STORE_ENCRYPTION_KEY=
 ENV MEGAFON_TOKEN=
 ENV MEGAFON_API_VERSION=json_rpc

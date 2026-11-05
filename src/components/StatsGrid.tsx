@@ -76,6 +76,7 @@ interface StatsGridProps {
   calls?: CallRecord[];
   authToken?: string | null;
   userRole?: string;
+  salonName?: string;
 }
 
 const RUSSIAN_DAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
@@ -95,7 +96,8 @@ interface CellData {
   avgScore: number | null;
 }
 
-export function StatsGrid({ stats, calls = [], authToken, userRole }: StatsGridProps) {
+export function StatsGrid({ stats, calls = [], authToken, userRole, salonName }: StatsGridProps) {
+  const effectiveSalonName = salonName?.trim() || 'Fashion Look Studio';
   // Period Selection and Comparative Analysis
   const { minDateStr, maxDateStr } = useMemo(() => {
     if (!calls || calls.length === 0) return { minDateStr: '2026-07-01', maxDateStr: '2026-10-01' };
@@ -851,7 +853,7 @@ export function StatsGrid({ stats, calls = [], authToken, userRole }: StatsGridP
               </span>
             </div>
             <p className="text-xs text-slate-500">
-              Выборка звонков салона «Лик 28» по периодам (неделя, месяц, год, произвольный период) со сравнительным анализом и выгрузкой в PDF.
+              Выборка звонков салона «{effectiveSalonName}» по периодам (неделя, месяц, год, произвольный период) со сравнительным анализом и выгрузкой в PDF.
             </p>
           </div>
 
@@ -1430,7 +1432,7 @@ export function StatsGrid({ stats, calls = [], authToken, userRole }: StatsGridP
                     <Users className="w-4 h-4" />
                   </div>
                   <h3 className="text-sm sm:text-base font-bold text-slate-900 tracking-tight flex items-center gap-2">
-                    <span>Эффективность администраторов салона «Лик 28»</span>
+                    <span>Эффективность администраторов салона «{effectiveSalonName}»</span>
                     {isComparative ? (
                       <span className="text-[10px] font-semibold uppercase px-2 py-0.5 rounded-md bg-indigo-100 text-indigo-800 border border-indigo-200">
                         Сравнительный аудит
@@ -1977,7 +1979,7 @@ export function StatsGrid({ stats, calls = [], authToken, userRole }: StatsGridP
                       </div>
                     </div>
                     <span className="text-[11px] text-slate-400 font-mono">
-                      Салон красоты «Лик 28» • График работы 09:00 – 21:00
+                      Салон красоты «{effectiveSalonName}» • График работы 09:00 – 21:00
                     </span>
                   </div>
                 </div>

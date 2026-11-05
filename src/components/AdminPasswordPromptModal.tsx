@@ -11,6 +11,7 @@ interface AdminPasswordPromptModalProps {
   onSuccess: () => void;
   onCancel: () => void;
   authToken?: string | null;
+  salonName?: string;
 }
 
 export function AdminPasswordPromptModal({
@@ -18,7 +19,9 @@ export function AdminPasswordPromptModal({
   onSuccess,
   onCancel,
   authToken,
+  salonName,
 }: AdminPasswordPromptModalProps) {
+  const effectiveSalonName = salonName?.trim() || 'Fashion Look Studio';
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,7 +85,7 @@ export function AdminPasswordPromptModal({
         {/* Content */}
         <form onSubmit={handleSubmit} className="p-6 space-y-4" id="admin-verify-password-form">
           <p className="text-xs text-slate-600 leading-relaxed">
-            Вход в админ-панель открывает доступ к управлению системными токенами, ключами Yandex SpeechKit, GigaChat, S3 и правами доступа сотрудников салона «Лик 28».
+            Вход в админ-панель открывает доступ к управлению системными токенами, ключами Yandex SpeechKit, GigaChat, S3 и правами доступа сотрудников салона «{effectiveSalonName}».
           </p>
 
           {error && (
