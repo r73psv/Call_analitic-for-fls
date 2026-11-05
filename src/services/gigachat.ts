@@ -13,7 +13,7 @@ const httpsAgent = new https.Agent({
 });
 
 export function getSystemPrompt(customSalonName?: string): string {
-  const salon = customSalonName || process.env.SALON_NAME || 'Фешен лук студио';
+  const salon = customSalonName || process.env.SALON_NAME || 'Fashion Look Studio';
   return `Ты — ведущий эксперт контроля качества и аналитик звонков салона красоты «${salon}».
 Проанализируй транскрипт телефонного разговора и верни ответ СТРОГО в формате JSON, без текста до и после JSON.
 
@@ -940,9 +940,9 @@ function generateLocalFallbackAnalysis(
 
   let summaryText = '';
   if (isBooking) {
-    summaryText = `${durPrefix}Клиент обратился в салон «Лик 28». Достигнута договоренность о записи на услуги. Статус: согласие.`;
+    summaryText = `${durPrefix}Клиент обратился в салон «Fashion Look Studio». Достигнута договоренность о записи на услуги. Статус: согласие.`;
   } else if (isDeclined) {
-    summaryText = `${durPrefix}Клиент обратился в салон «Лик 28», но предложенное время не подошло. Статус: отказ от записи.`;
+    summaryText = `${durPrefix}Клиент обратился в салон «Fashion Look Studio», но предложенное время не подошло. Статус: отказ от записи.`;
   } else if (isDispute) {
     summaryText = `${durPrefix}Обращение клиента с вопросом/претензией по обслуживанию. Требуется перезвон.`;
   } else {
@@ -953,7 +953,7 @@ function generateLocalFallbackAnalysis(
   const comment = hasDialogue
     ? (isDispute
         ? 'Администратор принял претензию/отмену, соблюдая вежливый тон.'
-        : 'Администратор вежливо проконсультировал клиента по регламенту «Лик 28».')
+        : 'Администратор вежливо проконсультировал клиента по регламенту «Fashion Look Studio».')
     : 'Краткий обмен репликами. Полноценная оценка регламента не выставляется.';
 
   return {
@@ -971,7 +971,7 @@ function generateLocalFallbackAnalysis(
     },
     operator_score: score,
     operator_comment: comment,
-    recommendations: 'Соблюдать стандарты сервиса и вежливого общения салона «Лик 28».',
+    recommendations: 'Соблюдать стандарты сервиса и вежливого общения салона «Fashion Look Studio».',
   };
 }
 
