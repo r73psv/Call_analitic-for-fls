@@ -259,7 +259,7 @@ export function UsersManagement({ authToken, currentUserId }: UsersManagementPro
             <Shield className="w-3.5 h-3.5" /> Управляющий (manager)
           </div>
           <p className="text-[11px] text-slate-500">
-            Оценки звонков, переанализ, отправка в VK/YClients, реестр согласий. Номера телефонов маскированы по 152-ФЗ.
+            Оценки звонков, дословный транскрипт диалога, переанализ, отправка в VK/YClients, реестр согласий. Номера телефонов маскированы по 152-ФЗ.
           </p>
         </div>
         <div className="bg-white p-3 rounded-xl border border-slate-200">

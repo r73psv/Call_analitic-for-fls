@@ -1049,7 +1049,7 @@ export function CallDetails({
               </span>
             </div>
 
-            {userRole === 'manager' ? (
+            {userRole === 'viewer' ? (
               <div className="flex-1 p-6 flex flex-col items-center justify-center text-center bg-slate-50/30">
                 <div className="p-3 bg-slate-100 rounded-full text-slate-500 mb-3">
                   <Lock className="w-6 h-6" />
@@ -1058,7 +1058,7 @@ export function CallDetails({
                   Доступ к расшифровке ограничен
                 </h4>
                 <p className="text-[11px] text-slate-500 max-w-xs leading-relaxed">
-                  Согласно политике обработки ПДн (152-ФЗ) и разделению ролей, дословный транскрипт доступен только администраторам. Вы можете просмотреть резюме и оценку качества в левой панели.
+                  Согласно политике обработки ПДн (152-ФЗ) и разделению ролей, для роли «Наблюдатель» доступ к дословному транскрипту закрыт. Доступ открыт для управляющих и администраторов.
                 </p>
               </div>
             ) : (
