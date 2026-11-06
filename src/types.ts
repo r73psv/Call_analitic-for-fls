@@ -338,6 +338,7 @@ export interface AnalysisResult {
     date?: string | null;
     time?: string | null;
     master?: string | null;
+    promises?: string[];
   };
   operator_score: number | null;
   operator_comment: string;

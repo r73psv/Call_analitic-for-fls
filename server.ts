@@ -878,7 +878,7 @@ async function analyzeCallTextOrAudio(
       key_facts: {
         ...analysis.key_facts,
         booking_status: analysis.booking_status || analysis.key_facts?.booking_status,
-        promises: []
+        promises: analysis.key_facts?.promises || []
       },
       trigger_phrases: [],
       recommendations: Array.isArray(analysis.recommendations) ? analysis.recommendations : [analysis.recommendations],
@@ -1056,7 +1056,7 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
     : (isDeclined ? 'Клиент отказалась от предложенного слота из-за невозможности быть в городе/неподходящего времени.' : 'Разговор завершился консультацией.');
 
   // Извлекаем суть обращения (услуга, дата, время, мастер)
-  const essence = extractEssenceDetails(cleanTranscript);
+  const essence = extractEssenceDetails(cleanTranscript, undefined, currentSalon);
   const masterLabel = essence.master ? ` к мастеру ${essence.master}` : '';
   const dateLabel = essence.date ? ` на ${essence.date}` : '';
   const timeLabel = essence.time ? ` в ${essence.time}` : '';
@@ -3265,8 +3265,17 @@ app.get('/api/calls', (req, res) => {
       consent_purposes: consent?.purposes || ['quality_control', 'training']
     };
 
-    if (callCopy.summary && callCopy.status === 'completed' && !/пересказ диалога|краткий пересказ/i.test(callCopy.summary)) {
-      const { formattedSummary } = formatSummaryWithEssence(
+    const needsSummaryRepair = Boolean(
+      callCopy.summary && callCopy.status === 'completed' && (
+        !/пересказ диалога|краткий пересказ/i.test(callCopy.summary) ||
+        /мастер\s*[—–:\-]\s*Студио|к мастеру Студио/i.test(callCopy.summary) ||
+        (/дата\s*[—–:\-]\s*не указан/i.test(callCopy.summary) && callCopy.transcript && /\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)|сегодня|завтра|суббот|воскресень/iu.test(callCopy.transcript)) ||
+        (/время\s*[—–:\-]\s*не указан/i.test(callCopy.summary) && callCopy.transcript && /\b\d{1,2}\s+[0-5]\d|\b\d{1,2}:[0-5]\d/i.test(callCopy.transcript))
+      )
+    );
+
+    if (needsSummaryRepair) {
+      const { formattedSummary, essence } = formatSummaryWithEssence(
         callCopy.summary,
         callCopy.transcript || '',
         {
@@ -3278,6 +3287,22 @@ app.get('/api/calls', (req, res) => {
         getEffectiveSalonName()
       );
       callCopy.summary = formattedSummary;
+      if (essence.date && (!callCopy.key_facts?.date || callCopy.key_facts.date.includes('не указан'))) {
+        if (!callCopy.key_facts) callCopy.key_facts = {};
+        callCopy.key_facts.date = essence.date;
+      }
+      if (essence.time && (!callCopy.key_facts?.time || callCopy.key_facts.time.includes('не указан'))) {
+        if (!callCopy.key_facts) callCopy.key_facts = {};
+        callCopy.key_facts.time = essence.time;
+      }
+      if (essence.master && (!callCopy.key_facts?.master || callCopy.key_facts.master.includes('не выбран') || callCopy.key_facts.master.includes('Студио'))) {
+        if (!callCopy.key_facts) callCopy.key_facts = {};
+        callCopy.key_facts.master = essence.master;
+      }
+      if (essence.service && (!callCopy.key_facts?.service || callCopy.key_facts.service.includes('не указан'))) {
+        if (!callCopy.key_facts) callCopy.key_facts = {};
+        callCopy.key_facts.service = essence.service;
+      }
     }
 
     // Role-based data access (RBAC & 152-ФЗ):
@@ -3462,8 +3487,17 @@ app.get('/api/calls/:id', (req, res) => {
     consent_purposes: consent?.purposes || ['quality_control', 'training']
   };
 
-  if (callCopy.summary && callCopy.status === 'completed' && !/пересказ диалога|краткий пересказ/i.test(callCopy.summary)) {
-    const { formattedSummary } = formatSummaryWithEssence(
+  const needsSingleSummaryRepair = Boolean(
+    callCopy.summary && callCopy.status === 'completed' && (
+      !/пересказ диалога|краткий пересказ/i.test(callCopy.summary) ||
+      /мастер\s*[—–:\-]\s*Студио|к мастеру Студио/i.test(callCopy.summary) ||
+      (/дата\s*[—–:\-]\s*не указан/i.test(callCopy.summary) && callCopy.transcript && /\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)|сегодня|завтра|суббот|воскресень/iu.test(callCopy.transcript)) ||
+      (/время\s*[—–:\-]\s*не указан/i.test(callCopy.summary) && callCopy.transcript && /\b\d{1,2}\s+[0-5]\d|\b\d{1,2}:[0-5]\d/i.test(callCopy.transcript))
+    )
+  );
+
+  if (needsSingleSummaryRepair) {
+    const { formattedSummary, essence } = formatSummaryWithEssence(
       callCopy.summary,
       callCopy.transcript || '',
       {
@@ -3475,6 +3509,22 @@ app.get('/api/calls/:id', (req, res) => {
       getEffectiveSalonName()
     );
     callCopy.summary = formattedSummary;
+    if (essence.date && (!callCopy.key_facts?.date || callCopy.key_facts.date.includes('не указан'))) {
+      if (!callCopy.key_facts) callCopy.key_facts = {};
+      callCopy.key_facts.date = essence.date;
+    }
+    if (essence.time && (!callCopy.key_facts?.time || callCopy.key_facts.time.includes('не указан'))) {
+      if (!callCopy.key_facts) callCopy.key_facts = {};
+      callCopy.key_facts.time = essence.time;
+    }
+    if (essence.master && (!callCopy.key_facts?.master || callCopy.key_facts.master.includes('не выбран') || callCopy.key_facts.master.includes('Студио'))) {
+      if (!callCopy.key_facts) callCopy.key_facts = {};
+      callCopy.key_facts.master = essence.master;
+    }
+    if (essence.service && (!callCopy.key_facts?.service || callCopy.key_facts.service.includes('не указан'))) {
+      if (!callCopy.key_facts) callCopy.key_facts = {};
+      callCopy.key_facts.service = essence.service;
+    }
   }
 
   if (userRole === 'viewer') {

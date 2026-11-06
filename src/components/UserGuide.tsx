@@ -27,6 +27,7 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
     { id: 'next-steps', title: '5. Следующие шаги (Next Steps ИИ)', icon: Sparkles },
     { id: 'export', title: '6. Экспорт отчетов (CSV & PDF)', icon: Download },
     { id: 'integrations', title: '7. МегаФон, Yclients, VK, S3', icon: Database },
+    { id: 'architecture', title: '8. Техническая архитектура', icon: FileText },
   ];
 
   const handleCopyText = (text: string, id: string) => {
@@ -505,6 +506,79 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                   Автоматическая синхронизация зашифрованного хранилища базы данных (AES-256-GCM) в облачное объектное S3-хранилище каждые 5 минут для предотвращения потери данных.
                 </p>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Section 8: Technical Architecture */}
+        {activeSection === 'architecture' && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+              <div className="flex items-center gap-2">
+                <FileText className="w-5 h-5 text-indigo-600" />
+                <h3 className="text-base font-bold text-slate-900">8. Техническая архитектура и стек разработки</h3>
+              </div>
+              <button
+                onClick={() => handleCopyText('Полная техническая спецификация сохранена в файле TECHNICAL_DOCUMENTATION.md в корне проекта.', 'architecture')}
+                className="text-xs px-2.5 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-600 flex items-center gap-1 cursor-pointer transition-colors"
+              >
+                {copiedSection === 'architecture' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedSection === 'architecture' ? 'Скопировано!' : 'Копировать'}</span>
+              </button>
+            </div>
+
+            <div className="p-4 rounded-xl border border-indigo-100 bg-indigo-50/40 text-xs text-indigo-900 space-y-2">
+              <p className="font-semibold text-indigo-950">
+                Полный технический паспорт системы сохранен в файле <code className="bg-white px-1.5 py-0.5 rounded border border-indigo-200 font-mono">TECHNICAL_DOCUMENTATION.md</code> в корне репозитория.
+              </p>
+              <p className="text-slate-600 leading-relaxed">
+                Ниже приведена сводка по технологическому стеку, механизмам получения записей с АТС МегаФон и последовательности обработки звонков ИИ.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <div className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-2 shadow-3xs">
+                <span className="font-bold text-slate-900 flex items-center gap-1.5">
+                  <Database className="w-4 h-4 text-indigo-600" /> Стек разработки
+                </span>
+                <ul className="text-slate-600 space-y-1 list-disc pl-4 leading-relaxed">
+                  <li><strong>Frontend:</strong> React 18, TypeScript, Tailwind CSS, Lucide React, Vite.</li>
+                  <li><strong>Backend:</strong> Node.js 22, Express, TypeScript, esbuild (bundle <code>dist/server.cjs</code>).</li>
+                  <li><strong>Распознавание речи (STT):</strong> Yandex Cloud SpeechKit (русская речь, диаризация ролей).</li>
+                  <li><strong>Нейросеть (LLM):</strong> Сбер GigaChat (Lite/Pro/Max) через доверенные сертификаты Минцифры РФ.</li>
+                  <li><strong>Безопасность:</strong> AES-256-GCM шифрование локальной базы, маскирование номеров 152-ФЗ.</li>
+                  <li><strong>Резервное копирование:</strong> S3 Timeweb Cloud (@aws-sdk/client-s3).</li>
+                </ul>
+              </div>
+
+              <div className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-2 shadow-3xs">
+                <span className="font-bold text-slate-900 flex items-center gap-1.5">
+                  <PhoneCall className="w-4 h-4 text-emerald-600" /> Две версии интеграции с АТС МегаФон
+                </span>
+                <div className="text-slate-600 space-y-2 leading-relaxed">
+                  <p>
+                    <strong>Версия 1 (Push / Webhooks):</strong> АТС отправляет HTTP POST вебхуки на <code>/crm_integration.php</code> или <code>/api/calls/webhook</code> сразу после звонка (<code>cmd=history</code> с прямой ссылкой на MP3 и <code>cmd=event</code> для входящих звонков).
+                  </p>
+                  <p>
+                    <strong>Версия 2 (Pull / WCGP REST):</strong> Сервер самостоятельно опрашивает шлюз <code>/sys/crm_api.wcgp</code> по расписанию (раз в 5-15 мин), разбирает CSV-реестр звонков и через команду <code>get.mgf_calls</code> получает прямые ссылки на записи.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-2 shadow-3xs text-xs">
+              <span className="font-bold text-slate-900 flex items-center gap-1.5">
+                <Sparkles className="w-4 h-4 text-purple-600" /> Конвейер обработки звонка ИИ
+              </span>
+              <ol className="text-slate-600 space-y-1.5 list-decimal pl-4 leading-relaxed">
+                <li><strong>Валидация длительности:</strong> звонки короче 10 секунд отсекаются (ИИ не галлюцинирует, оценка не ставится).</li>
+                <li><strong>Скачивание MP3:</strong> сервер загружает аудиофайл с медиасервера МегаФон в буфер оперативной памяти.</li>
+                <li><strong>STT Yandex SpeechKit:</strong> аудио преобразуется в текст с разделением «Менеджер» и «Клиент» и устранением дублей.</li>
+                <li><strong>Обезличивание 152-ФЗ:</strong> телефоны маскируются перед передачей во внешнюю нейросеть.</li>
+                <li><strong>Анализ GigaChat:</strong> определение статуса бронирования (согласие/отказ/консультация), сути обращения (услуга, мастер, дата, время), пересказа (2-4 предложения), оценки (1-10) и рекомендаций.</li>
+                <li><strong>Генерация Next Steps:</strong> составление 3-5 конкретных задач администратору для CRM Yclients и мессенджеров.</li>
+                <li><strong>Журналирование и алерты:</strong> сохранение согласия в ConsentLog, запись в зашифрованную БД и алерт в VK/Telegram при спорах.</li>
+              </ol>
             </div>
           </div>
         )}

@@ -42,10 +42,12 @@ export function getSystemPrompt(customSalonName?: string): string {
 
 ШАГ 4. РЕЗЮМЕ (transcript_summary) — ОБЯЗАТЕЛЬНО должно состоять из ТРЁХ частей:
 1) Краткая суть обращения с фиксацией 4 параметров:
-   - Услуга: какая услуга/процедура интересует клиента (или "не указана", если не называлась);
-   - Дата: желаемая или согласованная дата визита (или "не указана");
-   - Время: желаемое или согласованное время визита (или "не указано");
-   - Мастер: имя или категория мастера (или "не выбран", если мастер не выбирался).
+   - Услуга: какая услуга/процедура интересует клиента (например: «маникюр с покрытием», «педикюр», «стрижка», или «не указана», если не называлась);
+   - Дата: желаемая или согласованная дата визита (например: «8 ноября в воскресенье», «8 ноября», «в субботу», «завтра», или «не указана» ТОЛЬКО если дата вообще не звучала);
+   - Время: желаемое или согласованное время визита (например: «15:00», «19:00», «13:00», «18:30»).
+     ВАЖНО ПО ВРЕМЕНИ: В стенограммах устная речь часто транскрибируется с пробелами («15 0 0», «19 0 0», «13 0 0», «18 30»). Распознавай такие записи как время записи («15:00», «19:00», «13:00»). Если клиент согласовал конкретный слот (например: «Давайте 15 0 0»), обязательно фиксируй итоговое время («15:00»)!
+   - Мастер: имя конкретного специалиста салона в именительном падеже (например: «Арина», «Егорова Арина», «Кристина», «Елена»).
+     КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО указывать название салона («${salon}», «Фэшн Лук Студио», «Студио», «Салон») в качестве мастера! Если в диалоге прозвучало «к Егоровой Арине» или «к егоровой арене», имя мастера — «Егорова Арина» (или «Арина»).
 2) Краткий пересказ разговора (СТРОГО 2–4 связных предложения):
    кратко и ёмко перескажи реальный диалог между клиентом и администратором: с чем обратился клиент, какие вопросы и варианты обсуждались, что уточнил или ответил сотрудник салона.
 3) Вывод и итог обращения: что в итоге предложено, чем закончился разговор (согласие/запись оформлена, отказ с конкретной причиной, консультация или договоренность о перезвоне), дальнейшие действия.
@@ -74,9 +76,9 @@ export function getSystemPrompt(customSalonName?: string): string {
 - booking_status — строго дублирует значение из Шага 3;
 - client_issue — конкретная суть обращения;
 - service — название услуги или null (если не названа);
-- date — дата записи или null (если не названа);
-- time — время записи или null (если не названо);
-- master — имя мастера или null (если не выбран).
+- date — дата записи (например "8 ноября в воскресенье", "завтра") или null (если не названа);
+- time — время записи в формате "ЧЧ:ММ" (например "15:00", "13:00") или null (если не названо);
+- master — имя мастера в именительном падеже (например "Егорова Арина", "Кристина") или null (если не назван). Никогда не пиши "Студио"!
 
 ШАГ 6. ОЦЕНКА ОПЕРАТОРА (operator_score)
 - Оценку (целое от 1 до 10) ставь ТОЛЬКО если разговор состоялся (is_conversation = true).
@@ -712,7 +714,7 @@ export async function analyzeWithGigaChat(
 
   // Пытаемся распарсить JSON, при неудаче — просим модель исправить формат.
   try {
-    return parseGigaChatJson(rawContent, customSalonName);
+    return parseGigaChatJson(rawContent, customSalonName, transcript);
   } catch (parseErr) {
     console.warn('[GigaChat] Первый парсинг JSON не удался, отправка запроса на исправление формата...');
     const retryRes = await axios.post(
@@ -738,7 +740,7 @@ export async function analyzeWithGigaChat(
     );
 
     const retryContent = retryRes.data.choices?.[0]?.message?.content || '';
-    return parseGigaChatJson(retryContent, customSalonName);
+    return parseGigaChatJson(retryContent, customSalonName, transcript);
   }
 }
 
@@ -750,88 +752,214 @@ export interface EssenceDetails {
 }
 
 /**
+ * Нормализует имя мастера из разговорной формы / дательного падежа в именительный падеж
+ */
+export function normalizeMasterName(raw?: string | null): string | null {
+  if (!raw || typeof raw !== 'string') return null;
+  let clean = raw.trim().replace(/^(?:к|у|мастеру|мастер|к мастеру|у мастера)\s+/iu, '');
+  if (!clean) return null;
+
+  const forbidden = new Set([
+    'салон', 'студия', 'студио', 'фэшн', 'лук', 'fashion', 'look', 'studio', 'лик', 'beauty',
+    'клиент', 'менеджер', 'администратор', 'вам', 'нам', 'завтра', 'сегодня', 'здравствуйте',
+    'добрый', 'пожалуйста', 'спасибо', 'озон', 'банк', 'макси', 'макс', 'канал', 'покрытием',
+    'покрытие', 'укрепление', 'снятие', 'маникюр', 'педикюр', 'стрижка', 'окрашивание',
+    'воскресенье', 'суббота', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница',
+    'ноября', 'октября', 'декабря', 'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+    'июля', 'августа', 'сентября', 'время', 'запись', 'стоимости', 'бронирования', 'каренина',
+    'не указан', 'не указана', 'не выбран', 'не выбрана'
+  ]);
+
+  const words = clean.split(/\s+/).map(w => {
+    let lower = w.toLowerCase().replace(/[^а-яёa-z]/gi, '');
+    if (!lower || forbidden.has(lower) || /^\d+$/.test(lower)) return '';
+
+    // Фамилии в родительном/дательном: Егоровой -> Егорова
+    if (lower.endsWith('овой') || lower.endsWith('евой') || lower.endsWith('иной') || lower.endsWith('ыной')) {
+      lower = lower.slice(0, -2) + 'а';
+    } else if (lower.endsWith('ской') || lower.endsWith('цкой')) {
+      lower = lower.slice(0, -2) + 'ая';
+    }
+    // Имена в дательном/винительном:
+    else if (lower === 'арене' || lower === 'арине' || lower === 'арена') lower = 'арина';
+    else if (lower === 'кристине') lower = 'кристина';
+    else if (lower === 'анне') lower = 'анна';
+    else if (lower === 'елене') lower = 'елена';
+    else if (lower === 'ирине') lower = 'ирина';
+    else if (lower === 'ольге') lower = 'ольга';
+    else if (lower === 'татьяне') lower = 'татьяна';
+    else if (lower === 'марии') lower = 'мария';
+    else if (lower === 'екатерине') lower = 'екатерина';
+    else if (lower === 'светлане') lower = 'светлана';
+    else if (lower === 'наталье' || lower === 'наталии') lower = 'наталья';
+    else if (lower === 'анастасии') lower = 'анастасия';
+    else if (lower === 'дарье') lower = 'дарья';
+    else if (lower === 'юлии') lower = 'юлия';
+    else if (lower === 'полине') lower = 'полина';
+    else if (lower === 'виктории') lower = 'виктория';
+    else if (lower === 'ксении') lower = 'ксения';
+    else if (lower === 'алене' || lower === 'алёне') lower = 'алёна';
+    else if (lower === 'диане') lower = 'диана';
+    else if (lower === 'алине') lower = 'алина';
+    else if (lower.endsWith('е') && lower.length > 3) {
+      lower = lower.slice(0, -1) + 'а';
+    }
+    return lower.charAt(0).toUpperCase() + lower.slice(1);
+  }).filter(Boolean);
+
+  return words.length > 0 ? words.join(' ') : null;
+}
+
+/**
  * Извлекает 4 параметра сути обращения (услуга, дата, время, мастер)
  * из текста транскрипта и/или существующего резюме.
  */
-export function extractEssenceDetails(transcript: string, existingSummary?: string): EssenceDetails {
+export function extractEssenceDetails(
+  transcript: string,
+  existingSummary?: string,
+  customSalonName?: string
+): EssenceDetails {
   const combined = `${existingSummary || ''}\n${transcript || ''}`;
 
   // 1. Услуга
   let service: string | null = null;
-  const serviceSummaryMatch = existingSummary?.match(/(?:услуга|процедура)\s*[—–:\-]\s*([^,\n;.]+)/i);
+  const serviceSummaryMatch = existingSummary?.match(/(?:услуга|процедура)\s*[—–:\-]\s*([^,\n;.]+)/iu);
   if (serviceSummaryMatch && !serviceSummaryMatch[1].toLowerCase().includes('не указан')) {
     service = serviceSummaryMatch[1].trim();
   } else {
-    const servicePatterns: [RegExp, string][] = [
-      [/(?:аппаратн\w*\s+)?маникюр\w*(?:\s+с\s+покрытием(?:\s+шеллак|\s+гель-лак)?)?/i, 'аппаратный маникюр'],
-      [/педикюр\w*/i, 'педикюр'],
-      [/стрижк\w*(?:\s+и\s+укладк\w*)?/i, 'стрижка и укладка'],
-      [/укладк\w*/i, 'укладка'],
-      [/окрашиван\w*/i, 'окрашивание волос'],
-      [/мелирован\w*/i, 'мелирование'],
-      [/коррекц\w*\s+бровей|архитектур\w*\s+бровей|окрашивание\s+бровей|брови/i, 'коррекция бровей'],
-      [/наращиван\w*\s+ресниц|ламинирован\w*\s+ресниц|ресниц\w*/i, 'ресницы'],
-      [/косметолог\w*|чистк\w*\s+лица|пилинг/i, 'прием косметолога'],
-      [/массаж\w*/i, 'массаж'],
-      [/депиляц\w*|шугаринг|эпиляц\w*/i, 'депиляция'],
-      [/кератин\w*|ботокс\w*\s+(?:для\s+)?волос/i, 'уход для волос']
-    ];
-    for (const [pattern] of servicePatterns) {
-      const match = combined.match(pattern);
-      if (match) {
-        service = match[0].trim();
-        break;
+    // Check combined services
+    if (/маникюр/i.test(combined) && /педикюр/i.test(combined)) {
+      service = 'маникюр и педикюр с покрытием';
+    } else {
+      const servicePatterns: [RegExp, string][] = [
+        [/(?:аппаратн\w*\s+)?маникюр\w*(?:\s+с\s+покрытием(?:\s+шеллак|\s+гель-лак)?)?/iu, 'маникюр с покрытием'],
+        [/педикюр\w*(?:\s+с\s+покрытием)?/iu, 'педикюр с покрытием'],
+        [/стрижк\w*(?:\s+и\s+окрашиван\w*)?/iu, 'стрижка и окрашивание'],
+        [/стрижк\w*(?:\s+и\s+укладк\w*)?/iu, 'стрижка и укладка'],
+        [/окрашиван\w*(?:\s+волос)?/iu, 'окрашивание волос'],
+        [/мелирован\w*/iu, 'мелирование'],
+        [/коррекц\w*\s+бровей|архитектур\w*\s+бровей|окрашивание\s+бровей|брови/iu, 'коррекция бровей'],
+        [/наращиван\w*\s+ресниц|ламинирован\w*\s+ресниц|ресниц\w*/iu, 'ресницы'],
+        [/косметолог\w*|чистк\w*\s+лица|пилинг/iu, 'прием косметолога'],
+        [/массаж\w*/iu, 'массаж'],
+        [/депиляц\w*|шугаринг|эпиляц\w*/iu, 'депиляция'],
+        [/кератин\w*|ботокс\w*\s+(?:для\s+)?волос/iu, 'уход для волос']
+      ];
+      for (const [pattern, label] of servicePatterns) {
+        if (pattern.test(combined)) {
+          service = label;
+          break;
+        }
       }
     }
   }
 
-  // 2. Дата
+  // 2. Дата (с использованием Unicode character classes, чтобы избежать проблем с \b в кириллице)
   let date: string | null = null;
-  const dateSummaryMatch = existingSummary?.match(/дата\s*[—–:\-]\s*([^,\n;.]+)/i);
+  const dateSummaryMatch = existingSummary?.match(/дата\s*[—–:\-]\s*([^,\n;.]+)/iu);
   if (dateSummaryMatch && !dateSummaryMatch[1].toLowerCase().includes('не указан')) {
     date = dateSummaryMatch[1].trim();
   } else {
-    const dateMatch = combined.match(/\b(сегодня|завтра|послезавтра|в\s+понедельник|во\s+вторник|в\s+среду|в\s+четверг|в\s+пятницу|в\s+субботу|в\s+воскресенье|на\s+выходных|на\s+выходные|\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря))\b/i);
-    if (dateMatch) {
-      date = dateMatch[0].trim();
+    // 1. Точная дата: "8 ноября в воскресенье", "8 ноября", "15 ноября"
+    const dm = combined.match(/(?:^|[^\p{L}\d])(\d{1,2}(?:-[а-яё]+)?\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)(?:\s+(?:в\s+)?(?:понедельник|вторник|среду|четверг|пятницу|субботу|воскресенье))?)(?:[^\p{L}\d]|$)/iu);
+    if (dm) {
+      date = dm[1].trim();
+    } else {
+      // 2. Относительные даты: "завтра", "сегодня", "в субботу или воскресенье", "в субботу", "в воскресенье"
+      const rel = combined.match(/(?:^|[^\p{L}\d])(сегодня|завтра|послезавтра|в\s+понедельник|во\s+вторник|в\s+среду|в\s+четверг|в\s+пятницу|в\s+субботу|в\s+воскресенье|на\s+выходных|на\s+выходные)(?:[^\p{L}\d]|$)/iu);
+      if (rel) {
+        date = rel[1].trim();
+      }
     }
   }
 
-  // 3. Время
+  // 3. Время (поддержка распознанной речи со слотами "15 0 0", "19 0 0", "13 0 0", "18:30")
   let time: string | null = null;
-  const timeSummaryMatch = existingSummary?.match(/время\s*[—–:\-]\s*([^,\n;.]+)/i);
+  const timeSummaryMatch = existingSummary?.match(/время\s*[—–:\-]\s*([^,\n;.]+)/iu);
   if (timeSummaryMatch && !timeSummaryMatch[1].toLowerCase().includes('не указан')) {
     time = timeSummaryMatch[1].trim();
   } else {
-    const timeMatch = combined.match(/\b([012]?\d:[0-5]\d)\b|\bна\s+([012]?\d(?::[0-5]\d)?)\b|\bв\s+([012]?\d:[0-5]\d)\b|\b(утром|вечером|после\s+\d{1,2}(?::\d{2})?)\b/i);
-    if (timeMatch) {
-      time = (timeMatch[1] || timeMatch[2] || timeMatch[3] || timeMatch[4] || timeMatch[0]).trim();
+    // Приоритет согласованному времени клиента/администратора: "Давайте 15 0 0", "В 15 0 0", "записали на 15 0 0"
+    const agreed = [...combined.matchAll(/(?:давайте|запишите|записала|буду|в|на|к)\s+([012]?\d)(?:\s*:\s*|\s+)([0-5]\d|0\s+0)\b/gi)];
+    if (agreed.length > 0) {
+      const last = agreed[agreed.length - 1];
+      const hh = last[1].padStart(2, '0');
+      const mmRaw = last[2].replace(/\s+/g, '');
+      const mm = mmRaw === '0' || mmRaw === '00' ? '00' : mmRaw;
+      time = `${hh}:${mm}`;
+    } else {
+      // Любое время с пробелами (результат распознавания SpeechKit)
+      const anySpaced = [...combined.matchAll(/\b([012]?\d)\s+([0-5]\d|0\s+0)\b/gi)];
+      if (anySpaced.length > 0) {
+        const m = anySpaced[anySpaced.length - 1];
+        const hh = m[1].padStart(2, '0');
+        const mmRaw = m[2].replace(/\s+/g, '');
+        const mm = mmRaw === '0' || mmRaw === '00' ? '00' : mmRaw;
+        time = `${hh}:${mm}`;
+      } else {
+        const std = combined.match(/\b([012]?\d:[0-5]\d)\b/);
+        if (std) {
+          time = std[1];
+        } else {
+          const wordTime = combined.match(/(?:^|[^\p{L}\d])(?:в|на)\s+([012]?\d)\s+(?:часов|часа)(?:[^\p{L}\d]|$)/iu);
+          if (wordTime) {
+            time = `${wordTime[1].padStart(2, '0')}:00`;
+          }
+        }
+      }
     }
   }
 
-  // 4. Мастер
+  // 4. Мастер (с очисткой названия салона и нормализацией падежей)
   let master: string | null = null;
-  const masterSummaryMatch = existingSummary?.match(/мастер\s*[—–:\-]\s*([^,\n;.]+)/i);
-  if (masterSummaryMatch && !masterSummaryMatch[1].toLowerCase().includes('не выбран')) {
-    master = masterSummaryMatch[1].trim();
-  } else {
-    const masterMatch = combined.match(/(?:к\s+мастеру|мастеру|мастер|к)\s+([А-ЯЁ][а-яё]+)/i);
-    if (masterMatch) {
-      const candidate = masterMatch[1].trim();
-      const forbiddenNames = ['Салон', 'Клиент', 'Менеджер', 'Администратор', 'Вам', 'Нам', 'Завтра', 'Сегодня', 'Здравствуйте', 'Добрый', 'Пожалуйста', 'Спасибо'];
-      if (!forbiddenNames.includes(candidate)) {
-        master = candidate;
+  const masterSummaryMatch = existingSummary?.match(/мастер\s*[—–:\-]\s*([^,\n;.]+)/iu);
+  if (masterSummaryMatch && !masterSummaryMatch[1].toLowerCase().includes('не выбран') && !masterSummaryMatch[1].toLowerCase().includes('студио')) {
+    master = normalizeMasterName(masterSummaryMatch[1].trim());
+  }
+
+  if (!master) {
+    const forbidden = new Set([
+      'салон', 'студия', 'студио', 'фэшн', 'лук', 'fashion', 'look', 'studio', 'лик', 'beauty',
+      'клиент', 'менеджер', 'администратор', 'вам', 'нам', 'завтра', 'сегодня', 'здравствуйте',
+      'добрый', 'пожалуйста', 'спасибо', 'озон', 'банк', 'макси', 'макс', 'канал', 'покрытием',
+      'покрытие', 'укрепление', 'снятие', 'маникюр', 'педикюр', 'стрижка', 'окрашивание',
+      'воскресенье', 'суббота', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница',
+      'ноября', 'октября', 'декабря', 'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+      'июля', 'августа', 'сентября', 'время', 'запись', 'стоимости', 'бронирования', 'каренина'
+    ]);
+
+    // Исключаем приветствие салона («Фэшн Лук Студио»), чтобы не захватывать «Студио»
+    const cleanCombined = combined
+      .replace(/(?:салон[а-яё\s]*)?(?:фэшн\s+лук\s+студио|fashion\s+look\s+studio)/gi, '')
+      .replace(/фэшн\s+лук\s+студио/gi, '');
+
+    const patterns = [
+      /(?:^|[^\p{L}\d])(?:к|у)\s+мастер(?:у|а)?\s+([А-Яа-яЁё]+(?:\s+[А-Яа-яЁё]+)?)/iu,
+      /(?:^|[^\p{L}\d])(?:к|у)\s+([А-Яа-яЁё]+(?:\s+[А-Яа-яЁё]+)?)/iu,
+      /(?:^|[^\p{L}\d])мастер(?:а|у)?\s+([А-Яа-яЁё]+(?:\s+[А-Яа-яЁё]+)?)/iu
+    ];
+
+    for (const pattern of patterns) {
+      const matches = [...cleanCombined.matchAll(new RegExp(pattern.source, pattern.flags + 'g'))];
+      for (const match of matches) {
+        const rawCandidate = match[1].trim();
+        const parts = rawCandidate.split(/\s+/);
+        const filteredParts = parts.filter(p => !forbidden.has(p.toLowerCase()) && !p.match(/^\d+$/));
+        if (filteredParts.length > 0) {
+          const candidateMaster = normalizeMasterName(filteredParts.join(' '));
+          if (candidateMaster && candidateMaster.length > 2) {
+            master = candidateMaster;
+            break;
+          }
+        }
       }
+      if (master) break;
     }
   }
 
   return { service, date, time, master };
 }
 
-/**
- * Нормализует резюме так, чтобы оно ВСЕГДА содержало краткую суть обращения
- * (услуга, дата, время, мастер) и блок выводов/итогов.
- */
 /**
  * Нормализует резюме так, чтобы оно ВСЕГДА содержало 3 четких блока:
  * 1) Краткая суть обращения (услуга, дата, время, мастер);
@@ -844,6 +972,8 @@ export function formatSummaryWithEssence(
   extractedDetails?: EssenceDetails,
   customSalonName?: string
 ): { formattedSummary: string; essence: EssenceDetails; retelling?: string; conclusion?: string } {
+  const salon = (customSalonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
+
   // Звонок не состоялся
   if (
     /разговор не состоялся|звонок не состоялся|диалог отсутствует/i.test(rawSummary) &&
@@ -857,7 +987,17 @@ export function formatSummaryWithEssence(
     };
   }
 
-  const essence = extractedDetails || extractEssenceDetails(transcript, rawSummary);
+  // Всегда запускаем надежный парсер, если какое-либо поле в переданных деталях отсутствует или недостоверно
+  const fallbackEssence = extractEssenceDetails(transcript, rawSummary, salon);
+  const isMeaningful = (v?: string | null) => v && typeof v === 'string' && !v.toLowerCase().includes('не указан') && !v.toLowerCase().includes('не выбран') && !v.toLowerCase().includes('студио') && v.trim().length > 0;
+
+  const essence: EssenceDetails = {
+    service: isMeaningful(extractedDetails?.service) ? extractedDetails!.service : fallbackEssence.service,
+    date: isMeaningful(extractedDetails?.date) ? extractedDetails!.date : fallbackEssence.date,
+    time: isMeaningful(extractedDetails?.time) ? extractedDetails!.time : fallbackEssence.time,
+    master: isMeaningful(extractedDetails?.master) ? normalizeMasterName(extractedDetails!.master!) : fallbackEssence.master,
+  };
+
   const serviceStr = essence.service || 'не указана';
   const dateStr = essence.date || 'не указана';
   const timeStr = essence.time || 'не указано';
@@ -871,6 +1011,14 @@ export function formatSummaryWithEssence(
   let retellingText = retellingMatch ? retellingMatch[1].trim() : '';
   let conclusionText = conclusionMatch ? conclusionMatch[1].trim() : '';
 
+  // Очистка от ошибочного «мастеру Студио»
+  if (retellingText) {
+    retellingText = retellingText.replace(/к\s+мастеру\s+Студио/gi, essence.master ? `к мастеру ${essence.master}` : 'в салон');
+  }
+  if (conclusionText) {
+    conclusionText = conclusionText.replace(/к\s+мастеру\s+Студио/gi, essence.master ? `к мастеру ${essence.master}` : 'в салон');
+  }
+
   // Если модель вернула единый текст без явных блоков пересказа и вывода
   if (!retellingText && !conclusionText) {
     const cleanRaw = rawSummary
@@ -878,7 +1026,6 @@ export function formatSummaryWithEssence(
       .trim();
 
     if (cleanRaw.length > 0) {
-      // Разделим на предложения
       const sentences = cleanRaw.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 0);
       if (sentences.length >= 3) {
         conclusionText = sentences[sentences.length - 1].trim();
@@ -897,8 +1044,8 @@ export function formatSummaryWithEssence(
     }
   }
 
-  // Если пересказ диалога всё ещё пуст — синтезируем строго 2–4 связных предложения
-  if (!retellingText) {
+  // Если пересказ диалога всё ещё пуст или содержал заглушки — синтезируем строго 2–4 связных предложения
+  if (!retellingText || retellingText.includes('к мастеру Студио') || /свободное время\s*\./.test(retellingText)) {
     const isBooking = /запис|соглас|подтвержд/i.test(conclusionText || rawSummary || transcript);
     const isDeclined = /отказ|не удобн|не подход/i.test(conclusionText || rawSummary || transcript);
 
@@ -906,8 +1053,12 @@ export function formatSummaryWithEssence(
       ? `Клиент позвонил в салон по вопросу записи на услугу «${essence.service}».`
       : `Клиент обратился в салон красоты по вопросам обслуживания и записи.`;
 
+    const dateLabel = essence.date ? ` на ${essence.date}` : '';
+    const timeLabel = essence.time ? ` в ${essence.time}` : '';
+    const masterLabel = essence.master ? ` к мастеру ${essence.master}` : '';
+
     const s2 = (essence.date || essence.time || essence.master)
-      ? `Администратор поприветствовал клиента и предложил свободное время${essence.date ? ` на ${essence.date}` : ''}${essence.time ? ` в ${essence.time}` : ''}${essence.master ? ` к мастеру ${essence.master}` : ''}.`
+      ? `Администратор поприветствовал клиента и предложил свободное время${dateLabel}${timeLabel}${masterLabel}.`
       : `Администратор предоставил подробную консультацию по графику и условиям визита.`;
 
     const s3 = isBooking
@@ -923,8 +1074,14 @@ export function formatSummaryWithEssence(
     retellingText = `${s1} ${s2} ${s3} ${s4}`;
   }
 
-  if (!conclusionText) {
-    conclusionText = 'Администратор вежливо проконсультировал клиента по регламенту салона.';
+  if (!conclusionText || conclusionText.includes('к мастеру Студио')) {
+    const isBooking = /запис|соглас|подтвержд/i.test(rawSummary || transcript);
+    const dateLabel = essence.date ? ` на ${essence.date}` : '';
+    const timeLabel = essence.time ? ` в ${essence.time}` : '';
+    const masterLabel = essence.master ? ` к мастеру ${essence.master}` : '';
+    conclusionText = isBooking
+      ? `Администратор согласовал запись${masterLabel}${dateLabel}${timeLabel}. Запись успешно подтверждена.`
+      : `Администратор вежливо проконсультировал клиента по регламенту салона «${salon}».`;
   }
 
   // Очистка от возможных дублей заголовков
@@ -945,7 +1102,7 @@ export function formatSummaryWithEssence(
  * Разбирает ответ модели, опираясь на явные поля (is_conversation, call_outcome, booking_status),
  * а не на хрупкий поиск ключевых слов. Возвращает согласованный AnalysisResult.
  */
-function parseGigaChatJson(text: string, customSalonName?: string): AnalysisResult {
+function parseGigaChatJson(text: string, customSalonName?: string, originalTranscript?: string): AnalysisResult {
   const salon = customSalonName || process.env.SALON_NAME || 'Fashion Look Studio';
   // Убираем markdown-обёртки, если они есть
   let clean = text.trim();
@@ -1055,15 +1212,33 @@ function parseGigaChatJson(text: string, customSalonName?: string): AnalysisResu
 
   // Извлекаем суть обращения: услуга, дата, время, мастер
   const parsedKeyFacts = parsed.key_facts || {};
-  const extracted = extractEssenceDetails(formattedTranscript || '', rawSummary);
-  const service = parsedKeyFacts.service || parsed.service || extracted.service;
-  const date = parsedKeyFacts.date || parsed.date || extracted.date;
-  const time = parsedKeyFacts.time || parsed.time || extracted.time;
-  const master = parsedKeyFacts.master || parsed.master || extracted.master;
+  const fullTranscript = originalTranscript || formattedTranscript || '';
+  const extracted = extractEssenceDetails(fullTranscript, rawSummary, salon);
+
+  const isMeaningful = (v: any) => v && typeof v === 'string' && !v.toLowerCase().includes('не указан') && !v.toLowerCase().includes('не выбран') && !v.toLowerCase().includes('студио') && v.trim().length > 0;
+
+  const rawMaster = parsedKeyFacts.master || parsed.master;
+  const isMasterInvalid = (m: any) => !m || typeof m !== 'string' || ['салон', 'студия', 'студио', 'фэшн', 'лук', 'fashion', 'look', 'studio', 'не выбран', 'не указан'].some(bad => m.toLowerCase().includes(bad));
+
+  const service = (isMeaningful(parsedKeyFacts.service) ? parsedKeyFacts.service : null) ||
+                  (isMeaningful(parsed.service) ? parsed.service : null) ||
+                  extracted.service;
+
+  const date = (isMeaningful(parsedKeyFacts.date) ? parsedKeyFacts.date : null) ||
+               (isMeaningful(parsed.date) ? parsed.date : null) ||
+               extracted.date;
+
+  const rawTime = (isMeaningful(parsedKeyFacts.time) ? parsedKeyFacts.time : null) ||
+                  (isMeaningful(parsed.time) ? parsed.time : null) ||
+                  extracted.time;
+  const time = rawTime ? rawTime.replace(/\b([012]?\d)\s+([0-5]\d|0\s+0)\b/gi, (_: any, h: string, m: string) => `${h.padStart(2, '0')}:${m.replace(/\s+/g, '') === '0' || m.replace(/\s+/g, '') === '00' ? '00' : m}`) : null;
+
+  const master = (!isMasterInvalid(rawMaster) ? normalizeMasterName(rawMaster) : null) ||
+                 extracted.master;
 
   const { formattedSummary, essence } = formatSummaryWithEssence(
     rawSummary,
-    formattedTranscript || '',
+    fullTranscript,
     {
       service: service || null,
       date: date || null,
