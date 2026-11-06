@@ -8,7 +8,7 @@ import {
   BookOpen, ShieldCheck, Sparkles, PhoneCall, BarChart3, 
   Download, Database, MessageCircle, SlidersHorizontal, CheckSquare, 
   HelpCircle, ChevronRight, FileText, FileSpreadsheet, Lock, UserCheck, 
-  Activity, Check, Copy, AlertTriangle
+  Activity, Check, Copy, AlertTriangle, ListTodo, Bell
 } from 'lucide-react';
 
 interface UserGuideProps {
@@ -392,11 +392,37 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                   Интерактивные возможности чек-листа:
                 </h4>
                 <ul className="list-disc list-inside space-y-1 text-slate-600 pl-1 leading-relaxed">
-                  <li><strong>Отметка выполнения:</strong> администратор нажимает на пункт, и задача помечается выполненной со зачеркиванием текста;</li>
+                  <li><strong>Отметка выполнения:</strong> администратор нажимает на пункт, и задача помечается выполненной со зачеркиванием текста и мгновенным сохранением в БД;</li>
                   <li><strong>Копирование в буфер:</strong> кнопка «Копировать» форматирует весь список задач для вставки в рабочий чат администраторов;</li>
-                  <li><strong>Ручное добавление:</strong> ссылка «Добавить свой шаг вручную» позволяет дописать любую нестандартную задачу;</li>
+                  <li><strong>Ручное добавление:</strong> ссылка «Добавить задачу» позволяет дописать любую нестандартную задачу;</li>
                   <li><strong>Пересчет ИИ:</strong> кнопка «Обновить ИИ» формирует свежий актуализированный перечень задач.</li>
                 </ul>
+              </div>
+
+              {/* Dedicated Tab & Floating Reminders Documentation */}
+              <div className="p-4 rounded-xl border border-purple-300 bg-purple-50/50 space-y-3">
+                <h4 className="font-bold text-purple-950 text-xs flex items-center gap-2">
+                  <ListTodo className="w-4 h-4 text-purple-600" />
+                  Вкладка «Задачи Next Steps» и всплывающие напоминания
+                </h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-slate-700">
+                  <div className="bg-white p-3 rounded-xl border border-purple-200/80 space-y-1.5">
+                    <div className="font-bold text-slate-900 text-xs flex items-center gap-1.5">
+                      <ListTodo className="w-3.5 h-3.5 text-purple-600" /> Единая вкладка контроля шагов:
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-slate-600">
+                      В верхнем меню приложения доступна отдельная вкладка с бейджем незавершенных звонков. На ней сгруппированы карточки всех диалогов, где остались открытые шаги, со строкой поиска, фильтрацией по операторам, прогресс-баром и кнопкой «Отметить все».
+                    </p>
+                  </div>
+                  <div className="bg-white p-3 rounded-xl border border-purple-200/80 space-y-1.5">
+                    <div className="font-bold text-slate-900 text-xs flex items-center gap-1.5">
+                      <Bell className="w-3.5 h-3.5 text-amber-600" /> Всплывающие напоминания в углу:
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-slate-600">
+                      В правом нижнем углу экрана автоматически появляется интерактивное уведомление с количеством зависших задач, превью ближайшего действия и кнопками: «Открыть задачи», «+15 мин» (отложить) или «Свернуть» в компактный плавающий бейдж.
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

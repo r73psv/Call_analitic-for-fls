@@ -9,7 +9,7 @@ import {
   PhoneCall, Settings, Activity, RefreshCw, 
   ShieldAlert, AlertCircle, HardDrive, Shield, ShieldCheck,
   Lock, Unlock, UserCheck, HeartHandshake, Sparkles, 
-  CheckCircle2, LogOut, User, Key, KeyRound, BarChart3, Pencil, BookOpen
+  CheckCircle2, LogOut, User, Key, KeyRound, BarChart3, Pencil, BookOpen, ListTodo
 } from 'lucide-react';
 
 import { StatsGrid } from './components/StatsGrid.js';
@@ -26,6 +26,8 @@ import { NotificationToastContainer } from './components/NotificationToastContai
 import { NotificationsBell } from './components/NotificationsBell.js';
 import { EditSalonNameModal } from './components/EditSalonNameModal.js';
 import { UserGuide } from './components/UserGuide.js';
+import { PendingTasksList } from './components/PendingTasksList.js';
+import { NextStepsReminderToast } from './components/NextStepsReminderToast.js';
 
 import { CallRecord, DashboardStats, SystemConfig, LogEntry, GigaChatModel, UserRole } from './types.js';
 import { deduplicateCalls } from './services/callUtils.js';
@@ -110,7 +112,20 @@ export default function App() {
   const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'list' | 'details' | 'stats' | 'consents' | 'admin' | 'guide'>('list');
+  const [activeTab, setActiveTab] = useState<'list' | 'details' | 'tasks' | 'stats' | 'consents' | 'admin' | 'guide'>('list');
+
+  // Count of calls with uncompleted next steps
+  const pendingNextStepsCount = React.useMemo(() => {
+    return calls.filter(c => {
+      if (Array.isArray(c.next_steps_items) && c.next_steps_items.length > 0) {
+        return c.next_steps_items.some(i => !i.completed);
+      }
+      if (Array.isArray(c.next_steps) && c.next_steps.length > 0) {
+        return true;
+      }
+      return false;
+    }).length;
+  }, [calls]);
 
   // Auth & Session state
   const [authToken, setAuthToken] = useState<string | null>(() => {
@@ -593,6 +608,24 @@ export default function App() {
             </button>
 
             <button
+              id="tab-btn-tasks"
+              onClick={() => setActiveTab('tasks')}
+              className={`px-5 py-3.5 text-xs font-bold border-b-2 transition-all flex items-center gap-2 ${
+                activeTab === 'tasks'
+                  ? 'border-purple-600 text-purple-700 bg-white'
+                  : 'border-transparent text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <ListTodo className="w-4 h-4 text-purple-600" />
+              <span>Задачи Next Steps</span>
+              {pendingNextStepsCount > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full text-[10px] font-extrabold bg-purple-100 text-purple-700 border border-purple-200">
+                  {pendingNextStepsCount}
+                </span>
+              )}
+            </button>
+
+            <button
               id="tab-btn-stats"
               onClick={() => setActiveTab('stats')}
               className={`px-5 py-3.5 text-xs font-bold border-b-2 transition-all flex items-center gap-2 ${
@@ -716,6 +749,30 @@ export default function App() {
                 </motion.div>
               )}
 
+              {activeTab === 'tasks' && (
+                <motion.div
+                  key="tab-workspace-tasks"
+                  initial={{ opacity: 0, y: 5 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -5 }}
+                  transition={{ duration: 0.12 }}
+                  className="min-h-[500px]"
+                >
+                  <PendingTasksList
+                    calls={calls}
+                    onSelectCall={(id) => {
+                      setSelectedCallId(id);
+                      setActiveTab('details');
+                    }}
+                    onCallUpdated={(updated) => {
+                      setCalls(prev => prev.map(c => c.call_id === updated.call_id ? updated : c));
+                    }}
+                    userRole={userRole}
+                    salonName={currentSalonName}
+                  />
+                </motion.div>
+              )}
+
               {activeTab === 'stats' && (
                 <motion.div
                   key="tab-workspace-stats"
@@ -811,6 +868,18 @@ export default function App() {
         authToken={authToken}
         onSelectCall={handleSelectCallFromNotification}
         onNewNotification={() => loadData(true)}
+        soundEnabled={soundEnabled}
+      />
+
+      {/* Floating Next Steps Reminder Toast (Bottom-Right) */}
+      <NextStepsReminderToast
+        calls={calls}
+        onOpenTasksTab={() => setActiveTab('tasks')}
+        onOpenCallDetails={(callId) => {
+          setSelectedCallId(callId);
+          setActiveTab('details');
+        }}
+        userRole={userRole}
         soundEnabled={soundEnabled}
       />
 
