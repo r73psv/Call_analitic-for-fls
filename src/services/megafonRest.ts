@@ -429,7 +429,7 @@ export async function sendWcgpRequest(
           'Content-Type': 'application/x-www-form-urlencoded',
           'User-Agent': 'CallQA-Megafon-REST-Client/1.0',
         },
-        timeout: 10000,
+        timeout: 25000,
         responseType: 'text',
         validateStatus: () => true,
       });
@@ -473,7 +473,7 @@ export async function sendWcgpRequest(
     } catch (err: any) {
       lastStatus = 0;
       const errMsg = err.code === 'ECONNABORTED' || err.message?.includes('timeout')
-        ? `Таймаут подключения (10с)`
+        ? `Таймаут подключения (25с)`
         : err.message || String(err);
       diagnostics.push(`POST ${endpoint} => Ошибка: ${errMsg}`);
       lastError = errMsg;
@@ -487,7 +487,7 @@ export async function sendWcgpRequest(
         headers: {
           'User-Agent': 'CallQA-Megafon-REST-Client/1.0',
         },
-        timeout: 10000,
+        timeout: 25000,
         responseType: 'text',
         validateStatus: () => true,
       });

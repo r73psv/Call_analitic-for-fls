@@ -9,7 +9,7 @@ import {
   PhoneCall, Settings, Activity, RefreshCw, 
   ShieldAlert, AlertCircle, HardDrive, Shield, ShieldCheck,
   Lock, Unlock, UserCheck, HeartHandshake, Sparkles, 
-  CheckCircle2, LogOut, User, Key, KeyRound, BarChart3, Pencil
+  CheckCircle2, LogOut, User, Key, KeyRound, BarChart3, Pencil, BookOpen
 } from 'lucide-react';
 
 import { StatsGrid } from './components/StatsGrid.js';
@@ -25,6 +25,7 @@ import { AdminPanel } from './components/AdminPanel.js';
 import { NotificationToastContainer } from './components/NotificationToastContainer.js';
 import { NotificationsBell } from './components/NotificationsBell.js';
 import { EditSalonNameModal } from './components/EditSalonNameModal.js';
+import { UserGuide } from './components/UserGuide.js';
 
 import { CallRecord, DashboardStats, SystemConfig, LogEntry, GigaChatModel, UserRole } from './types.js';
 import { deduplicateCalls } from './services/callUtils.js';
@@ -109,7 +110,7 @@ export default function App() {
   const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'list' | 'details' | 'stats' | 'consents' | 'admin'>('list');
+  const [activeTab, setActiveTab] = useState<'list' | 'details' | 'stats' | 'consents' | 'admin' | 'guide'>('list');
 
   // Auth & Session state
   const [authToken, setAuthToken] = useState<string | null>(() => {
@@ -615,6 +616,18 @@ export default function App() {
               <ShieldCheck className="w-4 h-4" /> Реестр согласий (152-ФЗ)
             </button>
 
+            <button
+              id="tab-btn-guide"
+              onClick={() => setActiveTab('guide')}
+              className={`px-5 py-3.5 text-xs font-bold border-b-2 transition-all flex items-center gap-2 ${
+                activeTab === 'guide'
+                  ? 'border-indigo-600 text-indigo-700 bg-white'
+                  : 'border-transparent text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <BookOpen className="w-4 h-4 text-indigo-600" /> Руководство пользователя
+            </button>
+
             {/* Protected Admin Panel Tab */}
             {userRole === 'admin' && (
               <button
@@ -726,6 +739,19 @@ export default function App() {
                   className="min-h-[500px]"
                 >
                   <ConsentsTable userRole={userRole} salonName={currentSalonName} />
+                </motion.div>
+              )}
+
+              {activeTab === 'guide' && (
+                <motion.div
+                  key="tab-workspace-guide"
+                  initial={{ opacity: 0, y: 5 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -5 }}
+                  transition={{ duration: 0.12 }}
+                  className="min-h-[500px]"
+                >
+                  <UserGuide salonName={currentSalonName} />
                 </motion.div>
               )}
 

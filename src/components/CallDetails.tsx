@@ -10,9 +10,9 @@ import {
   MessageCircle, Database, Download, ExternalLink, Zap,
   ShieldCheck, Lock, Clock, Mic, FileText, FileSpreadsheet, Smartphone, HeartHandshake,
   CheckCircle2, XCircle, HelpCircle, Tag, Tags, Plus, X, Bookmark, Trash2,
-  Scissors, Calendar, UserCheck, Sparkles
+  Scissors, Calendar, UserCheck, Sparkles, ListTodo, CheckSquare, Square, Copy, ArrowRight
 } from 'lucide-react';
-import { CallRecord } from '../types.js';
+import { CallRecord, NextStepItem } from '../types.js';
 import { ReanalyzeButton } from './ReanalyzeButton.js';
 import { refineTranscriptRoles } from '../services/transcriptUtils.js';
 
@@ -79,6 +79,14 @@ export function CallDetails({
   const [exportSuccessFormat, setExportSuccessFormat] = useState<'pdf' | 'csv' | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
 
+  // Next Steps AI state
+  const [generatingNextSteps, setGeneratingNextSteps] = useState(false);
+  const [nextStepsError, setNextStepsError] = useState<string | null>(null);
+  const [nextStepsSuccess, setNextStepsSuccess] = useState<string | null>(null);
+  const [copiedSteps, setCopiedSteps] = useState(false);
+  const [newStepInput, setNewStepInput] = useState('');
+  const [isAddingStep, setIsAddingStep] = useState(false);
+
   // Извлечение параметров сути обращения (услуга, дата, время, мастер)
   const essence = useMemo(() => {
     const kf = (call.key_facts || {}) as any;
@@ -108,21 +116,22 @@ export function CallDetails({
     return { service, date, time, master };
   }, [call]);
 
-  // Разделение резюме на суть обращения и выводы
+  // Разделение резюме на 3 блока: суть обращения, пересказ разговора (2-4 предложения) и выводы
   const summaryParts = useMemo(() => {
     const summary = (call.summary || '').trim();
-    if (!summary) return { essence: '', conclusion: '', raw: 'Резюме не сформировано' };
+    if (!summary) return { essence: '', retelling: '', conclusion: '', raw: 'Резюме не сформировано' };
 
-    const regex = /суть обращения\s*:\s*([\s\S]*?)(?:вывод\s*:\s*([\s\S]*))?$/i;
+    const regex = /суть обращения\s*:\s*([\s\S]*?)(?:(?:пересказ диалога|краткий пересказ(?: разговора)?|пересказ разговора)\s*:\s*([\s\S]*?))?(?:вывод\s*:\s*([\s\S]*))?$/i;
     const match = summary.match(regex);
     if (match) {
       return {
         essence: match[1]?.trim() || '',
-        conclusion: match[2]?.trim() || '',
+        retelling: match[2]?.trim() || '',
+        conclusion: match[3]?.trim() || '',
         raw: summary
       };
     }
-    return { essence: '', conclusion: '', raw: summary };
+    return { essence: '', retelling: '', conclusion: '', raw: summary };
   }, [call.summary]);
 
   // Categorical Tag Management State
@@ -194,7 +203,143 @@ export function CallDetails({
     setVkError(null);
     setExportError(null);
     setTagError(null);
+    setNextStepsError(null);
+    setNextStepsSuccess(null);
+    setCopiedSteps(false);
+    setIsAddingStep(false);
+    setNewStepInput('');
   }, [call.call_id]);
+
+  const currentNextStepsItems = useMemo<NextStepItem[]>(() => {
+    if (call.next_steps_items && call.next_steps_items.length > 0) {
+      return call.next_steps_items;
+    }
+    if (call.next_steps && call.next_steps.length > 0) {
+      return call.next_steps.map((text, idx) => ({
+        id: `step-${idx + 1}`,
+        text,
+        completed: false,
+      }));
+    }
+    return [];
+  }, [call.next_steps_items, call.next_steps]);
+
+  const completedCount = useMemo(() => {
+    return currentNextStepsItems.filter(i => i.completed).length;
+  }, [currentNextStepsItems]);
+
+  const handleGenerateNextSteps = async () => {
+    setGeneratingNextSteps(true);
+    setNextStepsError(null);
+    setNextStepsSuccess(null);
+    try {
+      const res = await fetch(`/api/calls/${call.call_id}/generate-next-steps`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Ошибка сервера (${res.status})`);
+      }
+      const data = await res.json();
+      if (onCallUpdated && data.call) {
+        onCallUpdated(data.call);
+      }
+      setNextStepsSuccess(`Сформировано ${data.next_steps?.length || 0} задач Next Steps`);
+      setTimeout(() => setNextStepsSuccess(null), 4000);
+    } catch (err: any) {
+      setNextStepsError(err.message || 'Не удалось сформировать следующие шаги');
+      setTimeout(() => setNextStepsError(null), 6000);
+    } finally {
+      setGeneratingNextSteps(false);
+    }
+  };
+
+  const handleToggleStep = async (stepId: string) => {
+    const updatedItems = currentNextStepsItems.map(item =>
+      item.id === stepId ? { ...item, completed: !item.completed } : item
+    );
+    if (onCallUpdated) {
+      onCallUpdated({
+        ...call,
+        next_steps_items: updatedItems,
+        next_steps: updatedItems.map(i => i.text),
+      });
+    }
+
+    try {
+      await fetch(`/api/calls/${call.call_id}/next-steps`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ next_steps_items: updatedItems }),
+      });
+    } catch (err) {
+      console.error('Ошибка сохранения статуса задачи:', err);
+    }
+  };
+
+  const handleAddNewStep = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!newStepInput.trim()) return;
+
+    const newItem: NextStepItem = {
+      id: `manual-${Date.now()}`,
+      text: newStepInput.trim(),
+      completed: false,
+    };
+    const updatedItems = [...currentNextStepsItems, newItem];
+    setNewStepInput('');
+    setIsAddingStep(false);
+
+    if (onCallUpdated) {
+      onCallUpdated({
+        ...call,
+        next_steps_items: updatedItems,
+        next_steps: updatedItems.map(i => i.text),
+      });
+    }
+
+    try {
+      await fetch(`/api/calls/${call.call_id}/next-steps`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ next_steps_items: updatedItems }),
+      });
+    } catch (err) {
+      console.error('Ошибка добавления задачи:', err);
+    }
+  };
+
+  const handleDeleteStep = async (stepId: string) => {
+    const updatedItems = currentNextStepsItems.filter(item => item.id !== stepId);
+    if (onCallUpdated) {
+      onCallUpdated({
+        ...call,
+        next_steps_items: updatedItems,
+        next_steps: updatedItems.map(i => i.text),
+      });
+    }
+
+    try {
+      await fetch(`/api/calls/${call.call_id}/next-steps`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ next_steps_items: updatedItems }),
+      });
+    } catch (err) {
+      console.error('Ошибка удаления задачи:', err);
+    }
+  };
+
+  const handleCopySteps = () => {
+    if (currentNextStepsItems.length === 0) return;
+    const textToCopy = currentNextStepsItems
+      .map((item, idx) => `${idx + 1}. [${item.completed ? 'X' : ' '}] ${item.text}`)
+      .join('\n');
+    navigator.clipboard.writeText(textToCopy);
+    setCopiedSteps(true);
+    setTimeout(() => setCopiedSteps(false), 2500);
+  };
 
   const handleExport = async (format: 'pdf' | 'csv') => {
     setExportingFormat(format);
@@ -212,7 +357,7 @@ export function CallDetails({
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `Otchet_Lik28_${call.call_id}.${format}`;
+      link.download = `Otchet_Audita_${call.call_id}.${format}`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -617,6 +762,30 @@ export function CallDetails({
             userRole={userRole}
           />
 
+          {/* AI Next Steps Toolbar Button */}
+          <button
+            onClick={handleGenerateNextSteps}
+            disabled={generatingNextSteps || !call.transcript}
+            id="btn-generate-next-steps"
+            className={`text-xs font-semibold px-3.5 py-1.5 rounded-lg border flex items-center gap-1.5 transition-all cursor-pointer ${
+              generatingNextSteps
+                ? 'bg-purple-100 text-purple-800 border-purple-300 animate-pulse'
+                : currentNextStepsItems.length > 0
+                ? 'bg-purple-50 hover:bg-purple-100 text-purple-800 border-purple-200'
+                : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white border-transparent shadow-xs'
+            }`}
+            title="Использовать ИИ для формирования отдельного списка 'Next Steps' (следующих шагов) для администратора"
+          >
+            <Sparkles className={`w-3.5 h-3.5 ${generatingNextSteps ? 'animate-spin text-purple-600' : currentNextStepsItems.length > 0 ? 'text-purple-600' : 'text-purple-200'}`} />
+            <span>
+              {generatingNextSteps
+                ? 'Генерация Next Steps...'
+                : currentNextStepsItems.length > 0
+                ? `Next Steps (${completedCount}/${currentNextStepsItems.length})`
+                : 'Next Steps (ИИ)'}
+            </span>
+          </button>
+
           <button
             onClick={handleVk}
             disabled={sendingVk || call.status !== 'completed'}
@@ -937,28 +1106,271 @@ export function CallDetails({
               </div>
             </div>
 
-            {/* Текст резюме с выделением сути обращения и выводов */}
-            {summaryParts.essence && summaryParts.conclusion ? (
-              <div className="space-y-2 text-xs leading-relaxed">
-                <div className="p-3 bg-slate-50 rounded-lg border border-slate-200/60">
-                  <div className="font-semibold text-slate-700 mb-0.5 flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 inline-block"></span>
-                    <span>Суть обращения:</span>
+            {/* Текст резюме с выделением сути обращения, пересказа диалога (2-4 предложения) и выводов */}
+            {summaryParts.essence || summaryParts.retelling || summaryParts.conclusion ? (
+              <div className="space-y-2.5 text-xs leading-relaxed">
+                {summaryParts.essence && (
+                  <div className="p-3 bg-slate-50/90 rounded-lg border border-slate-200/70">
+                    <div className="font-semibold text-slate-700 mb-1 flex items-center justify-between">
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 inline-block"></span>
+                        <span>Суть обращения:</span>
+                      </div>
+                      <span className="text-[10px] text-slate-400 font-medium">Параметры записи</span>
+                    </div>
+                    <p className="text-slate-800 leading-normal">{summaryParts.essence}</p>
                   </div>
-                  <p className="text-slate-800">{summaryParts.essence}</p>
-                </div>
-                <div className="p-3 bg-emerald-50/60 rounded-lg border border-emerald-200/60">
-                  <div className="font-semibold text-emerald-900 mb-0.5 flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block"></span>
-                    <span>Вывод:</span>
+                )}
+
+                {summaryParts.retelling && (
+                  <div className="p-3 bg-indigo-50/40 rounded-lg border border-indigo-200/70">
+                    <div className="font-semibold text-indigo-950 mb-1 flex items-center justify-between">
+                      <div className="flex items-center gap-1.5">
+                        <MessageSquare className="w-3.5 h-3.5 text-indigo-600" />
+                        <span>Краткий пересказ разговора:</span>
+                      </div>
+                      <span className="text-[10px] bg-indigo-100/90 text-indigo-800 font-bold px-1.5 py-0.5 rounded-full">
+                        2–4 предложения
+                      </span>
+                    </div>
+                    <p className="text-slate-800 leading-normal">{summaryParts.retelling}</p>
                   </div>
-                  <p className="text-slate-800">{summaryParts.conclusion}</p>
-                </div>
+                )}
+
+                {summaryParts.conclusion && (
+                  <div className="p-3 bg-emerald-50/60 rounded-lg border border-emerald-200/70">
+                    <div className="font-semibold text-emerald-950 mb-1 flex items-center justify-between">
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 inline-block"></span>
+                        <span>Вывод:</span>
+                      </div>
+                      <span className="text-[10px] text-emerald-700/80 font-medium">Результат диалога</span>
+                    </div>
+                    <p className="text-slate-800 leading-normal">{summaryParts.conclusion}</p>
+                  </div>
+                )}
               </div>
             ) : (
               <p className="text-xs text-slate-700 leading-relaxed bg-slate-50 p-3 rounded-lg border border-slate-200/60">
                 {call.summary || 'Резюме не сформировано'}
               </p>
+            )}
+          </div>
+
+          {/* Next Steps for Administrator (Interactive AI Checklist) */}
+          <div className="border border-purple-200/80 rounded-2xl p-4 bg-gradient-to-br from-purple-50/40 via-white to-indigo-50/20 shadow-xs space-y-3" id="next-steps-container">
+            {/* Header */}
+            <div className="flex items-center justify-between gap-2 flex-wrap pb-2 border-b border-purple-100">
+              <div className="flex items-center gap-2">
+                <div className="p-1.5 rounded-lg bg-purple-600 text-white shrink-0">
+                  <Sparkles className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
+                      Следующие шаги для администратора (Next Steps)
+                    </h3>
+                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-purple-100 text-purple-700 border border-purple-200">
+                      ИИ GigaChat
+                    </span>
+                  </div>
+                  {call.next_steps_generated_at ? (
+                    <p className="text-[10px] text-slate-500">
+                      Сформировано ИИ: {new Date(call.next_steps_generated_at).toLocaleString('ru-RU', { timeZone: 'Europe/Samara', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} (Самара)
+                    </p>
+                  ) : (
+                    <p className="text-[10px] text-slate-500">
+                      Индивидуальный пошаговый чек-лист задач по итогам диалога
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/* Header Action Buttons */}
+              <div className="flex items-center gap-1.5">
+                {currentNextStepsItems.length > 0 && (
+                  <>
+                    <span className="text-[11px] font-semibold text-purple-800 bg-purple-100/70 px-2 py-0.5 rounded-full border border-purple-200/60">
+                      {completedCount} из {currentNextStepsItems.length} выполнено
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleCopySteps}
+                      id="btn-copy-next-steps"
+                      className="text-xs px-2.5 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-700 flex items-center gap-1 transition-colors cursor-pointer"
+                      title="Скопировать список задач в буфер обмена"
+                    >
+                      {copiedSteps ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5 text-slate-500" />}
+                      <span>{copiedSteps ? 'Скопировано!' : 'Копировать'}</span>
+                    </button>
+                  </>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleGenerateNextSteps}
+                  disabled={generatingNextSteps || !call.transcript}
+                  id="btn-regenerate-next-steps"
+                  className="text-xs px-2.5 py-1 rounded-lg border border-purple-300 bg-purple-50 hover:bg-purple-100 text-purple-800 font-semibold flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-50"
+                  title="Сформировать или пересчитать список следующих шагов с помощью ИИ"
+                >
+                  <Sparkles className={`w-3.5 h-3.5 text-purple-600 ${generatingNextSteps ? 'animate-spin' : ''}`} />
+                  <span>{generatingNextSteps ? 'Генерация...' : currentNextStepsItems.length > 0 ? 'Обновить ИИ' : 'Сформировать ИИ'}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Notification alerts */}
+            {nextStepsSuccess && (
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 flex items-center justify-between text-xs text-emerald-900 animate-in fade-in">
+                <div className="flex items-center gap-2">
+                  <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>{nextStepsSuccess}</span>
+                </div>
+                <button onClick={() => setNextStepsSuccess(null)} className="p-0.5 text-emerald-700 hover:text-emerald-900 cursor-pointer">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {nextStepsError && (
+              <div className="bg-rose-50 border border-rose-200 rounded-xl p-2.5 flex items-center justify-between text-xs text-rose-900 animate-in fade-in">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>{nextStepsError}</span>
+                </div>
+                <button onClick={() => setNextStepsError(null)} className="p-0.5 text-rose-700 hover:text-rose-900 cursor-pointer">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* Progress bar if tasks exist */}
+            {currentNextStepsItems.length > 0 && (
+              <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                <div
+                  className="bg-gradient-to-r from-purple-500 to-emerald-500 h-1.5 rounded-full transition-all duration-300"
+                  style={{ width: `${(completedCount / currentNextStepsItems.length) * 100}%` }}
+                />
+              </div>
+            )}
+
+            {/* Tasks list or Empty state */}
+            {currentNextStepsItems.length > 0 ? (
+              <div className="space-y-1.5">
+                {currentNextStepsItems.map((item, idx) => (
+                  <div
+                    key={item.id}
+                    className={`group flex items-start justify-between gap-3 p-2.5 rounded-xl border transition-all ${
+                      item.completed
+                        ? 'bg-emerald-50/40 border-emerald-200/80 text-slate-500'
+                        : 'bg-white border-slate-200 hover:border-purple-300 hover:shadow-3xs text-slate-800'
+                    }`}
+                  >
+                    <div
+                      className="flex items-start gap-2.5 flex-1 cursor-pointer select-none"
+                      onClick={() => handleToggleStep(item.id)}
+                    >
+                      <button
+                        type="button"
+                        className="mt-0.5 shrink-0 focus:outline-none cursor-pointer"
+                        aria-label={item.completed ? 'Отметить невыполненной' : 'Отметить выполненной'}
+                      >
+                        {item.completed ? (
+                          <div className="w-4 h-4 rounded bg-emerald-600 text-white flex items-center justify-center">
+                            <Check className="w-3 h-3 stroke-[3]" />
+                          </div>
+                        ) : (
+                          <div className="w-4 h-4 rounded border-2 border-slate-300 group-hover:border-purple-500 bg-white" />
+                        )}
+                      </button>
+                      <div className="text-xs leading-snug">
+                        <span className={`font-semibold mr-1.5 ${item.completed ? 'text-slate-400' : 'text-purple-700'}`}>
+                          {idx + 1}.
+                        </span>
+                        <span className={item.completed ? 'line-through text-slate-400' : 'text-slate-800'}>
+                          {item.text}
+                        </span>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteStep(item.id)}
+                      className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-rose-600 rounded transition-opacity cursor-pointer shrink-0"
+                      title="Удалить этот шаг"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+
+                {/* Add custom step inline */}
+                {isAddingStep ? (
+                  <form onSubmit={handleAddNewStep} className="flex items-center gap-2 pt-1">
+                    <input
+                      type="text"
+                      value={newStepInput}
+                      onChange={(e) => setNewStepInput(e.target.value)}
+                      placeholder="Введите дополнительную задачу для администратора..."
+                      className="flex-1 text-xs px-3 py-1.5 rounded-lg border border-purple-300 focus:outline-none focus:ring-2 focus:ring-purple-400 bg-white"
+                      autoFocus
+                    />
+                    <button
+                      type="submit"
+                      className="text-xs px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white font-semibold rounded-lg cursor-pointer"
+                    >
+                      Добавить
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setIsAddingStep(false); setNewStepInput(''); }}
+                      className="text-xs px-2 py-1.5 text-slate-500 hover:text-slate-800 cursor-pointer"
+                    >
+                      Отмена
+                    </button>
+                  </form>
+                ) : (
+                  <div className="pt-1 flex items-center justify-between">
+                    <button
+                      type="button"
+                      onClick={() => setIsAddingStep(true)}
+                      id="btn-add-custom-next-step"
+                      className="text-xs text-purple-700 hover:text-purple-900 font-semibold inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Добавить свой шаг вручную</span>
+                    </button>
+                    <span className="text-[10px] text-slate-400">
+                      Нажмите на задачу, чтобы отметить её выполненной
+                    </span>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-center py-4 px-3 bg-white/70 border border-dashed border-purple-200 rounded-xl space-y-2.5">
+                <div className="w-9 h-9 rounded-full bg-purple-100 text-purple-600 flex items-center justify-center mx-auto">
+                  <Sparkles className="w-5 h-5" />
+                </div>
+                <div>
+                  <p className="text-xs font-semibold text-slate-800">
+                    Список следующих шагов ещё не сформирован
+                  </p>
+                  <p className="text-[11px] text-slate-500 max-w-md mx-auto mt-0.5 leading-relaxed">
+                    Нажмите кнопку ниже, чтобы искусственный интеллект проанализировал диалог и составил пошаговый чек-лист задач для дежурного администратора (бронирование в CRM, отправка подтверждения, напоминание, контроль мастера).
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleGenerateNextSteps}
+                  disabled={generatingNextSteps || !call.transcript}
+                  id="btn-cta-generate-next-steps"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white text-xs font-semibold rounded-xl shadow-xs cursor-pointer transition-all disabled:opacity-50"
+                >
+                  <Sparkles className={`w-3.5 h-3.5 ${generatingNextSteps ? 'animate-spin' : ''}`} />
+                  <span>{generatingNextSteps ? 'ИИ формирует шаги...' : 'Сформировать Next Steps с помощью ИИ'}</span>
+                </button>
+              </div>
             )}
           </div>
 

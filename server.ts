@@ -12,7 +12,7 @@ import dotenv from 'dotenv';
 import { CallRecord, LogEntry, SystemConfig, ModelType, DashboardStats, KeyFacts, VkConfig, YclientsConfig, GigaChatModel, SystemNotification, NotificationType, UserRole } from './src/types.js';
 import { transcribeWithRetry, fixDuplicatedTranscript, refineTranscriptRoles } from './src/services/speechkit.js';
 import { transcribeAudio } from './src/services/transcriptionService.js';
-import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence } from './src/services/gigachat.js';
+import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI } from './src/services/gigachat.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
 import { readStoreSync, writeStore } from './src/store/store.js';
 import { readConsentStoreSync, writeConsentStore } from './src/store/consent-store.js';
@@ -25,8 +25,8 @@ import { adminRouter } from './src/routes/admin.js';
 import { isYandexAuthConfigured } from './src/services/yandex-auth.js';
 import { isGigaChatConfigured } from './src/services/gigachat-auth.js';
 import { hydrateFromS3, scheduleSyncToS3, manualSync, getSyncStatus } from './src/services/s3-sync.js';
-import { generateCallAuditPdf, generatePeriodStatsPdf, PeriodStatsReportData } from './src/services/pdfReport.js';
-import { generateCallCsv } from './src/services/csvExport.js';
+import { generateCallAuditPdf, generatePeriodStatsPdf, generateCallsTablePdf, PeriodStatsReportData } from './src/services/pdfReport.js';
+import { generateCallCsv, generateCallsTableCsv } from './src/services/csvExport.js';
 import { deduplicateCalls } from './src/services/callUtils.js';
 import {
   getWcgpAccounts,
@@ -150,7 +150,7 @@ const SEED_CALLS: CallRecord[] = [
     status: 'completed',
     is_demo: true,
     transcript: `Менеджер: Добрый день! Салон красоты "Лик 28", меня зовут Мария. Чем я могу вам помочь?\nКлиент: Здравствуйте. Я бы хотела записаться на аппаратный маникюр с покрытием шеллак на завтра на вечер.\nМенеджер: Да, конечно, Елена. Завтра на вечер есть свободное время на 18:30 и на 20:00. Какой мастер вам больше нравится — Кристина или Анна?\nКлиент: Давайте к Кристине на 18:30. Сколько это будет стоить?\nМенеджер: Аппаратный маникюр с покрытием у Кристины стоит 2100 рублей. По времени займет около полутора часов. Записываю вас на завтра на 18:30.\nКлиент: Отлично, спасибо большое!\nМенеджер: Пожалуйста! За полчаса до визита мы пришлем вам напоминание в WhatsApp. Ждем вас!`,
-    summary: 'Суть обращения: услуга — аппаратный маникюр с шеллаком, дата — завтра, время — 18:30, мастер — Кристина. Вывод: Администратор Мария оперативно предложила свободные слоты (18:30 и 20:00). Клиент согласовала визит на 18:30 к мастеру Кристине; запись успешно оформлена, обещано напоминание в WhatsApp.',
+    summary: 'Суть обращения: услуга — аппаратный маникюр с шеллаком, дата — завтра, время — 18:30, мастер — Кристина. Пересказ диалога: Клиентка позвонила в салон с намерением записаться на аппаратный маникюр с покрытием шеллак на завтрашний вечер. Администратор Мария поприветствовала гостью и предложила слоты на 18:30 и 20:00 у мастеров Кристины и Анны. Клиентка выбрала время 18:30 к мастеру Кристине и уточнила цену процедуры. Администратор подтвердила запись, озвучила стоимость 2100 рублей и пообещала выслать напоминание в WhatsApp. Вывод: Администратор Мария оперативно предложила свободные слоты (18:30 и 20:00). Клиент согласовала визит на 18:30 к мастеру Кристине; запись успешно оформлена, обещано напоминание в WhatsApp.',
     booking_status: 'согласие',
     key_facts: {
       is_dispute: false,
@@ -185,7 +185,7 @@ const SEED_CALLS: CallRecord[] = [
     status: 'completed',
     is_demo: true,
     transcript: `Клиент: Здравствуйте! Мне пришло сообщение, что моя запись к косметологу на сегодня отменена! Вы издеваетесь? Я уже еду к вам!\nМенеджер: Здравствуйте! Приносим свои глубочайшие извинения. Дело в том, что мастер экстренно заболел, и мы физически не можем провести процедуру прямо сейчас.\nКлиент: Я уже второй раз к вам записываюсь, и вы вечно отменяете! Мне это абсолютно не подходит! Я трачу свое время на дорогу!\nМенеджер: Мы прекрасно вас понимаем и искренне сожалеем. Давайте мы подберем вам другого топ-мастера на удобное время со скидкой 30% на процедуру в качестве компенсации?\nКлиент: Ладно. А когда есть свободное время у другого мастера?\nМенеджер: Завтра в 12:00 или в 15:00 есть окна у Ирины, она ведущий специалист. И мы сделаем вам скидку.\nКлиент: Хорошо, давайте завтра на 12:00 к Ирине.\nМенеджер: Отлично, записала вас на завтра на 12:00 к Ирине. Мы перезвоним вам сегодня вечером, чтобы подтвердить, что все в силе, и зафиксируем скидку 30%. Еще раз извините за неудобства.`,
-    summary: 'Суть обращения: услуга — прием косметолога, дата — завтра, время — 12:00, мастер — Ирина. Вывод: Клиент выразила претензию из-за отмены визита день-в-день по причине болезни мастера. Менеджер Дмитрий применил амортизацию и согласовал перенос визита на завтра к ведущему специалисту Ирине со скидкой 30%; запись подтверждена.',
+    summary: 'Суть обращения: услуга — прием косметолога, дата — завтра, время — 12:00, мастер — Ирина. Пересказ диалога: Клиентка обратилась в салон с резкой претензией по поводу внезапной отмены записи к косметологу день-в-день. Менеджер Дмитрий принес искренние извинения, объяснил причину форс-мажора болезнью мастера и предложил компенсационную скидку 30%. В качестве решения сотрудник подобрал ближайшее удобное окно на завтра в 12:00 к ведущему специалисту Ирине. Клиентка согласилась на предложенный перенос, после чего администратор зафиксировал новую запись со скидкой. Вывод: Клиент выразила претензию из-за отмены визита день-в-день по причине болезни мастера. Менеджер Дмитрий применил амортизацию и согласовал перенос визита на завтра к ведущему специалисту Ирине со скидкой 30%; запись подтверждена.',
     booking_status: 'согласие',
     key_facts: {
       is_dispute: true,
@@ -1073,7 +1073,7 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
     conclusionText = `Администратор вежливо проконсультировал клиента по регламенту салона «${currentSalon}» («${cleanSnippet}»).`;
   }
 
-  const { formattedSummary } = formatSummaryWithEssence(conclusionText, cleanTranscript, essence);
+  const { formattedSummary } = formatSummaryWithEssence(conclusionText, cleanTranscript, essence, currentSalon);
 
   const score = hasDialogue ? (isDispute ? 7 : 9) : null;
   const operatorComment = hasDialogue
@@ -2544,8 +2544,14 @@ setInterval(async () => {
         appendLog('info', 'megafon', `[Авто-Опрос АТС] Проверка завершена. Новых звонков не обнаружено. Следующий фоновый опрос через ${intervalMins} мин.`);
       }
     }
-  } catch (err) {
-    console.error('Error in background polling:', err);
+  } catch (err: any) {
+    const isTimeout = err?.message?.includes('Таймаут') || err?.message?.includes('timeout') || err?.code === 'ECONNABORTED';
+    if (isTimeout) {
+      appendLog('warning', 'megafon', `[Авто-Опрос АТС] Временное ожидание ответа АТС Мегафон (таймаут). Повторный опрос будет выполнен в следующем плановом цикле.`);
+    } else {
+      appendLog('warning', 'megafon', `[Авто-Опрос АТС] Временный сбой при связи с АТС: ${err?.message || err}.`);
+    }
+    console.warn('[Background Polling Warning]', err?.message || err);
   }
 }, 30000); // Check state every 30 seconds
 
@@ -3259,6 +3265,21 @@ app.get('/api/calls', (req, res) => {
       consent_purposes: consent?.purposes || ['quality_control', 'training']
     };
 
+    if (callCopy.summary && callCopy.status === 'completed' && !/пересказ диалога|краткий пересказ/i.test(callCopy.summary)) {
+      const { formattedSummary } = formatSummaryWithEssence(
+        callCopy.summary,
+        callCopy.transcript || '',
+        {
+          service: callCopy.key_facts?.service || null,
+          date: callCopy.key_facts?.date || null,
+          time: callCopy.key_facts?.time || null,
+          master: callCopy.key_facts?.master || null
+        },
+        getEffectiveSalonName()
+      );
+      callCopy.summary = formattedSummary;
+    }
+
     // Role-based data access (RBAC & 152-ФЗ):
     if (userRole === 'viewer') {
       delete callCopy.transcript;
@@ -3276,6 +3297,134 @@ app.get('/api/calls', (req, res) => {
 
   res.json(mappedCalls);
 });
+
+// 1.5. EXPORT CALLS TABLE / FILTERED SELECTION TO PDF (Сводный реестр для управляющего)
+const handleCallsTablePdfExport = (req: express.Request, res: express.Response) => {
+  const db = readDb();
+  const userRole = getCurrentUserRole(req);
+  const salonName = getEffectiveSalonName(db.config);
+
+  const rawIds = req.body?.call_ids || (typeof req.query?.call_ids === 'string' ? req.query.call_ids.split(',') : null);
+  const filterTitle = req.body?.filterTitle || (req.query?.filterTitle as string) || '';
+
+  let callsToExport = db.calls || [];
+  if (Array.isArray(rawIds) && rawIds.length > 0) {
+    const idSet = new Set(rawIds.map((id: any) => String(id).trim()));
+    callsToExport = callsToExport.filter((c: any) => idSet.has(c.call_id));
+  }
+  callsToExport = deduplicateCalls(callsToExport);
+
+  // 152-ФЗ обработка и определение статусов записи для отчета
+  const sanitizedCalls = callsToExport.map((call: any) => {
+    const rawPhone = call.client_phone || call.full_phone || '';
+    const masked = call.client_phone_masked || maskPhone(rawPhone);
+
+    let bookingStatus = call.booking_status || call.key_facts?.booking_status;
+    if (!bookingStatus) {
+      const outcome = (call.key_facts?.call_outcome || '').toLowerCase();
+      const summary = (call.summary || '').toLowerCase();
+      if (outcome === 'запись' || summary.includes('запись подтверждена') || summary.includes('записан')) {
+        bookingStatus = 'согласие';
+      } else if (outcome === 'отказ' || summary.includes('отказ') || summary.includes('не будет в городе')) {
+        bookingStatus = 'отказ';
+      } else if (outcome === 'автоответчик') {
+        bookingStatus = 'не применимо';
+      } else {
+        bookingStatus = 'консультация';
+      }
+    }
+
+    return {
+      ...call,
+      booking_status: bookingStatus,
+      client_phone_masked: masked,
+    };
+  });
+
+  try {
+    const doc = generateCallsTablePdf(sanitizedCalls, userRole, salonName, filterTitle);
+    const safeSalonFile = salonName.replace(/[^a-zA-Zа-яА-Я0-9_-]/g, '_');
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const filename = `Reestr_Zvonkov_${safeSalonFile}_${dateStr}.pdf`;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+
+    doc.pipe(res);
+    doc.end();
+  } catch (error: any) {
+    console.error('Ошибка при генерации PDF реестра звонков:', error);
+    res.status(500).json({ error: `Ошибка формирования PDF: ${error.message || error}` });
+  }
+};
+
+app.get('/api/calls/export-table-pdf', handleCallsTablePdfExport);
+app.post('/api/calls/export-table-pdf', handleCallsTablePdfExport);
+app.get('/api/calls/export/table-pdf', handleCallsTablePdfExport);
+app.post('/api/calls/export/table-pdf', handleCallsTablePdfExport);
+
+// 1.6. EXPORT CALLS TABLE / FILTERED SELECTION TO CSV (Excel / 152-ФЗ)
+const handleCallsTableCsvExport = (req: express.Request, res: express.Response) => {
+  const db = readDb();
+  const userRole = getCurrentUserRole(req);
+  const salonName = getEffectiveSalonName(db.config);
+
+  const rawIds = req.body?.call_ids || (typeof req.query?.call_ids === 'string' ? req.query.call_ids.split(',') : null);
+  const filterTitle = req.body?.filterTitle || (req.query?.filterTitle as string) || '';
+
+  let callsToExport = db.calls || [];
+  if (Array.isArray(rawIds) && rawIds.length > 0) {
+    const idSet = new Set(rawIds.map((id: any) => String(id).trim()));
+    callsToExport = callsToExport.filter((c: any) => idSet.has(c.call_id));
+  }
+  callsToExport = deduplicateCalls(callsToExport);
+
+  // 152-ФЗ обработка
+  const sanitizedCalls = callsToExport.map((call: any) => {
+    const rawPhone = call.client_phone || call.full_phone || '';
+    const masked = call.client_phone_masked || maskPhone(rawPhone);
+
+    let bookingStatus = call.booking_status || call.key_facts?.booking_status;
+    if (!bookingStatus) {
+      const outcome = (call.key_facts?.call_outcome || '').toLowerCase();
+      const summary = (call.summary || '').toLowerCase();
+      if (outcome === 'запись' || summary.includes('запись подтверждена') || summary.includes('записан')) {
+        bookingStatus = 'согласие';
+      } else if (outcome === 'отказ' || summary.includes('отказ') || summary.includes('не будет в городе')) {
+        bookingStatus = 'отказ';
+      } else if (outcome === 'автоответчик') {
+        bookingStatus = 'не применимо';
+      } else {
+        bookingStatus = 'консультация';
+      }
+    }
+
+    return {
+      ...call,
+      booking_status: bookingStatus,
+      client_phone_masked: masked,
+    };
+  });
+
+  try {
+    const csvContent = generateCallsTableCsv(sanitizedCalls, userRole, salonName, filterTitle);
+    const safeSalonFile = salonName.replace(/[^a-zA-Zа-яА-Я0-9_-]/g, '_');
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const filename = `Reestr_Zvonkov_${safeSalonFile}_${dateStr}.csv`;
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+    res.send(csvContent);
+  } catch (error: any) {
+    console.error('Ошибка при генерации CSV реестра звонков:', error);
+    res.status(500).json({ error: `Ошибка формирования CSV: ${error.message || error}` });
+  }
+};
+
+app.get('/api/calls/export-table-csv', handleCallsTableCsvExport);
+app.post('/api/calls/export-table-csv', handleCallsTableCsvExport);
+app.get('/api/calls/export/table-csv', handleCallsTableCsvExport);
+app.post('/api/calls/export/table-csv', handleCallsTableCsvExport);
 
 // 2. GET SINGLE CALL (with 152-ФЗ Role Masking)
 app.get('/api/calls/:id', (req, res) => {
@@ -3312,6 +3461,21 @@ app.get('/api/calls/:id', (req, res) => {
     consent_status: consent?.status || (call.status === 'missed' ? 'not_applicable' : 'active'),
     consent_purposes: consent?.purposes || ['quality_control', 'training']
   };
+
+  if (callCopy.summary && callCopy.status === 'completed' && !/пересказ диалога|краткий пересказ/i.test(callCopy.summary)) {
+    const { formattedSummary } = formatSummaryWithEssence(
+      callCopy.summary,
+      callCopy.transcript || '',
+      {
+        service: callCopy.key_facts?.service || null,
+        date: callCopy.key_facts?.date || null,
+        time: callCopy.key_facts?.time || null,
+        master: callCopy.key_facts?.master || null
+      },
+      getEffectiveSalonName()
+    );
+    callCopy.summary = formattedSummary;
+  }
 
   if (userRole === 'viewer') {
     delete callCopy.transcript;
@@ -3802,6 +3966,82 @@ app.post('/api/calls/:id/reanalyze', async (req, res) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Внутренняя ошибка переанализа звонка' });
   }
+});
+
+// 2.2. GENERATE NEXT STEPS WITH AI FOR CALL (Для администратора салона)
+app.post('/api/calls/:id/generate-next-steps', async (req, res) => {
+  const { id } = req.params;
+  const userRole = getCurrentUserRole(req);
+  if (userRole === 'viewer') {
+    return res.status(403).json({ error: 'Недостаточно прав для формирования следующих шагов (доступно Администраторам, Управляющим и Операторам)' });
+  }
+
+  const db = readDb();
+  const callIndex = db.calls.findIndex((c: any) => c.call_id === id);
+  if (callIndex === -1) {
+    return res.status(404).json({ error: 'Звонок не найден' });
+  }
+
+  const call = db.calls[callIndex];
+  try {
+    const salonName = getEffectiveSalonName(db.config);
+    const { steps, items } = await generateNextStepsWithAI(call, salonName);
+
+    call.next_steps = steps;
+    call.next_steps_items = items;
+    call.next_steps_generated_at = new Date().toISOString();
+
+    db.calls[callIndex] = call;
+    writeStore(db);
+
+    appendLog('info', 'gigachat', `Сформирован список Next Steps (${steps.length} задач) для звонка ${id}`);
+
+    res.json({
+      success: true,
+      next_steps: steps,
+      next_steps_items: items,
+      next_steps_generated_at: call.next_steps_generated_at,
+      call: call
+    });
+  } catch (err: any) {
+    console.error('Ошибка при генерации Next Steps:', err);
+    res.status(500).json({ error: err.message || 'Ошибка генерации списка следующих шагов' });
+  }
+});
+
+// 2.3. UPDATE NEXT STEPS (отметка выполненных задач, добавление пользовательских шагов)
+app.put('/api/calls/:id/next-steps', (req, res) => {
+  const { id } = req.params;
+  const userRole = getCurrentUserRole(req);
+  if (userRole === 'viewer') {
+    return res.status(403).json({ error: 'Недостаточно прав для редактирования следующих шагов' });
+  }
+
+  const db = readDb();
+  const callIndex = db.calls.findIndex((c: any) => c.call_id === id);
+  if (callIndex === -1) {
+    return res.status(404).json({ error: 'Звонок не найден' });
+  }
+
+  const call = db.calls[callIndex];
+  const { next_steps } = req.body;
+  const rawItems = req.body.next_steps_items || req.body.items;
+
+  if (Array.isArray(rawItems)) {
+    call.next_steps_items = rawItems.map((item: any, idx: number) => ({
+      id: item.id || `step-${Date.now()}-${idx + 1}`,
+      text: typeof item === 'string' ? item : item.text,
+      completed: typeof item === 'object' ? Boolean(item.completed) : false,
+    }));
+    call.next_steps = call.next_steps_items.map((i: any) => i.text);
+  } else if (Array.isArray(next_steps)) {
+    call.next_steps = next_steps;
+  }
+
+  db.calls[callIndex] = call;
+  writeStore(db);
+
+  res.json({ success: true, call });
 });
 
 // 3. ANALYZE NEW CALL (REST API)

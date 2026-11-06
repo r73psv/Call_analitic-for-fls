@@ -155,6 +155,17 @@ export interface CallRecord {
 
   // Categorical Manager Tags
   tags?: string[];
+
+  // Next Steps list for administrator
+  next_steps?: string[];
+  next_steps_items?: NextStepItem[];
+  next_steps_generated_at?: string;
+}
+
+export interface NextStepItem {
+  id: string;
+  text: string;
+  completed: boolean;
 }
 
 export interface ConsentRecord {

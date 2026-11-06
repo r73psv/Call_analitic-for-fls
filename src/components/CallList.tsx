@@ -8,7 +8,8 @@ import {
   Search, Filter, AlertTriangle, CheckCircle, Clock, XCircle, 
   RefreshCw, Download, ExternalLink, Zap, ShieldCheck, X, 
   RotateCcw, Flame, CheckCircle2, Star, PhoneMissed, SlidersHorizontal,
-  ChevronDown, PhoneIncoming, PhoneOutgoing, Tag, Tags
+  ChevronDown, ChevronUp, PhoneIncoming, PhoneOutgoing, Tag, Tags,
+  Calendar, User, Smile, Frown, Meh, Award, FileText, FileSpreadsheet, Check
 } from 'lucide-react';
 import { CallRecord } from '../types.js';
 import { getTagBadgeStyle } from './CallDetails.js';
@@ -33,14 +34,31 @@ const STATUS_BADGES: Record<string, { label: string; className: string }> = {
 
 export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls, userRole }: CallListProps) {
   const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState<string>('all');
+  
+  // 4 Primary Filter Criteria (requested by user)
+  const [datePreset, setDatePreset] = useState<string>('all');
+  const [startDate, setStartDate] = useState<string>('');
+  const [endDate, setEndDate] = useState<string>('');
+  const [operatorFilter, setOperatorFilter] = useState<string>('all');
   const [scoreFilter, setScoreFilter] = useState<string>('all');
+  const [toneFilter, setToneFilter] = useState<string>('all');
+
+  // Secondary filters
+  const [statusFilter, setStatusFilter] = useState<string>('all');
   const [modelFilter, setModelFilter] = useState<string>('all');
   const [disputeFilter, setDisputeFilter] = useState<string>('all');
   const [tagFilter, setTagFilter] = useState<string>('all');
   const [quickPreset, setQuickPreset] = useState<string>('all');
-  const [showExtendedFilters, setShowExtendedFilters] = useState(true);
+
+  // Panel state
+  const [isFilterPanelOpen, setIsFilterPanelOpen] = useState<boolean>(true);
   const [isClearingDemo, setIsClearingDemo] = useState(false);
+
+  // Export state for reports
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState<boolean>(false);
+  const [exportingType, setExportingType] = useState<string | null>(null);
+  const [exportSuccessMsg, setExportSuccessMsg] = useState<string | null>(null);
+  const [exportErrorMsg, setExportErrorMsg] = useState<string | null>(null);
 
   // Clean deduplicated calls list
   const uniqueCalls = useMemo(() => {
@@ -50,6 +68,20 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
   // Check if any demo calls exist
   const hasDemoCalls = useMemo(() => {
     return uniqueCalls.some(c => c.is_demo || c.call_id === 'megafon-call-89101' || c.call_id === 'megafon-call-89102');
+  }, [uniqueCalls]);
+
+  // Available unique operators with call count
+  const availableOperators = useMemo(() => {
+    const map = new Map<string, number>();
+    uniqueCalls.forEach(c => {
+      const op = (c.operator_name || '').trim();
+      if (op) {
+        map.set(op, (map.get(op) || 0) + 1);
+      }
+    });
+    return Array.from(map.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'ru'));
   }, [uniqueCalls]);
 
   // Available unique tags across all calls
@@ -92,6 +124,85 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
     return { disputes, booked, declined, lowScore, topScore, missed, processing };
   }, [uniqueCalls]);
 
+  // Tone matching logic helper
+  const matchesTone = (call: CallRecord, toneChoice: string): boolean => {
+    if (toneChoice === 'all') return true;
+    const clientTone = (call.key_facts?.tone_client || '').toLowerCase().trim();
+    const managerTone = (call.key_facts?.tone_manager || '').toLowerCase().trim();
+    const combined = `${clientTone} ${managerTone}`;
+
+    if (toneChoice === 'positive') {
+      return combined.includes('позитив') || combined.includes('довол') || combined.includes('радост') || combined.includes('вежлив');
+    }
+
+    if (toneChoice === 'neutral') {
+      return (combined.includes('нейтрал') || combined.includes('спокойн')) &&
+             !combined.includes('негатив') && !combined.includes('недовол') && !combined.includes('агресс');
+    }
+
+    if (toneChoice === 'negative') {
+      return combined.includes('негатив') ||
+             combined.includes('недовол') ||
+             combined.includes('агресс') ||
+             combined.includes('раздраж') ||
+             combined.includes('претензи') ||
+             combined.includes('жалоб') ||
+             Boolean(call.key_facts?.is_dispute);
+    }
+
+    return true;
+  };
+
+  // Date range matching logic helper (Samara/Moscow timezone friendly)
+  const matchesDate = (timestamp: string): boolean => {
+    if (datePreset === 'all') return true;
+    const d = new Date(timestamp);
+    if (isNaN(d.getTime())) return true;
+
+    const now = new Date();
+    const formatYmd = (dateObj: Date) => {
+      const year = dateObj.getFullYear();
+      const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+      const day = String(dateObj.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
+
+    const todayStr = formatYmd(now);
+
+    if (datePreset === 'today') {
+      return formatYmd(d) === todayStr;
+    }
+
+    if (datePreset === 'yesterday') {
+      const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+      return formatYmd(d) === formatYmd(yesterday);
+    }
+
+    if (datePreset === 'week') {
+      const weekAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7);
+      return d >= weekAgo;
+    }
+
+    if (datePreset === 'month') {
+      const monthAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30);
+      return d >= monthAgo;
+    }
+
+    if (datePreset === 'custom') {
+      if (startDate) {
+        const start = new Date(`${startDate}T00:00:00`);
+        if (d < start) return false;
+      }
+      if (endDate) {
+        const end = new Date(`${endDate}T23:59:59.999`);
+        if (d > end) return false;
+      }
+      return true;
+    }
+
+    return true;
+  };
+
   // Main filter engine with deduplication protection
   const filteredCalls = useMemo(() => {
     const term = searchTerm.toLowerCase().trim();
@@ -133,7 +244,37 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
         if (!matches) return false;
       }
 
-      // 2. Quick preset filter
+      // 2. Date Filter (Параметр: по дате)
+      if (!matchesDate(call.timestamp)) {
+        return false;
+      }
+
+      // 3. Operator Name Filter (Параметр: по имени оператора)
+      if (operatorFilter !== 'all') {
+        const op = (call.operator_name || '').trim().toLowerCase();
+        if (op !== operatorFilter.trim().toLowerCase()) return false;
+      }
+
+      // 4. AI Score Filter (Параметр: по оценке ИИ)
+      if (scoreFilter !== 'all') {
+        const score = call.operator_score;
+        if (scoreFilter === 'high') {
+          if (score === null || score === undefined || score < 8) return false;
+        } else if (scoreFilter === 'medium') {
+          if (score === null || score === undefined || score < 5 || score > 7) return false;
+        } else if (scoreFilter === 'low') {
+          if (score === null || score === undefined || score >= 5) return false;
+        } else if (scoreFilter === 'none') {
+          if (score !== null && score !== undefined) return false;
+        }
+      }
+
+      // 5. Conversation Tone Filter (Параметр: по тональности разговора)
+      if (!matchesTone(call, toneFilter)) {
+        return false;
+      }
+
+      // 6. Quick preset filter
       if (quickPreset !== 'all') {
         if (quickPreset === 'disputes' && !call.key_facts?.is_dispute) return false;
         if (quickPreset === 'booked' && call.booking_status !== 'согласие' && call.key_facts?.call_outcome !== 'запись') return false;
@@ -150,7 +291,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
         if (quickPreset === 'processing' && call.status !== 'processing') return false;
       }
 
-      // 3. Status filter (Анализ и статус записи)
+      // 7. Status filter (Анализ и статус записи)
       if (statusFilter !== 'all') {
         if (statusFilter === 'completed' && call.status !== 'completed') return false;
         if (statusFilter === 'processing' && call.status !== 'processing') return false;
@@ -170,32 +311,18 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
         }
       }
 
-      // 4. Operator Score filter
-      if (scoreFilter !== 'all') {
-        const score = call.operator_score;
-        if (scoreFilter === 'high') {
-          if (score === null || score === undefined || score < 8) return false;
-        } else if (scoreFilter === 'medium') {
-          if (score === null || score === undefined || score < 5 || score > 7) return false;
-        } else if (scoreFilter === 'low') {
-          if (score === null || score === undefined || score >= 5) return false;
-        } else if (scoreFilter === 'none') {
-          if (score !== null && score !== undefined) return false;
-        }
-      }
-
-      // 5. Model filter
+      // 8. Model filter
       if (modelFilter !== 'all') {
         if (call.model_used !== modelFilter) return false;
       }
 
-      // 6. Dispute filter
+      // 9. Dispute filter
       if (disputeFilter !== 'all') {
         if (disputeFilter === 'dispute' && !call.key_facts?.is_dispute) return false;
         if (disputeFilter === 'no_dispute' && call.key_facts?.is_dispute) return false;
       }
 
-      // 7. Categorical Tag filter
+      // 10. Categorical Tag filter
       if (tagFilter !== 'all') {
         if (!Array.isArray(call.tags) || !call.tags.includes(tagFilter)) return false;
       }
@@ -203,26 +330,34 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
       seenIds.add(call.call_id);
       return true;
     });
-  }, [uniqueCalls, searchTerm, quickPreset, statusFilter, scoreFilter, modelFilter, disputeFilter, tagFilter]);
+  }, [uniqueCalls, searchTerm, datePreset, startDate, endDate, operatorFilter, scoreFilter, toneFilter, quickPreset, statusFilter, modelFilter, disputeFilter, tagFilter]);
 
   // Count active filters
   const activeFiltersCount = useMemo(() => {
     let count = 0;
     if (searchTerm.trim() !== '') count++;
+    if (datePreset !== 'all') count++;
+    if (operatorFilter !== 'all') count++;
+    if (scoreFilter !== 'all') count++;
+    if (toneFilter !== 'all') count++;
     if (quickPreset !== 'all') count++;
     if (statusFilter !== 'all') count++;
-    if (scoreFilter !== 'all') count++;
     if (modelFilter !== 'all') count++;
     if (disputeFilter !== 'all') count++;
     if (tagFilter !== 'all') count++;
     return count;
-  }, [searchTerm, quickPreset, statusFilter, scoreFilter, modelFilter, disputeFilter, tagFilter]);
+  }, [searchTerm, datePreset, operatorFilter, scoreFilter, toneFilter, quickPreset, statusFilter, modelFilter, disputeFilter, tagFilter]);
 
   const resetAllFilters = () => {
     setSearchTerm('');
+    setDatePreset('all');
+    setStartDate('');
+    setEndDate('');
+    setOperatorFilter('all');
+    setScoreFilter('all');
+    setToneFilter('all');
     setQuickPreset('all');
     setStatusFilter('all');
-    setScoreFilter('all');
     setModelFilter('all');
     setDisputeFilter('all');
     setTagFilter('all');
@@ -252,11 +387,107 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
     });
   };
 
+  const handleExportTable = async (format: 'pdf' | 'csv', scope: 'filtered' | 'all') => {
+    const targetCalls = scope === 'filtered' ? filteredCalls : uniqueCalls;
+    if (targetCalls.length === 0) {
+      setExportErrorMsg('Выборка пуста — нет звонков для экспорта');
+      return;
+    }
+    const stateKey = `${scope}-${format}`;
+    setExportingType(stateKey);
+    setExportErrorMsg(null);
+    setExportSuccessMsg(null);
+
+    try {
+      const endpoint = format === 'pdf' ? '/api/calls/export-table-pdf' : '/api/calls/export-table-csv';
+      const filterDesc = scope === 'filtered' && activeFiltersCount > 0
+        ? `Выборка (${targetCalls.length} звонков из ${uniqueCalls.length})`
+        : `Полный реестр (${targetCalls.length} звонков)`;
+
+      const callIds = targetCalls.map(c => c.call_id);
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          call_ids: scope === 'filtered' ? callIds : undefined,
+          filterTitle: filterDesc,
+        }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.error || `Ошибка сервера при формировании ${format.toUpperCase()} (${response.status})`);
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const dateStr = new Date().toISOString().slice(0, 10);
+      a.download = `Reestr_Zvonkov_${scope === 'filtered' ? 'vyborka' : 'vse'}_${dateStr}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+
+      setExportSuccessMsg(`Файл ${format.toUpperCase()} (${scope === 'filtered' ? 'выборка' : 'вся таблица'}) успешно сформирован`);
+      setIsExportMenuOpen(false);
+      setTimeout(() => setExportSuccessMsg(null), 4000);
+    } catch (err: any) {
+      setExportErrorMsg(err.message || 'Ошибка формирования отчета');
+    } finally {
+      setExportingType(null);
+    }
+  };
+
+  const handleExportSelectedCall = async (format: 'pdf' | 'csv') => {
+    if (!selectedCallId) return;
+    const stateKey = `selected-${format}`;
+    setExportingType(stateKey);
+    setExportErrorMsg(null);
+    setExportSuccessMsg(null);
+
+    try {
+      const endpoint = format === 'pdf'
+        ? `/api/calls/${selectedCallId}/export-pdf`
+        : `/api/calls/${selectedCallId}/export-csv`;
+
+      const response = await fetch(endpoint);
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.error || `Ошибка сервера (${response.status})`);
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Otchet_${selectedCallId}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+
+      setExportSuccessMsg(`Отчет звонка #${selectedCallId.length > 8 ? selectedCallId.slice(-6) : selectedCallId} в ${format.toUpperCase()} успешно сохранен`);
+      setIsExportMenuOpen(false);
+      setTimeout(() => setExportSuccessMsg(null), 4000);
+    } catch (err: any) {
+      setExportErrorMsg(err.message || 'Ошибка выгрузки звонка');
+    } finally {
+      setExportingType(null);
+    }
+  };
+
+  const selectedCallObj = useMemo(() => {
+    if (!selectedCallId) return null;
+    return uniqueCalls.find(c => c.call_id === selectedCallId) || null;
+  }, [uniqueCalls, selectedCallId]);
+
   return (
     <div className="flex flex-col h-full bg-white border border-slate-100 rounded-2xl shadow-xs overflow-hidden" id="call-list-panel">
-      {/* 1. Header with Title & Search bar */}
+      {/* 1. Header with Title, Search bar, Filter Panel Toggle, and Export Menu */}
       <div className="p-4 border-b border-slate-100 bg-slate-50/50 space-y-3">
-        <div className="flex justify-between items-center">
+        <div className="flex justify-between items-center gap-2">
           <div className="flex items-center gap-2">
             <h2 className="text-sm font-bold text-slate-800 tracking-tight">Журнал звонков</h2>
             <span className="text-xs bg-slate-200/70 text-slate-700 font-semibold px-2 py-0.5 rounded-full">
@@ -264,18 +495,271 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
             </span>
           </div>
 
-          {activeFiltersCount > 0 && (
+          <div className="flex items-center gap-2">
+            {/* Export Reports Dropdown Button & Menu */}
+            <div className="relative">
+              <button
+                type="button"
+                id="btn-export-reports-menu"
+                onClick={() => setIsExportMenuOpen(!isExportMenuOpen)}
+                className={`text-xs px-2.5 py-1.5 rounded-xl border flex items-center gap-1.5 font-semibold transition-all cursor-pointer ${
+                  isExportMenuOpen
+                    ? 'bg-indigo-600 text-white border-indigo-600 shadow-3xs'
+                    : 'bg-white text-slate-700 hover:bg-slate-50 border-slate-200 shadow-3xs'
+                }`}
+                title="Экспорт отчетов управляющего: вся таблица, текущая выборка или выбранный звонок (CSV / PDF)"
+              >
+                {exportingType ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                ) : (
+                  <Download className="w-3.5 h-3.5 text-indigo-600" />
+                )}
+                <span>Экспорт</span>
+                <ChevronDown className={`w-3.5 h-3.5 opacity-70 transition-transform ${isExportMenuOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {isExportMenuOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-40"
+                    onClick={() => setIsExportMenuOpen(false)}
+                  />
+                  <div
+                    className="absolute right-0 mt-1.5 w-80 bg-white rounded-xl shadow-xl border border-slate-200 z-50 p-2.5 text-xs divide-y divide-slate-100 animate-in fade-in zoom-in-95 duration-100"
+                    id="export-dropdown-menu"
+                  >
+                    {/* Header in menu */}
+                    <div className="pb-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-slate-900 flex items-center gap-1.5">
+                          <Download className="w-3.5 h-3.5 text-indigo-600" /> Экспорт отчетов
+                        </span>
+                        <span className="text-[10px] text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded font-mono">
+                          152-ФЗ
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-slate-500 mt-0.5 leading-snug">
+                        Отчеты для управляющего с маскированием персональных данных
+                      </p>
+                    </div>
+
+                    {/* Section 1: CSV Export (Excel) */}
+                    <div className="py-2 space-y-1">
+                      <div className="text-[10px] uppercase font-bold text-slate-400 px-1 tracking-wider flex items-center justify-between">
+                        <span className="flex items-center gap-1">
+                          <FileSpreadsheet className="w-3 h-3 text-emerald-600" /> Таблица в CSV (Excel)
+                        </span>
+                        <span className="text-slate-400 font-normal">разделитель ;</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleExportTable('csv', 'filtered')}
+                        disabled={exportingType !== null || filteredCalls.length === 0}
+                        id="export-filtered-csv-btn"
+                        className="w-full text-left px-2 py-1.5 rounded-lg hover:bg-emerald-50 text-slate-700 hover:text-emerald-900 transition-colors flex items-center justify-between group disabled:opacity-50 cursor-pointer"
+                      >
+                        <div className="flex items-center gap-2">
+                          <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                          <div>
+                            <div className="font-medium">Текущая выборка</div>
+                            <div className="text-[10px] text-slate-400">С учетом всех активных фильтров</div>
+                          </div>
+                        </div>
+                        <span className="font-semibold text-emerald-700 bg-emerald-100/60 px-1.5 py-0.5 rounded text-[10px]">
+                          {exportingType === 'filtered-csv' ? '...' : `${filteredCalls.length} зв.`}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleExportTable('csv', 'all')}
+                        disabled={exportingType !== null || uniqueCalls.length === 0}
+                        id="export-all-csv-btn"
+                        className="w-full text-left px-2 py-1.5 rounded-lg hover:bg-emerald-50 text-slate-700 hover:text-emerald-900 transition-colors flex items-center justify-between group disabled:opacity-50 cursor-pointer"
+                      >
+                        <div className="flex items-center gap-2">
+                          <div className="w-1.5 h-1.5 rounded-full bg-slate-400 group-hover:bg-emerald-500" />
+                          <div>
+                            <div className="font-medium">Вся таблица</div>
+                            <div className="text-[10px] text-slate-400">Полный реестр базы звонков</div>
+                          </div>
+                        </div>
+                        <span className="font-semibold text-slate-600 group-hover:text-emerald-700 bg-slate-100 px-1.5 py-0.5 rounded text-[10px]">
+                          {exportingType === 'all-csv' ? '...' : `${uniqueCalls.length} зв.`}
+                        </span>
+                      </button>
+                    </div>
+
+                    {/* Section 2: PDF Export (Executive Landscape A4) */}
+                    <div className="py-2 space-y-1">
+                      <div className="text-[10px] uppercase font-bold text-slate-400 px-1 tracking-wider flex items-center justify-between">
+                        <span className="flex items-center gap-1">
+                          <FileText className="w-3 h-3 text-rose-600" /> Сводный реестр в PDF
+                        </span>
+                        <span className="text-slate-400 font-normal">А4 альбомный</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleExportTable('pdf', 'filtered')}
+                        disabled={exportingType !== null || filteredCalls.length === 0}
+                        id="export-filtered-pdf-btn"
+                        className="w-full text-left px-2 py-1.5 rounded-lg hover:bg-rose-50 text-slate-700 hover:text-rose-900 transition-colors flex items-center justify-between group disabled:opacity-50 cursor-pointer"
+                      >
+                        <div className="flex items-center gap-2">
+                          <div className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                          <div>
+                            <div className="font-medium">Реестр текущей выборки</div>
+                            <div className="text-[10px] text-slate-400">Сводка KPI + журнал выборки</div>
+                          </div>
+                        </div>
+                        <span className="font-semibold text-rose-700 bg-rose-100/60 px-1.5 py-0.5 rounded text-[10px]">
+                          {exportingType === 'filtered-pdf' ? '...' : `${filteredCalls.length} зв.`}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleExportTable('pdf', 'all')}
+                        disabled={exportingType !== null || uniqueCalls.length === 0}
+                        id="export-all-pdf-btn"
+                        className="w-full text-left px-2 py-1.5 rounded-lg hover:bg-rose-50 text-slate-700 hover:text-rose-900 transition-colors flex items-center justify-between group disabled:opacity-50 cursor-pointer"
+                      >
+                        <div className="flex items-center gap-2">
+                          <div className="w-1.5 h-1.5 rounded-full bg-slate-400 group-hover:bg-rose-500" />
+                          <div>
+                            <div className="font-medium">Реестр всей базы</div>
+                            <div className="text-[10px] text-slate-400">Полный отчет управляющего</div>
+                          </div>
+                        </div>
+                        <span className="font-semibold text-slate-600 group-hover:text-rose-700 bg-slate-100 px-1.5 py-0.5 rounded text-[10px]">
+                          {exportingType === 'all-pdf' ? '...' : `${uniqueCalls.length} зв.`}
+                        </span>
+                      </button>
+                    </div>
+
+                    {/* Section 3: Selected Call Export */}
+                    <div className="pt-2 space-y-1">
+                      <div className="text-[10px] uppercase font-bold text-slate-400 px-1 tracking-wider flex items-center justify-between">
+                        <span>Выбранный звонок</span>
+                        {selectedCallObj && (
+                          <span className="font-mono text-indigo-600 font-bold">
+                            #{selectedCallObj.call_id.length > 8 ? selectedCallObj.call_id.slice(-6) : selectedCallObj.call_id}
+                          </span>
+                        )}
+                      </div>
+
+                      {selectedCallObj ? (
+                        <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                          <button
+                            type="button"
+                            onClick={() => handleExportSelectedCall('pdf')}
+                            disabled={exportingType !== null}
+                            id="export-selected-pdf-btn"
+                            className="px-2 py-1.5 rounded-lg border border-slate-200 hover:border-rose-300 hover:bg-rose-50 text-slate-700 hover:text-rose-900 transition-colors flex items-center justify-center gap-1.5 font-medium cursor-pointer"
+                            title="Аудит выбранного звонка в PDF с подписью управляющего"
+                          >
+                            <FileText className="w-3.5 h-3.5 text-rose-600" />
+                            <span>{exportingType === 'selected-pdf' ? 'Создание...' : 'Аудит в PDF'}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleExportSelectedCall('csv')}
+                            disabled={exportingType !== null}
+                            id="export-selected-csv-btn"
+                            className="px-2 py-1.5 rounded-lg border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50 text-slate-700 hover:text-emerald-900 transition-colors flex items-center justify-center gap-1.5 font-medium cursor-pointer"
+                            title="Паспорт выбранного звонка в CSV формат (Excel)"
+                          >
+                            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>{exportingType === 'selected-csv' ? 'Создание...' : 'Паспорт в CSV'}</span>
+                          </button>
+                        </div>
+                      ) : (
+                        <p className="text-[10px] text-slate-400 px-1 py-1 italic">
+                          Выберите звонок в списке для персональной выгрузки аудита
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Filter Panel Toggle Button */}
             <button
-              onClick={resetAllFilters}
-              id="btn-reset-filters-top"
-              className="text-xs text-rose-600 hover:text-rose-800 font-medium inline-flex items-center gap-1 transition-colors"
-              title="Сбросить все активные фильтры"
+              type="button"
+              id="btn-toggle-filter-panel"
+              onClick={() => setIsFilterPanelOpen(!isFilterPanelOpen)}
+              className={`text-xs px-2.5 py-1.5 rounded-xl border flex items-center gap-1.5 font-semibold transition-all cursor-pointer ${
+                isFilterPanelOpen
+                  ? 'bg-slate-900 text-white border-slate-900 shadow-3xs'
+                  : activeFiltersCount > 0
+                  ? 'bg-indigo-50 text-indigo-700 border-indigo-300'
+                  : 'bg-white text-slate-700 hover:bg-slate-50 border-slate-200'
+              }`}
+              title={isFilterPanelOpen ? 'Скрыть панель фильтров' : 'Открыть панель фильтрации звонков'}
             >
-              <RotateCcw className="w-3 h-3" />
-              <span>Сбросить ({activeFiltersCount})</span>
+              <SlidersHorizontal className="w-3.5 h-3.5" />
+              <span>Фильтры</span>
+              {activeFiltersCount > 0 && (
+                <span className="text-[10px] bg-indigo-600 text-white font-bold px-1.5 py-0.2 rounded-full">
+                  {activeFiltersCount}
+                </span>
+              )}
+              {isFilterPanelOpen ? (
+                <ChevronUp className="w-3.5 h-3.5 opacity-70" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5 opacity-70" />
+              )}
             </button>
-          )}
+
+            {activeFiltersCount > 0 && (
+              <button
+                type="button"
+                onClick={resetAllFilters}
+                id="btn-reset-filters-top"
+                className="text-xs text-rose-600 hover:text-rose-800 font-medium inline-flex items-center gap-1 transition-colors cursor-pointer"
+                title="Сбросить все активные фильтры"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Сбросить</span>
+              </button>
+            )}
+          </div>
         </div>
+
+        {/* Export Notification / Alert messages */}
+        {exportSuccessMsg && (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 flex items-center justify-between gap-2 text-xs text-emerald-900 animate-in fade-in duration-200">
+            <div className="flex items-center gap-2">
+              <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>{exportSuccessMsg}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setExportSuccessMsg(null)}
+              className="text-emerald-700 hover:text-emerald-900 p-0.5 rounded cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {exportErrorMsg && (
+          <div className="bg-rose-50 border border-rose-200 rounded-xl p-2.5 flex items-center justify-between gap-2 text-xs text-rose-900 animate-in fade-in duration-200">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>{exportErrorMsg}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setExportErrorMsg(null)}
+              className="text-rose-700 hover:text-rose-900 p-0.5 rounded cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
 
         {/* Demo Calls Notice Banner */}
         {hasDemoCalls && (
@@ -283,7 +767,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
             <div className="flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-amber-500 shrink-0" />
               <span>
-                <strong>Демо-режим:</strong> Отображаются 2 демонстрационных примера звонков (добавлены по умолчанию до настройки АТС).
+                <strong>Демо-режим:</strong> Отображаются демонстрационные примеры звонков (добавлены по умолчанию до настройки АТС).
               </span>
             </div>
             {onClearDemoCalls && (userRole === 'admin' || userRole === 'manager') && (
@@ -317,7 +801,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
             placeholder="Поиск по ключевым словам: клиент, оператор, тема, резюме, транскрипт..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-9 pr-9 py-2 text-xs bg-white border border-slate-200 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all placeholder:text-slate-400"
+            className="w-full pl-9 pr-9 py-2 text-xs bg-white border border-slate-200 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all placeholder:text-slate-400"
           />
           {searchTerm && (
             <button
@@ -335,13 +819,13 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
       <div className="px-3.5 py-2.5 border-b border-slate-100 bg-white overflow-x-auto scrollbar-none" id="quick-filter-chips">
         <div className="flex items-center gap-1.5 min-w-max">
           <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1 flex items-center gap-1">
-            <SlidersHorizontal className="w-3 h-3 text-slate-400" /> Фильтры:
+            <SlidersHorizontal className="w-3 h-3 text-slate-400" /> Быстро:
           </span>
 
           {/* Все звонки */}
           <button
             onClick={() => setQuickPreset('all')}
-            className={`text-xs px-2.5 py-1 rounded-lg font-medium transition-all flex items-center gap-1.5 border ${
+            className={`text-xs px-2.5 py-1 rounded-lg font-medium transition-all flex items-center gap-1.5 border cursor-pointer ${
               quickPreset === 'all'
                 ? 'bg-slate-900 text-white border-slate-900 shadow-3xs'
                 : 'bg-slate-50 text-slate-600 hover:bg-slate-100 border-slate-200/80'
@@ -356,7 +840,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
           {/* Согласие / Запись */}
           <button
             onClick={() => setQuickPreset(quickPreset === 'booked' ? 'all' : 'booked')}
-            className={`text-xs px-2.5 py-1 rounded-lg font-medium transition-all flex items-center gap-1.5 border ${
+            className={`text-xs px-2.5 py-1 rounded-lg font-medium transition-all flex items-center gap-1.5 border cursor-pointer ${
               quickPreset === 'booked'
                 ? 'bg-emerald-600 text-white border-emerald-600 shadow-3xs'
                 : 'bg-emerald-50/70 text-emerald-800 hover:bg-emerald-100/70 border-emerald-200'
@@ -372,7 +856,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
           {/* Отказ */}
           <button
             onClick={() => setQuickPreset(quickPreset === 'declined' ? 'all' : 'declined')}
-            className={`text-xs px-2.5 py-1 rounded-lg font-medium transition-all flex items-center gap-1.5 border ${
+            className={`text-xs px-2.5 py-1 rounded-lg font-medium transition-all flex items-center gap-1.5 border cursor-pointer ${
               quickPreset === 'declined'
                 ? 'bg-rose-600 text-white border-rose-600 shadow-3xs'
                 : 'bg-rose-50/70 text-rose-800 hover:bg-rose-100/70 border-rose-200'
@@ -388,7 +872,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
           {/* Споры / Конфликты */}
           <button
             onClick={() => setQuickPreset(quickPreset === 'disputes' ? 'all' : 'disputes')}
-            className={`text-xs px-2.5 py-1 rounded-lg font-medium transition-all flex items-center gap-1.5 border ${
+            className={`text-xs px-2.5 py-1 rounded-lg font-medium transition-all flex items-center gap-1.5 border cursor-pointer ${
               quickPreset === 'disputes'
                 ? 'bg-amber-600 text-white border-amber-600 shadow-3xs'
                 : 'bg-amber-50/70 text-amber-800 hover:bg-amber-100/70 border-amber-200'
@@ -404,7 +888,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
           {/* Низкая оценка (< 5) */}
           <button
             onClick={() => setQuickPreset(quickPreset === 'low_score' ? 'all' : 'low_score')}
-            className={`text-xs px-2.5 py-1 rounded-lg font-medium transition-all flex items-center gap-1.5 border ${
+            className={`text-xs px-2.5 py-1 rounded-lg font-medium transition-all flex items-center gap-1.5 border cursor-pointer ${
               quickPreset === 'low_score'
                 ? 'bg-red-600 text-white border-red-600 shadow-3xs'
                 : 'bg-red-50/70 text-red-800 hover:bg-red-100/70 border-red-200'
@@ -420,7 +904,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
           {/* Высокая оценка (>= 8) */}
           <button
             onClick={() => setQuickPreset(quickPreset === 'top_score' ? 'all' : 'top_score')}
-            className={`text-xs px-2.5 py-1 rounded-lg font-medium transition-all flex items-center gap-1.5 border ${
+            className={`text-xs px-2.5 py-1 rounded-lg font-medium transition-all flex items-center gap-1.5 border cursor-pointer ${
               quickPreset === 'top_score'
                 ? 'bg-indigo-600 text-white border-indigo-600 shadow-3xs'
                 : 'bg-indigo-50/70 text-indigo-800 hover:bg-indigo-100/70 border-indigo-200'
@@ -437,7 +921,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
           {presetStats.missed > 0 && (
             <button
               onClick={() => setQuickPreset(quickPreset === 'missed' ? 'all' : 'missed')}
-              className={`text-xs px-2.5 py-1 rounded-lg font-medium transition-all flex items-center gap-1.5 border ${
+              className={`text-xs px-2.5 py-1 rounded-lg font-medium transition-all flex items-center gap-1.5 border cursor-pointer ${
                 quickPreset === 'missed'
                   ? 'bg-slate-700 text-white border-slate-700 shadow-3xs'
                   : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200'
@@ -453,148 +937,365 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
         </div>
       </div>
 
-      {/* 3. Detailed Parameter Filter Selectors (Выпадающие списки точной фильтрации) */}
-      <div className="p-3 border-b border-slate-100 bg-slate-50/30 space-y-2">
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
-          {/* Статус анализа и записи */}
-          <div>
-            <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">
-              Статус анализа
-            </label>
-            <select
-              id="filter-status-select"
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="w-full text-xs bg-white border border-slate-200 rounded-lg p-1.5 focus:outline-hidden focus:border-emerald-500 text-slate-700 font-medium"
-            >
-              <option value="all">Все статусы</option>
-              <option value="completed">✓ Обработан успешно</option>
-              <option value="booked">✓ Запись (согласие)</option>
-              <option value="declined">✗ Отказ от записи</option>
-              <option value="consultation">ℹ Консультация</option>
-              <option value="missed">📞 Пропущенный вызов</option>
-              <option value="processing">⏳ В обработке</option>
-              <option value="failed">⚠ Сбой анализа</option>
-            </select>
+      {/* 3. Dedicated Call Filtering Panel (Панель фильтрации звонков: дата, оператор, оценка ИИ, тональность) */}
+      {isFilterPanelOpen && (
+        <div className="p-3.5 border-b border-slate-200/80 bg-linear-to-b from-slate-50/90 via-white to-slate-50/30 space-y-3" id="call-filter-panel">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800 uppercase tracking-wider">
+              <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-600" />
+              <span>Панель фильтрации звонков</span>
+            </div>
+            <div className="text-[11px] text-slate-500">
+              Показано: <span className="font-bold text-slate-800">{filteredCalls.length}</span> из {uniqueCalls.length}
+            </div>
           </div>
 
-          {/* Оценка оператора */}
-          <div>
-            <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">
-              Оценка оператора
-            </label>
-            <select
-              id="filter-score-select"
-              value={scoreFilter}
-              onChange={(e) => setScoreFilter(e.target.value)}
-              className="w-full text-xs bg-white border border-slate-200 rounded-lg p-1.5 focus:outline-hidden focus:border-emerald-500 text-slate-700 font-medium"
-            >
-              <option value="all">Любая оценка</option>
-              <option value="high">🟢 8–10 (Высокая)</option>
-              <option value="medium">🟡 5–7 (Средняя)</option>
-              <option value="low">🔴 1–4 (Низкая / Спор)</option>
-              <option value="none">⚪ Без оценки</option>
-            </select>
+          {/* The 4 Requested Core Filters: Date, Operator Name, AI Score, Conversation Tone */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+            {/* 1. ФИЛЬТР ПО ДАТЕ */}
+            <div className={`p-2.5 rounded-xl border transition-all ${
+              datePreset !== 'all' ? 'bg-indigo-50/30 border-indigo-200 shadow-3xs' : 'bg-white border-slate-200/80 shadow-3xs'
+            }`}>
+              <div className="flex items-center justify-between mb-1.5">
+                <label htmlFor="filter-date-select" className="text-[10px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1">
+                  <Calendar className="w-3 h-3 text-indigo-600" />
+                  <span>По дате звонка</span>
+                </label>
+                {datePreset !== 'all' && (
+                  <button
+                    type="button"
+                    onClick={() => { setDatePreset('all'); setStartDate(''); setEndDate(''); }}
+                    className="text-[10px] text-indigo-600 hover:text-indigo-800 font-bold cursor-pointer"
+                    title="Сбросить фильтр даты"
+                  >
+                    × Сброс
+                  </button>
+                )}
+              </div>
+              <select
+                id="filter-date-select"
+                value={datePreset}
+                onChange={(e) => setDatePreset(e.target.value)}
+                className={`w-full text-xs rounded-lg p-1.5 focus:outline-hidden focus:border-indigo-500 transition-colors font-medium border ${
+                  datePreset !== 'all' ? 'bg-white border-indigo-300 text-indigo-950 font-semibold' : 'bg-slate-50/60 border-slate-200 text-slate-700'
+                }`}
+              >
+                <option value="all">📅 За всё время</option>
+                <option value="today">Сегодня</option>
+                <option value="yesterday">Вчера</option>
+                <option value="week">Последние 7 дней</option>
+                <option value="month">Последние 30 дней</option>
+                <option value="custom">Указать даты (от и до)...</option>
+              </select>
+
+              {datePreset === 'custom' && (
+                <div className="flex items-center gap-1.5 pt-1.5">
+                  <input
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => setStartDate(e.target.value)}
+                    className="w-1/2 text-[11px] p-1 bg-white border border-slate-200 rounded-md text-slate-700 focus:outline-hidden focus:border-indigo-500"
+                    title="Дата начала периода"
+                  />
+                  <span className="text-slate-400 text-xs">—</span>
+                  <input
+                    type="date"
+                    value={endDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                    className="w-1/2 text-[11px] p-1 bg-white border border-slate-200 rounded-md text-slate-700 focus:outline-hidden focus:border-indigo-500"
+                    title="Дата конца периода"
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* 2. ФИЛЬТР ПО ИМЕНИ ОПЕРАТОРА */}
+            <div className={`p-2.5 rounded-xl border transition-all ${
+              operatorFilter !== 'all' ? 'bg-blue-50/30 border-blue-200 shadow-3xs' : 'bg-white border-slate-200/80 shadow-3xs'
+            }`}>
+              <div className="flex items-center justify-between mb-1.5">
+                <label htmlFor="filter-operator-select" className="text-[10px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1">
+                  <User className="w-3 h-3 text-blue-600" />
+                  <span>По имени оператора</span>
+                </label>
+                {operatorFilter !== 'all' && (
+                  <button
+                    type="button"
+                    onClick={() => setOperatorFilter('all')}
+                    className="text-[10px] text-blue-600 hover:text-blue-800 font-bold cursor-pointer"
+                    title="Сбросить фильтр оператора"
+                  >
+                    × Сброс
+                  </button>
+                )}
+              </div>
+              <select
+                id="filter-operator-select"
+                value={operatorFilter}
+                onChange={(e) => setOperatorFilter(e.target.value)}
+                className={`w-full text-xs rounded-lg p-1.5 focus:outline-hidden focus:border-blue-500 transition-colors font-medium border ${
+                  operatorFilter !== 'all' ? 'bg-white border-blue-300 text-blue-950 font-semibold' : 'bg-slate-50/60 border-slate-200 text-slate-700'
+                }`}
+              >
+                <option value="all">👤 Все операторы ({availableOperators.length})</option>
+                {availableOperators.map((op) => (
+                  <option key={op.name} value={op.name}>
+                    {op.name} ({op.count})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* 3. ФИЛЬТР ПО ОЦЕНКЕ ИИ */}
+            <div className={`p-2.5 rounded-xl border transition-all ${
+              scoreFilter !== 'all' ? 'bg-amber-50/30 border-amber-200 shadow-3xs' : 'bg-white border-slate-200/80 shadow-3xs'
+            }`}>
+              <div className="flex items-center justify-between mb-1.5">
+                <label htmlFor="filter-score-select" className="text-[10px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1">
+                  <Star className="w-3 h-3 text-amber-500" />
+                  <span>По оценке ИИ</span>
+                </label>
+                {scoreFilter !== 'all' && (
+                  <button
+                    type="button"
+                    onClick={() => setScoreFilter('all')}
+                    className="text-[10px] text-amber-600 hover:text-amber-800 font-bold cursor-pointer"
+                    title="Сбросить фильтр оценки"
+                  >
+                    × Сброс
+                  </button>
+                )}
+              </div>
+              <select
+                id="filter-score-select"
+                value={scoreFilter}
+                onChange={(e) => setScoreFilter(e.target.value)}
+                className={`w-full text-xs rounded-lg p-1.5 focus:outline-hidden focus:border-amber-500 transition-colors font-medium border ${
+                  scoreFilter !== 'all' ? 'bg-white border-amber-300 text-amber-950 font-semibold' : 'bg-slate-50/60 border-slate-200 text-slate-700'
+                }`}
+              >
+                <option value="all">⭐ Любая оценка</option>
+                <option value="high">🟢 8–10 (Высокий балл / Топ)</option>
+                <option value="medium">🟡 5–7 (Средний балл)</option>
+                <option value="low">🔴 1–4 (Низкий балл / Проблемный)</option>
+                <option value="none">⚪ Без оценки</option>
+              </select>
+            </div>
+
+            {/* 4. ФИЛЬТР ПО ТОНАЛЬНОСТИ РАЗГОВОРА */}
+            <div className={`p-2.5 rounded-xl border transition-all ${
+              toneFilter !== 'all' ? 'bg-emerald-50/30 border-emerald-200 shadow-3xs' : 'bg-white border-slate-200/80 shadow-3xs'
+            }`}>
+              <div className="flex items-center justify-between mb-1.5">
+                <label htmlFor="filter-tone-select" className="text-[10px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1">
+                  <Smile className="w-3 h-3 text-emerald-600" />
+                  <span>По тональности</span>
+                </label>
+                {toneFilter !== 'all' && (
+                  <button
+                    type="button"
+                    onClick={() => setToneFilter('all')}
+                    className="text-[10px] text-emerald-600 hover:text-emerald-800 font-bold cursor-pointer"
+                    title="Сбросить фильтр тональности"
+                  >
+                    × Сброс
+                  </button>
+                )}
+              </div>
+              <select
+                id="filter-tone-select"
+                value={toneFilter}
+                onChange={(e) => setToneFilter(e.target.value)}
+                className={`w-full text-xs rounded-lg p-1.5 focus:outline-hidden focus:border-emerald-500 transition-colors font-medium border ${
+                  toneFilter !== 'all' ? 'bg-white border-emerald-300 text-emerald-950 font-semibold' : 'bg-slate-50/60 border-slate-200 text-slate-700'
+                }`}
+              >
+                <option value="all">💬 Все тональности</option>
+                <option value="positive">🟢 Позитивная (доброжелательная)</option>
+                <option value="neutral">🟡 Нейтральная / Спокойная</option>
+                <option value="negative">🔴 Негативная / Раздражённая</option>
+              </select>
+            </div>
           </div>
 
-          {/* Конфликты / Претензии */}
-          <div>
-            <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">
-              Конфликты
-            </label>
-            <select
-              id="filter-dispute-select"
-              value={disputeFilter}
-              onChange={(e) => setDisputeFilter(e.target.value)}
-              className="w-full text-xs bg-white border border-slate-200 rounded-lg p-1.5 focus:outline-hidden focus:border-emerald-500 text-slate-700 font-medium"
-            >
-              <option value="all">Все диалоги</option>
-              <option value="dispute">🔥 Только со спором</option>
-              <option value="no_dispute">🛡️ Без конфликтов</option>
-            </select>
+          {/* Secondary Filter Row: Status, Category Tag, AI Model */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1 border-t border-slate-100">
+            <div>
+              <label htmlFor="filter-status-select" className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                Статус записи / анализа
+              </label>
+              <select
+                id="filter-status-select"
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="w-full text-xs bg-white border border-slate-200 rounded-lg p-1.5 text-slate-700 font-medium focus:outline-hidden focus:border-indigo-500"
+              >
+                <option value="all">Все статусы</option>
+                <option value="completed">✓ Обработан успешно</option>
+                <option value="booked">✓ Запись (согласие)</option>
+                <option value="declined">✗ Отказ от записи</option>
+                <option value="consultation">ℹ Консультация</option>
+                <option value="missed">📞 Пропущенный вызов</option>
+                <option value="processing">⏳ В обработке</option>
+                <option value="failed">⚠ Сбой анализа</option>
+              </select>
+            </div>
+
+            <div>
+              <label htmlFor="filter-tag-select" className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                Тег категории
+              </label>
+              <select
+                id="filter-tag-select"
+                value={tagFilter}
+                onChange={(e) => setTagFilter(e.target.value)}
+                className="w-full text-xs bg-white border border-slate-200 rounded-lg p-1.5 text-slate-700 font-medium focus:outline-hidden focus:border-indigo-500"
+              >
+                <option value="all">Все теги ({availableTags.length})</option>
+                {availableTags.map((tag) => (
+                  <option key={tag} value={tag}>#{tag}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label htmlFor="filter-model-select" className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                ИИ-Модель анализа
+              </label>
+              <select
+                id="filter-model-select"
+                value={modelFilter}
+                onChange={(e) => setModelFilter(e.target.value)}
+                className="w-full text-xs bg-white border border-slate-200 rounded-lg p-1.5 text-slate-700 font-medium focus:outline-hidden focus:border-indigo-500"
+              >
+                <option value="all">Все модели</option>
+                <option value="GigaChat:Lite">GigaChat:Lite</option>
+                <option value="GigaChat:Pro">GigaChat:Pro</option>
+                <option value="GigaChat:Max">GigaChat:Max</option>
+                <option value="GigaChat:Ultra">GigaChat:Ultra</option>
+              </select>
+            </div>
           </div>
 
-          {/* ИИ-Модель */}
-          <div>
-            <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">
-              ИИ-Модель
-            </label>
-            <select
-              id="filter-model-select"
-              value={modelFilter}
-              onChange={(e) => setModelFilter(e.target.value)}
-              className="w-full text-xs bg-white border border-slate-200 rounded-lg p-1.5 focus:outline-hidden focus:border-emerald-500 text-slate-700 font-medium"
-            >
-              <option value="all">Все модели</option>
-              <option value="GigaChat:Lite">GigaChat:Lite</option>
-              <option value="GigaChat:Pro">GigaChat:Pro</option>
-              <option value="GigaChat:Max">GigaChat:Max</option>
-              <option value="GigaChat:Ultra">GigaChat:Ultra</option>
-            </select>
-          </div>
+          {/* Quick Tag Pills */}
+          {availableTags.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 pt-1">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-0.5">Частые теги:</span>
+              {availableTags.map((tag) => {
+                const isSelected = tagFilter === tag;
+                return (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => setTagFilter(isSelected ? 'all' : tag)}
+                    className={`text-[10px] px-2 py-0.5 rounded-md font-medium border transition-all flex items-center gap-1 cursor-pointer ${
+                      isSelected
+                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-3xs font-semibold'
+                        : 'bg-white text-slate-600 hover:bg-slate-100 border-slate-200'
+                    }`}
+                  >
+                    <Tag className="w-2.5 h-2.5 opacity-70" />
+                    <span>{tag}</span>
+                    {isSelected && <X className="w-2.5 h-2.5 ml-0.5" />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
-          {/* Тег категории */}
-          <div>
-            <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">
-              Тег звонка
-            </label>
-            <select
-              id="filter-tag-select"
-              value={tagFilter}
-              onChange={(e) => setTagFilter(e.target.value)}
-              className="w-full text-xs bg-white border border-slate-200 rounded-lg p-1.5 focus:outline-hidden focus:border-indigo-500 text-slate-700 font-medium"
-            >
-              <option value="all">Все теги ({availableTags.length})</option>
-              {availableTags.map((tag) => (
-                <option key={tag} value={tag}>#{tag}</option>
-              ))}
-            </select>
-          </div>
+          {/* 4. Active Criteria Tags & One-Click Dismiss */}
+          {activeFiltersCount > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-slate-200/80">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">
+                Активно ({activeFiltersCount}):
+              </span>
+
+              {datePreset !== 'all' && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-indigo-50 text-indigo-800 border border-indigo-200 px-2 py-0.5 rounded-lg shadow-3xs">
+                  <Calendar className="w-2.5 h-2.5" />
+                  <span>
+                    Дата: {datePreset === 'today' ? 'Сегодня' : datePreset === 'yesterday' ? 'Вчера' : datePreset === 'week' ? '7 дней' : datePreset === 'month' ? '30 дней' : `${startDate || '...'} — ${endDate || '...'}`}
+                  </span>
+                  <button type="button" onClick={() => { setDatePreset('all'); setStartDate(''); setEndDate(''); }} className="hover:opacity-70 ml-0.5 cursor-pointer">
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              )}
+
+              {operatorFilter !== 'all' && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-blue-50 text-blue-800 border border-blue-200 px-2 py-0.5 rounded-lg shadow-3xs">
+                  <User className="w-2.5 h-2.5" />
+                  <span>Оператор: {operatorFilter}</span>
+                  <button type="button" onClick={() => setOperatorFilter('all')} className="hover:opacity-70 ml-0.5 cursor-pointer">
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              )}
+
+              {scoreFilter !== 'all' && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-amber-50 text-amber-800 border border-amber-200 px-2 py-0.5 rounded-lg shadow-3xs">
+                  <Star className="w-2.5 h-2.5" />
+                  <span>
+                    Балл: {scoreFilter === 'high' ? '8–10' : scoreFilter === 'medium' ? '5–7' : scoreFilter === 'low' ? '1–4' : 'Без оценки'}
+                  </span>
+                  <button type="button" onClick={() => setScoreFilter('all')} className="hover:opacity-70 ml-0.5 cursor-pointer">
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              )}
+
+              {toneFilter !== 'all' && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-lg shadow-3xs">
+                  <Smile className="w-2.5 h-2.5" />
+                  <span>
+                    Тон: {toneFilter === 'positive' ? 'Позитивный' : toneFilter === 'neutral' ? 'Нейтральный' : 'Негативный'}
+                  </span>
+                  <button type="button" onClick={() => setToneFilter('all')} className="hover:opacity-70 ml-0.5 cursor-pointer">
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              )}
+
+              {statusFilter !== 'all' && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-slate-100 text-slate-800 border border-slate-300 px-2 py-0.5 rounded-lg shadow-3xs">
+                  <span>Статус: {statusFilter}</span>
+                  <button type="button" onClick={() => setStatusFilter('all')} className="hover:opacity-70 ml-0.5 cursor-pointer">
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              )}
+
+              {tagFilter !== 'all' && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-indigo-50 text-indigo-800 border border-indigo-200 px-2 py-0.5 rounded-lg shadow-3xs">
+                  <Tag className="w-2.5 h-2.5" />
+                  <span>#{tagFilter}</span>
+                  <button type="button" onClick={() => setTagFilter('all')} className="hover:opacity-70 ml-0.5 cursor-pointer">
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              )}
+
+              {searchTerm.trim() && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-slate-100 text-slate-800 border border-slate-300 px-2 py-0.5 rounded-lg shadow-3xs">
+                  <Search className="w-2.5 h-2.5" />
+                  <span>Поиск: «{searchTerm}»</span>
+                  <button type="button" onClick={() => setSearchTerm('')} className="hover:opacity-70 ml-0.5 cursor-pointer">
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              )}
+
+              <button
+                type="button"
+                onClick={resetAllFilters}
+                className="text-[11px] text-rose-600 hover:text-rose-800 font-bold ml-auto hover:underline cursor-pointer"
+              >
+                Очистить всё
+              </button>
+            </div>
+          )}
         </div>
-
-        {/* Quick Tag Pills */}
-        {availableTags.length > 0 && (
-          <div className="flex flex-wrap items-center gap-1.5 pt-1.5 border-t border-slate-100">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-0.5">Теги:</span>
-            {availableTags.map((tag) => {
-              const isSelected = tagFilter === tag;
-              return (
-                <button
-                  key={tag}
-                  type="button"
-                  onClick={() => setTagFilter(isSelected ? 'all' : tag)}
-                  className={`text-[10px] px-2 py-0.5 rounded-md font-medium border transition-all flex items-center gap-1 cursor-pointer ${
-                    isSelected
-                      ? 'bg-indigo-600 text-white border-indigo-600 shadow-3xs font-semibold'
-                      : 'bg-white text-slate-600 hover:bg-slate-100 border-slate-200'
-                  }`}
-                >
-                  <Tag className="w-2.5 h-2.5 opacity-70" />
-                  <span>{tag}</span>
-                  {isSelected && <X className="w-2.5 h-2.5 ml-0.5" />}
-                </button>
-              );
-            })}
-          </div>
-        )}
-
-        {/* 4. Active criteria tags & Reset button */}
-        {activeFiltersCount > 0 && (
-          <div className="flex items-center justify-between pt-1 text-[11px] border-t border-slate-100">
-            <span className="text-slate-500 font-medium">
-              Применено параметров: <span className="font-bold text-slate-800">{activeFiltersCount}</span>
-            </span>
-            <button
-              onClick={resetAllFilters}
-              id="btn-reset-filters"
-              className="text-emerald-700 hover:text-emerald-900 font-bold inline-flex items-center gap-1 hover:underline cursor-pointer"
-            >
-              <RotateCcw className="w-3 h-3" />
-              <span>Очистить все</span>
-            </button>
-          </div>
-        )}
-      </div>
+      )}
 
       {/* 5. Call Cards Container */}
       <div className="flex-1 overflow-y-auto divide-y divide-slate-100" id="call-cards-scroll-container">
@@ -673,6 +1374,11 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
                         </span>
                       )}
                       <span className="truncate">{displayName}</span>
+                      {call.operator_name && (
+                        <span className="text-[11px] font-normal text-slate-500 truncate" title={`Оператор: ${call.operator_name}`}>
+                          ↔ {call.operator_name}
+                        </span>
+                      )}
                     </h3>
                   </div>
                   
@@ -733,6 +1439,25 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
                         {(call.booking_status || call.key_facts?.booking_status) === 'согласие' ? 'Запись: да' :
                          (call.booking_status || call.key_facts?.booking_status) === 'отказ' ? 'Отказ' :
                          (call.booking_status || call.key_facts?.booking_status)}
+                      </span>
+                    )}
+                    {/* Tone Badge */}
+                    {call.key_facts?.tone_client && (
+                      <span className={`font-semibold px-1.5 py-0.2 rounded-sm text-[10px] border flex items-center gap-0.5 ${
+                        (call.key_facts.tone_client.toLowerCase().includes('позитив') || call.key_facts.tone_client.toLowerCase().includes('довол'))
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                          : (call.key_facts.tone_client.toLowerCase().includes('негатив') || call.key_facts.tone_client.toLowerCase().includes('недовол') || call.key_facts.is_dispute)
+                          ? 'bg-rose-50 text-rose-700 border-rose-200'
+                          : 'bg-slate-50 text-slate-600 border-slate-200'
+                      }`} title={`Тональность: ${call.key_facts.tone_client}`}>
+                        {(call.key_facts.tone_client.toLowerCase().includes('позитив') || call.key_facts.tone_client.toLowerCase().includes('довол')) ? (
+                          <Smile className="w-2.5 h-2.5 text-emerald-600" />
+                        ) : (call.key_facts.tone_client.toLowerCase().includes('негатив') || call.key_facts.tone_client.toLowerCase().includes('недовол') || call.key_facts.is_dispute) ? (
+                          <Frown className="w-2.5 h-2.5 text-rose-600" />
+                        ) : (
+                          <Meh className="w-2.5 h-2.5 text-slate-400" />
+                        )}
+                        <span className="capitalize">{call.key_facts.tone_client}</span>
                       </span>
                     )}
                   </div>

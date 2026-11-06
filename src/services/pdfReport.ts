@@ -248,13 +248,22 @@ export function generateCallAuditPdf(call: CallRecord, userRole: string = 'manag
 
   doc.y = summaryHeaderY + 24;
   const summaryText = call.summary || 'Резюме диалога отсутствует.';
-  const summaryMatch = summaryText.match(/суть обращения\s*:\s*([\s\S]*?)(?:вывод\s*:\s*([\s\S]*))?$/i);
-  if (summaryMatch && summaryMatch[1] && summaryMatch[2]) {
-    doc.font('AppFontBold').fontSize(8.5).fillColor('#4338ca').text('Суть обращения: ', margin + 10, doc.y, { continued: true });
-    doc.font('AppFont').fillColor('#1e293b').text(summaryMatch[1].trim(), { width: contentWidth - 20, lineGap: 2 });
-    doc.moveDown(0.3);
-    doc.font('AppFontBold').fontSize(8.5).fillColor('#047857').text('Вывод: ', margin + 10, doc.y, { continued: true });
-    doc.font('AppFont').fillColor('#1e293b').text(summaryMatch[2].trim(), { width: contentWidth - 20, lineGap: 3 });
+  const summaryMatch = summaryText.match(/суть обращения\s*:\s*([\s\S]*?)(?:(?:пересказ диалога|краткий пересказ(?: разговора)?|пересказ разговора)\s*:\s*([\s\S]*?))?(?:вывод\s*:\s*([\s\S]*))?$/i);
+  if (summaryMatch && (summaryMatch[1] || summaryMatch[2] || summaryMatch[3])) {
+    if (summaryMatch[1]?.trim()) {
+      doc.font('AppFontBold').fontSize(8.5).fillColor('#4338ca').text('Суть обращения: ', margin + 10, doc.y, { continued: true });
+      doc.font('AppFont').fillColor('#1e293b').text(summaryMatch[1].trim(), { width: contentWidth - 20, lineGap: 2 });
+      doc.moveDown(0.3);
+    }
+    if (summaryMatch[2]?.trim()) {
+      doc.font('AppFontBold').fontSize(8.5).fillColor('#1e1b4b').text('Краткий пересказ (2–4 предложения): ', margin + 10, doc.y, { continued: true });
+      doc.font('AppFont').fillColor('#1e293b').text(summaryMatch[2].trim(), { width: contentWidth - 20, lineGap: 2 });
+      doc.moveDown(0.3);
+    }
+    if (summaryMatch[3]?.trim()) {
+      doc.font('AppFontBold').fontSize(8.5).fillColor('#047857').text('Вывод: ', margin + 10, doc.y, { continued: true });
+      doc.font('AppFont').fillColor('#1e293b').text(summaryMatch[3].trim(), { width: contentWidth - 20, lineGap: 3 });
+    }
   } else {
     doc
       .font('AppFont')
@@ -701,7 +710,7 @@ export function generatePeriodStatsPdf(data: PeriodStatsReportData, customSalonN
   const signY = doc.y;
   doc.rect(margin, signY, contentWidth, 42).fillAndStroke('#f8fafc', '#e2e8f0');
 
-  doc.font('AppFontBold').fontSize(8).fillColor('#475569').text('УТВЕРЖДЕНИЕ ОТЧЕТА УПРАВЛЯЮЩИМ САЛОНА «ЛИК 28»', margin + 12, signY + 7);
+  doc.font('AppFontBold').fontSize(8).fillColor('#475569').text(`УТВЕРЖДЕНИЕ ОТЧЕТА УПРАВЛЯЮЩИМ САЛОНА «${salonName.toUpperCase()}»`, margin + 12, signY + 7);
   doc.font('AppFont').fontSize(7.5).fillColor('#334155').text(
     'Управляющий салоном: ________________________ / ________________________       Дата: «____» ________________ 202___ г.',
     margin + 12,
@@ -727,4 +736,373 @@ export function generatePeriodStatsPdf(data: PeriodStatsReportData, customSalonN
 
   return doc;
 }
+
+/**
+ * Генерация сводного реестра звонков в PDF (формат А4 альбомный / Landscape)
+ * Предназначен для управляющего салоном: содержит сводку KPI, оценку работы операторов и детальный журнал
+ */
+export function generateCallsTablePdf(
+  calls: CallRecord[],
+  userRole: string = 'manager',
+  customSalonName?: string,
+  filterTitle?: string
+): InstanceType<typeof PDFDocument> {
+  const salonName = (customSalonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
+
+  // Создаем документ в альбомной ориентации (841.89 x 595.28)
+  const doc = new PDFDocument({
+    size: 'A4',
+    layout: 'landscape',
+    margin: 36,
+    bufferPages: true,
+    info: {
+      Title: `Сводный реестр звонков — Салон «${salonName}»`,
+      Author: `Салон красоты «${salonName}» — Речевая аналитика GigaChat`,
+      Subject: 'Сводный отчет управляющего по качеству звонков и конверсии (152-ФЗ)',
+    },
+  });
+
+  const fonts = getFontPaths();
+  doc.registerFont('AppFont', fonts.regular);
+  doc.registerFont('AppFontBold', fonts.bold);
+
+  const pageWidth = 841.89;
+  const pageHeight = 595.28;
+  const margin = 36;
+  const contentWidth = pageWidth - margin * 2; // 769.89
+
+  // Вспомогательная функция проверки места на странице
+  function ensureSpace(neededHeight: number, onNewPage?: () => void) {
+    if (doc.y + neededHeight > pageHeight - margin - 25) {
+      doc.addPage();
+      if (onNewPage) {
+        onNewPage();
+      }
+    }
+  }
+
+  // Расчет сводных KPI
+  let bookedCount = 0;
+  let declinedCount = 0;
+  let consultationCount = 0;
+  let disputeCount = 0;
+  let totalScore = 0;
+  let scoredCallsCount = 0;
+  let totalDurationSec = 0;
+
+  calls.forEach(call => {
+    const rawStatus = (call.booking_status || call.key_facts?.booking_status || '').toLowerCase().trim();
+    const outcome = (call.key_facts?.call_outcome || '').toLowerCase().trim();
+    if (rawStatus === 'согласие' || rawStatus.includes('соглас') || outcome === 'запись') {
+      bookedCount++;
+    } else if (rawStatus === 'отказ' || rawStatus.includes('отказ') || outcome === 'отказ') {
+      declinedCount++;
+    } else {
+      consultationCount++;
+    }
+
+    if (call.key_facts?.is_dispute) {
+      disputeCount++;
+    }
+
+    if (call.operator_score !== null && call.operator_score !== undefined) {
+      totalScore += Number(call.operator_score);
+      scoredCallsCount++;
+    }
+
+    totalDurationSec += call.duration_seconds || 0;
+  });
+
+  const totalCalls = calls.length;
+  const conversionRate = totalCalls > 0 ? ((bookedCount / totalCalls) * 100).toFixed(1) : '0.0';
+  const declinedRate = totalCalls > 0 ? ((declinedCount / totalCalls) * 100).toFixed(1) : '0.0';
+  const disputeRate = totalCalls > 0 ? ((disputeCount / totalCalls) * 100).toFixed(1) : '0.0';
+  const avgScore = scoredCallsCount > 0 ? (totalScore / scoredCallsCount).toFixed(1) : '—';
+  const avgDurationSec = totalCalls > 0 ? Math.round(totalDurationSec / totalCalls) : 0;
+  const avgDurationText = `${Math.floor(avgDurationSec / 60)} мин. ${avgDurationSec % 60} сек.`;
+
+  const nowSamara = new Date().toLocaleString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'Europe/Samara',
+  });
+
+  // 1. Верхний титульный баннер
+  doc.rect(margin, margin, contentWidth, 48).fill('#1e1b4b');
+  doc.font('AppFontBold').fontSize(14).fillColor('#ffffff').text(`САЛОН КРАСОТЫ «${salonName.toUpperCase()}»`, margin + 14, margin + 10);
+  doc
+    .font('AppFont')
+    .fontSize(8.5)
+    .fillColor('#c7d2fe')
+    .text('СВОДНЫЙ РЕЕСТР И АУДИТ ЗВОНКОВ — ОФИЦИАЛЬНЫЙ ОТЧЕТ УПРАВЛЯЮЩЕГО САЛОНОМ', margin + 14, margin + 28);
+
+  // Правый блок баннера (выборка/фильтр)
+  const displayFilter = filterTitle ? `Выборка: ${filterTitle}` : 'Выборка: Все звонки журнала';
+  doc.font('AppFontBold').fontSize(8.5).fillColor('#f8fafc').text(displayFilter, margin, margin + 12, {
+    align: 'right',
+    width: contentWidth - 14,
+  });
+  doc.font('AppFont').fontSize(7.5).fillColor('#94a3b8').text(`Всего звонков в отчете: ${totalCalls}`, margin, margin + 28, {
+    align: 'right',
+    width: contentWidth - 14,
+  });
+
+  doc.y = margin + 54;
+
+  // 2. Метаданные (дата, 152-ФЗ, роль)
+  doc.font('AppFont').fontSize(7.5).fillColor('#64748b');
+  doc.text(
+    `Дата выгрузки: ${nowSamara} (Самара, UTC+4)  •  Маскирование 152-ФЗ: Активно  •  Уровень доступа: ${userRole.toUpperCase()}  •  Модель анализа: Сбер GigaChat`,
+    margin,
+    doc.y
+  );
+  doc.moveDown(0.6);
+
+  // 3. Блок сводных KPI-карточек для управляющего
+  const kpiY = doc.y;
+  const numCards = 6;
+  const gap = 8;
+  const cardWidth = (contentWidth - gap * (numCards - 1)) / numCards;
+  const cardHeight = 44;
+
+  const kpiCards = [
+    { label: 'ВСЕГО ЗВОНКОВ', val: `${totalCalls}`, sub: 'В выборке отчета', color: '#0f172a', bg: '#f8fafc', border: '#e2e8f0' },
+    { label: 'КОНВЕРСИЯ В ЗАПИСЬ', val: `${conversionRate}%`, sub: `${bookedCount} клиентов`, color: '#15803d', bg: '#f0fdf4', border: '#bbf7d0' },
+    { label: 'ОТКАЗЫ ОТ ЗАПИСИ', val: `${declinedRate}%`, sub: `${declinedCount} клиентов`, color: '#b91c1c', bg: '#fef2f2', border: '#fecaca' },
+    { label: 'СПОРЫ / ПРЕТЕНЗИИ', val: `${disputeRate}%`, sub: `${disputeCount} звонков`, color: disputeCount > 0 ? '#b91c1c' : '#475569', bg: disputeCount > 0 ? '#fef2f2' : '#f8fafc', border: disputeCount > 0 ? '#fecaca' : '#e2e8f0' },
+    { label: 'СРЕДНИЙ БАЛЛ ИИ', val: `${avgScore} / 10`, sub: `${scoredCallsCount} оценено`, color: (Number(avgScore) || 0) >= 8 ? '#15803d' : '#0369a1', bg: '#f0f9ff', border: '#bae6fd' },
+    { label: 'СРЕДНЕЕ ВРЕМЯ', val: avgDurationText, sub: `${avgDurationSec} сек.`, color: '#334155', bg: '#f8fafc', border: '#e2e8f0' },
+  ];
+
+  kpiCards.forEach((c, idx) => {
+    const cx = margin + idx * (cardWidth + gap);
+    doc.rect(cx, kpiY, cardWidth, cardHeight).fillAndStroke(c.bg, c.border);
+    doc.font('AppFontBold').fontSize(6.5).fillColor('#64748b').text(c.label, cx + 6, kpiY + 6, { width: cardWidth - 12 });
+    doc.font('AppFontBold').fontSize(11).fillColor(c.color).text(c.val, cx + 6, kpiY + 16, { width: cardWidth - 12 });
+    doc.font('AppFont').fontSize(6.5).fillColor('#64748b').text(c.sub, cx + 6, kpiY + 31, { width: cardWidth - 12 });
+  });
+
+  doc.y = kpiY + cardHeight + 10;
+
+  // 4. Определение колонок реестра звонков
+  // Ширина: 22 + 75 + 65 + 75 + 85 + 95 + 72 + 38 + 55 + 38 + 150 = 770
+  const cols = {
+    idx: { x: margin, w: 22, title: '№' },
+    date: { x: margin + 22, w: 75, title: 'Дата / Время' },
+    id: { x: margin + 97, w: 65, title: 'ID / Тип' },
+    phone: { x: margin + 162, w: 75, title: 'Клиент (152-ФЗ)' },
+    operator: { x: margin + 237, w: 85, title: 'Оператор' },
+    service: { x: margin + 322, w: 95, title: 'Услуга / Мастер' },
+    status: { x: margin + 417, w: 72, title: 'Статус записи' },
+    score: { x: margin + 489, w: 38, title: 'Балл' },
+    tone: { x: margin + 527, w: 55, title: 'Тональность' },
+    dispute: { x: margin + 582, w: 38, title: 'Спор' },
+    summary: { x: margin + 620, w: 150, title: 'Суть обращения и резюме диалога' },
+  };
+
+  function drawTableHeaders() {
+    const thY = doc.y;
+    doc.rect(margin, thY, contentWidth, 18).fill('#1e293b');
+    doc.font('AppFontBold').fontSize(7).fillColor('#ffffff');
+
+    doc.text(cols.idx.title, cols.idx.x + 3, thY + 5);
+    doc.text(cols.date.title, cols.date.x + 4, thY + 5);
+    doc.text(cols.id.title, cols.id.x + 4, thY + 5);
+    doc.text(cols.phone.title, cols.phone.x + 4, thY + 5);
+    doc.text(cols.operator.title, cols.operator.x + 4, thY + 5);
+    doc.text(cols.service.title, cols.service.x + 4, thY + 5);
+    doc.text(cols.status.title, cols.status.x + 4, thY + 5);
+    doc.text(cols.score.title, cols.score.x + 4, thY + 5);
+    doc.text(cols.tone.title, cols.tone.x + 4, thY + 5);
+    doc.text(cols.dispute.title, cols.dispute.x + 4, thY + 5);
+    doc.text(cols.summary.title, cols.summary.x + 4, thY + 5);
+
+    doc.y = thY + 18;
+  }
+
+  // Отрисовка шапки таблицы
+  drawTableHeaders();
+
+  // 5. Отрисовка строк таблицы
+  if (calls.length === 0) {
+    const emptyY = doc.y;
+    doc.rect(margin, emptyY, contentWidth, 24).fillAndStroke('#ffffff', '#e2e8f0');
+    doc.font('AppFont').fontSize(8.5).fillColor('#64748b').text('По выбранным критериям звонки не найдены', margin + 12, emptyY + 7);
+    doc.y = emptyY + 24;
+  } else {
+    calls.forEach((call, index) => {
+      const rowHeight = 26;
+      ensureSpace(rowHeight, () => {
+        drawTableHeaders();
+      });
+
+      const rowY = doc.y;
+      const isEven = index % 2 === 0;
+      doc.rect(margin, rowY, contentWidth, rowHeight).fillAndStroke(isEven ? '#ffffff' : '#f8fafc', '#f1f5f9');
+
+      // 152-ФЗ Телефон
+      const rawPhone = call.client_phone || (call as any).full_phone || '';
+      const maskedPhone = call.client_phone_masked || maskPhone(rawPhone);
+      const clientPhone = (userRole === 'admin' && rawPhone) ? rawPhone : maskedPhone;
+
+      // Дата и время
+      let dateText = '—';
+      try {
+        const d = new Date(call.timestamp);
+        dateText = d.toLocaleString('ru-RU', {
+          timeZone: 'Europe/Samara',
+          day: '2-digit',
+          month: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+      } catch {}
+
+      // Длительность
+      const durSec = call.duration_seconds || 0;
+      const durText = durSec > 0 ? `${Math.floor(durSec / 60)}м ${durSec % 60}с` : '—';
+
+      // Статус записи
+      const rawStatus = (call.booking_status || call.key_facts?.booking_status || '').toLowerCase().trim();
+      let statusLabel = 'Консультация';
+      let statusColor = '#0369a1';
+      if (rawStatus === 'согласие' || rawStatus.includes('соглас') || call.key_facts?.call_outcome === 'запись') {
+        statusLabel = '✓ Согласие';
+        statusColor = '#15803d';
+      } else if (rawStatus === 'отказ' || rawStatus.includes('отказ') || call.key_facts?.call_outcome === 'отказ') {
+        statusLabel = '✕ Отказ';
+        statusColor = '#b91c1c';
+      } else if (rawStatus === 'не применимо' || call.key_facts?.call_outcome === 'автоответчик') {
+        statusLabel = 'Автоответ';
+        statusColor = '#64748b';
+      }
+
+      // Оценка
+      const sc = call.operator_score;
+      const scoreText = sc !== null && sc !== undefined ? `${sc}/10` : '—';
+      let scoreColor = '#64748b';
+      if (sc !== null && sc !== undefined) {
+        scoreColor = sc >= 8 ? '#15803d' : sc >= 5 ? '#b45309' : '#b91c1c';
+      }
+
+      // Спор
+      const isDispute = Boolean(call.key_facts?.is_dispute);
+      const disputeText = isDispute ? 'ДА' : 'Нет';
+      const disputeColor = isDispute ? '#dc2626' : '#94a3b8';
+
+      // Тональность
+      const toneClient = call.key_facts?.tone_client || 'нейтральн.';
+
+      // Услуга / мастер
+      const svc = call.key_facts?.service || 'Консультация';
+      const mstr = call.key_facts?.master ? `(${call.key_facts.master})` : '';
+      const serviceText = mstr ? `${svc} ${mstr}` : svc;
+
+      // Суть / резюме (обрезаем до 130 символов)
+      let summaryText = call.key_facts?.client_issue || call.summary || 'Обращение клиента обработано.';
+      if (summaryText.length > 120) {
+        summaryText = summaryText.slice(0, 117) + '...';
+      }
+
+      // Рендерим ячейки строки
+      doc.font('AppFont').fontSize(6.5).fillColor('#64748b').text(String(index + 1), cols.idx.x + 3, rowY + 5);
+
+      // Дата и длительность
+      doc.font('AppFontBold').fontSize(6.8).fillColor('#1e293b').text(dateText, cols.date.x + 4, rowY + 5);
+      doc.font('AppFont').fontSize(6.2).fillColor('#64748b').text(durText, cols.date.x + 4, rowY + 14);
+
+      // ID и направление
+      const shortId = call.call_id.length > 10 ? call.call_id.slice(-8) : call.call_id;
+      doc.font('AppFontBold').fontSize(6.5).fillColor('#0f172a').text(shortId, cols.id.x + 4, rowY + 5);
+      doc.font('AppFont').fontSize(6.2).fillColor('#64748b').text(call.type === 'outgoing' ? 'Исходящий' : 'Входящий', cols.id.x + 4, rowY + 14);
+
+      // Телефон
+      doc.font('AppFont').fontSize(6.8).fillColor('#1e293b').text(clientPhone, cols.phone.x + 4, rowY + 9);
+
+      // Оператор
+      const opName = call.operator_name || 'Не указан';
+      doc.font('AppFontBold').fontSize(6.8).fillColor('#0f172a').text(opName, cols.operator.x + 4, rowY + 9, {
+        width: cols.operator.w - 6,
+        ellipsis: true,
+      });
+
+      // Услуга / Мастер
+      doc.font('AppFont').fontSize(6.5).fillColor('#334155').text(serviceText, cols.service.x + 4, rowY + 5, {
+        width: cols.service.w - 6,
+        height: 18,
+        ellipsis: true,
+      });
+
+      // Статус записи
+      doc.font('AppFontBold').fontSize(6.8).fillColor(statusColor).text(statusLabel, cols.status.x + 4, rowY + 9);
+
+      // Оценка
+      doc.font('AppFontBold').fontSize(7).fillColor(scoreColor).text(scoreText, cols.score.x + 4, rowY + 9);
+
+      // Тональность
+      doc.font('AppFont').fontSize(6.5).fillColor('#475569').text(toneClient, cols.tone.x + 4, rowY + 9, {
+        width: cols.tone.w - 6,
+        ellipsis: true,
+      });
+
+      // Спор
+      doc.font('AppFontBold').fontSize(6.8).fillColor(disputeColor).text(disputeText, cols.dispute.x + 4, rowY + 9);
+
+      // Суть / резюме
+      doc.font('AppFont').fontSize(6.2).fillColor('#334155').text(summaryText, cols.summary.x + 4, rowY + 4, {
+        width: cols.summary.w - 6,
+        height: 20,
+        ellipsis: true,
+      });
+
+      doc.y = rowY + rowHeight;
+    });
+  }
+
+  // 6. Блок утверждения отчета управляющим салона
+  ensureSpace(45);
+  doc.moveDown(0.5);
+  const signY = doc.y;
+  doc.rect(margin, signY, contentWidth, 38).fillAndStroke('#f8fafc', '#e2e8f0');
+
+  doc.font('AppFontBold').fontSize(7.5).fillColor('#334155').text(
+    `УТВЕРЖДЕНИЕ СВОДНОГО РЕЕСТРА ЗВОНКОВ УПРАВЛЯЮЩИМ САЛОНА «${salonName.toUpperCase()}»`,
+    margin + 12,
+    signY + 6
+  );
+  doc.font('AppFont').fontSize(7).fillColor('#475569').text(
+    'Управляющий салоном: ________________________ / ________________________       Дата подписи: «____» ________________ 202___ г.',
+    margin + 12,
+    signY + 20
+  );
+  doc.font('AppFont').fontSize(6.5).fillColor('#94a3b8').text(
+    'Отчет сформирован автоматизированным модулем речевой аналитики на базе Сбер GigaChat с полным соблюдением требований 152-ФЗ РФ.',
+    margin + 420,
+    signY + 20,
+    { width: contentWidth - 430, align: 'right' }
+  );
+
+  // 7. Нумерация страниц и футер
+  const pages = doc.bufferedPageRange();
+  for (let i = 0; i < pages.count; i++) {
+    doc.switchToPage(i);
+    const footerY = pageHeight - margin + 10;
+    doc.font('AppFont').fontSize(7).fillColor('#94a3b8');
+    doc.text(
+      `Салон красоты «${salonName}» • Сводный реестр звонков • ${filterTitle || 'Все звонки'} • Соответствие 152-ФЗ`,
+      margin,
+      footerY
+    );
+    doc.text(`Страница ${i + 1} из ${pages.count}`, margin, footerY, {
+      align: 'right',
+      width: contentWidth,
+    });
+  }
+
+  return doc;
+}
+
 

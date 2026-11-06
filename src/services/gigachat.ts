@@ -6,7 +6,7 @@
 import axios from 'axios';
 import https from 'https';
 import { getGigaChatToken, isGigaChatConfigured, invalidateGigaChatTokenCache } from './gigachat-auth.js';
-import { GigaChatModel, AnalysisResult } from '../types.js';
+import { GigaChatModel, AnalysisResult, CallRecord, NextStepItem, KeyFacts } from '../types.js';
 
 const httpsAgent = new https.Agent({
   rejectUnauthorized: false,
@@ -40,17 +40,23 @@ export function getSystemPrompt(customSalonName?: string): string {
 - "консультация" — клиент получил только справочную информацию без записи;
 - "не применимо" — разговор не состоялся.
 
-ШАГ 4. РЕЗЮМЕ (transcript_summary) — ОБЯЗАТЕЛЬНО должно содержать ДВЕ части:
+ШАГ 4. РЕЗЮМЕ (transcript_summary) — ОБЯЗАТЕЛЬНО должно состоять из ТРЁХ частей:
 1) Краткая суть обращения с фиксацией 4 параметров:
    - Услуга: какая услуга/процедура интересует клиента (или "не указана", если не называлась);
    - Дата: желаемая или согласованная дата визита (или "не указана");
    - Время: желаемое или согласованное время визита (или "не указано");
    - Мастер: имя или категория мастера (или "не выбран", если мастер не выбирался).
-2) Вывод и итог обращения: что предложил администратор, чем закончился разговор (согласие/запись оформлена, отказ с конкретной причиной, консультация или договоренность о перезвоне), дальнейшие действия.
+2) Краткий пересказ разговора (СТРОГО 2–4 связных предложения):
+   кратко и ёмко перескажи реальный диалог между клиентом и администратором: с чем обратился клиент, какие вопросы и варианты обсуждались, что уточнил или ответил сотрудник салона.
+3) Вывод и итог обращения: что в итоге предложено, чем закончился разговор (согласие/запись оформлена, отказ с конкретной причиной, консультация или договоренность о перезвоне), дальнейшие действия.
 
 СТРОГИЙ ШАБЛОН РЕЗЮМЕ:
-«Суть обращения: услуга — <услуга>, дата — <дата>, время — <время>, мастер — <мастер>. Вывод: <итог диалога, предложения администратора и результат разговора>.»
-Пример: «Суть обращения: услуга — аппаратный маникюр с шеллаком, дата — завтра, время — 18:30, мастер — Кристина. Вывод: Администратор Мария предложила слоты на 18:30 и 20:00, клиент согласовала визит на 18:30 к Кристине; запись успешно оформлена.»
+«Суть обращения: услуга — <услуга>, дата — <дата>, время — <время>, мастер — <мастер>.
+Пересказ диалога: <2–4 связных предложения с кратким пересказом разговора>.
+Вывод: <итог диалога, предложения администратора и результат разговора>.»
+Пример: «Суть обращения: услуга — аппаратный маникюр с шеллаком, дата — завтра, время — 18:30, мастер — Кристина.
+Пересказ диалога: Клиентка позвонила с вопросом о записи на вечерний маникюр с покрытием шеллак на завтра. Администратор поприветствовала клиента, уточнила пожелания по мастеру и предложила слоты на 18:30 и 20:00 к Кристине и Анне. Также администратор сориентировала по стоимости процедуры (2100 руб.) и длительности сеанса.
+Вывод: Клиентка согласовала визит на 18:30 к мастеру Кристине; запись успешно оформлена, администратор пообещала направить напоминание в WhatsApp.»
 
 Если разговор не состоялся (тишина, гудки, автоответчик, сброс):
 «Разговор не состоялся: диалог отсутствует.»
@@ -85,7 +91,7 @@ export function getSystemPrompt(customSalonName?: string): string {
 ФОРМАТ ОТВЕТА (JSON, без пояснений вне JSON):
 {
   "is_conversation": true | false,
-  "transcript_summary": "Суть обращения: услуга — ..., дата — ..., время — ..., мастер — .... Вывод: ...",
+  "transcript_summary": "Суть обращения: услуга — ..., дата — ..., время — ..., мастер — ....\\nПересказ диалога: ... (2-4 предложения).\\nВывод: ...",
   "booking_status": "согласие|отказ|консультация|не применимо",
   "formatted_transcript": "Менеджер: ...\\nКлиент: ...",
   "key_facts": {
@@ -163,7 +169,7 @@ export const FEW_SHOT_EXAMPLES = `
 Ответ:
 {
   "is_conversation": true,
-  "transcript_summary": "Суть обращения: услуга — не указана (справочная информация), дата — не указана, время — не указано, мастер — не выбран. Вывод: Клиент уточнил график работы салона на сегодня. Администратор ответил, что салон работает до 20:00. Клиент поблагодарил и завершил разговор — запись не оформлялась, проведена консультация.",
+  "transcript_summary": "Суть обращения: услуга — не указана (справочная информация), дата — не указана, время — не указано, мастер — не выбран.\\nПересказ диалога: Клиент обратился в салон с вопросом о графике работы на сегодня. Администратор поприветствовал звонящего и сообщил, что салон работает до 20:00. Клиент поблагодарил за предоставленную информацию и попрощался.\\nВывод: Запись не оформлялась, проведена короткая справочная консультация по времени работы салона.",
   "booking_status": "консультация",
   "formatted_transcript": "Менеджер: Салон «Фешен лук студио», добрый день.\\nКлиент: До скольки вы работаете сегодня?\\nМенеджер: До 20:00.\\nКлиент: Спасибо.",
   "key_facts": {
@@ -189,7 +195,7 @@ export const FEW_SHOT_EXAMPLES = `
 Ответ:
 {
   "is_conversation": true,
-  "transcript_summary": "Суть обращения: услуга — маникюр, дата — завтра, время — 15:00, мастер — Анна. Вывод: Администратор предложил слот завтра в 15:00. Клиент согласился, запись успешно подтверждена на маникюр к мастеру Анне на завтра в 15:00.",
+  "transcript_summary": "Суть обращения: услуга — маникюр, дата — завтра, время — 15:00, мастер — Анна.\\nПересказ диалога: Клиент позвонил с конкретной целью записаться на маникюр именно к мастеру Анне. Администратор оперативно проверила расписание и предложила свободное окно на завтра в 15:00. Клиент подтвердил, что предложенное время ему подходит, после чего администратор зафиксировала бронь в системе.\\nВывод: Достигнута договоренность о визите, запись успешно подтверждена на завтра на 15:00 к мастеру Анне.",
   "booking_status": "согласие",
   "formatted_transcript": "Менеджер: Салон «Фешен лук студио», добрый день.\\nКлиент: Здравствуйте, хочу записаться на маникюр к Анне.\\nМенеджер: Анна свободна завтра в 15:00, вам удобно?\\nКлиент: Да, отлично, записывайте.\\nМенеджер: Записала вас на завтра, 15:00, к Анне.\\nКлиент: Спасибо.",
   "key_facts": {
@@ -215,7 +221,7 @@ export const FEW_SHOT_EXAMPLES = `
 Ответ:
 {
   "is_conversation": true,
-  "transcript_summary": "Суть обращения: услуга — стрижка, дата — выходные (суббота), время — 12:00, мастер — не выбран. Вывод: Администратор предложил субботу в 12:00, но клиент отказался, так как будет в отъезде. Запись не оформлена — отказ из-за неудобного времени.",
+  "transcript_summary": "Суть обращения: услуга — стрижка, дата — выходные (суббота), время — 12:00, мастер — не выбран.\\nПересказ диалога: Клиент обратился с пожеланием записаться на стрижку в выходные дни. Администратор назвал единственный доступный вариант — в субботу в 12:00. Клиент пояснил, что в указанное время будет находиться в отъезде, и отклонил предложение, а других вариантов администратор не предложил.\\nВывод: Запись не оформлена из-за несовпадения по времени и отсутствия альтернативных предложений от администратора.",
   "booking_status": "отказ",
   "formatted_transcript": "Менеджер: Салон «Фешен лук студио», добрый день.\\nКлиент: Хочу стрижку на выходных.\\nМенеджер: На выходных есть суббота в 12:00.\\nКлиент: Нет, я буду в отъезде, не подходит.\\nМенеджер: Хорошо, звоните.\\nКлиент: До свидания.",
   "key_facts": {
@@ -241,7 +247,7 @@ export const FEW_SHOT_EXAMPLES = `
 Ответ:
 {
   "is_conversation": true,
-  "transcript_summary": "Суть обращения: услуга — окрашивание, дата — не определена, время — после 10:00 (для звонка), мастер — не выбран. Вывод: Клиент хотел записаться на окрашивание, но не определился со временем. Администратор договорился созвониться завтра утром после 10:00. Запись пока не оформлена, зафиксирован перезвон.",
+  "transcript_summary": "Суть обращения: услуга — окрашивание, дата — не определена, время — после 10:00 (для звонка), мастер — не выбран.\\nПересказ диалога: Клиент позвонил по поводу окрашивания волос, но не смог сразу сориентироваться по своему расписанию на ближайшие дни. Администратор проявил инициативу и предложил созвониться повторно завтра в первой половине дня. Клиент согласился на предложение и уточнил, что звонок будет наиболее удобен после 10:00.\\nВывод: Запись пока не сформирована; зафиксирована договоренность о повторном звонке администратора завтра после 10:00.",
   "booking_status": "консультация",
   "formatted_transcript": "Менеджер: Салон «Фешен лук студио», добрый день.\\nКлиент: Хочу записаться на окрашивание, но не знаю, когда освобожусь.\\nМенеджер: Давайте я вам позвоню завтра утром?\\nКлиент: Да, удобно, после 10:00.",
   "key_facts": {
@@ -273,7 +279,7 @@ export const FEW_SHOT_EDGE_CASES = `
 Ответ:
 {
   "is_conversation": true,
-  "transcript_summary": "Суть обращения: услуга — педикюр (уточнение цены), дата — не указана, время — не указано, мастер — не выбран. Вывод: Администратор назвал стоимость педикюра от 1800 рублей. Клиент поблагодарил и завершил разговор; запись не оформлялась, проведена консультация.",
+  "transcript_summary": "Суть обращения: услуга — педикюр (уточнение цены), дата — не указана, время — не указано, мастер — не выбран. Пересказ диалога: Клиент позвонил в салон с вопросом о стоимости педикюра. Администратор оперативно ответил, что цена начинается от 1800 рублей. Клиент поблагодарил за предоставленную справку и попрощался. Вывод: Администратор назвал стоимость педикюра от 1800 рублей. Клиент поблагодарил и завершил разговор; запись не оформлялась, проведена консультация.",
   "booking_status": "консультация",
   "formatted_transcript": "Менеджер: Салон «Фешен лук студио».\\nКлиент: Сколько стоит педикюр?\\nМенеджер: От 1800 рублей.\\nКлиент: Понял, спасибо.",
   "key_facts": {
@@ -351,7 +357,7 @@ export const FEW_SHOT_EDGE_CASES = `
 Ответ:
 {
   "is_conversation": true,
-  "transcript_summary": "Суть обращения: услуга — стрижка и укладка, дата — пятница, время — 18:30, мастер — Ольга. Вывод: Администратор предложил варианты в 18:30 у Ольги и в 19:00 у Елены. Клиент выбрала 18:30 к Ольге; запись подтверждена на пятницу к мастеру Ольге на стрижку и укладку.",
+  "transcript_summary": "Суть обращения: услуга — стрижка и укладка, дата — пятница, время — 18:30, мастер — Ольга. Пересказ диалога: Клиентка позвонила в салон с просьбой записать её на стрижку и укладку в вечернее время пятницы. Администратор предложила на выбор два свободных окна: в 18:30 к мастеру Ольге и в 19:00 к Елене. Клиентка выбрала время 18:30, после чего сотрудник зафиксировал визит. Вывод: Администратор предложил варианты в 18:30 у Ольги и в 19:00 у Елены. Клиент выбрала 18:30 к Ольге; запись подтверждена на пятницу к мастеру Ольге на стрижку и укладку.",
   "booking_status": "согласие",
   "formatted_transcript": "Менеджер: Салон «Фешен лук студио», добрый день.\\nКлиент: Здравствуйте, хотела бы записаться на стрижку и укладку.\\nМенеджер: Когда вам удобно?\\nКлиент: Лучше в пятницу после работы.\\nМенеджер: В пятницу есть 18:30 у мастера Ольги и 19:00 у Елены.\\nКлиент: 18:30 подойдёт.\\nМенеджер: Записала вас на пятницу, 18:30, к Ольге на стрижку и укладку.\\nКлиент: Отлично, спасибо большое.",
   "key_facts": {
@@ -377,7 +383,7 @@ export const FEW_SHOT_EDGE_CASES = `
 Ответ:
 {
   "is_conversation": true,
-  "transcript_summary": "Суть обращения: услуга — коррекция бровей, дата — сегодня, время — 17:00, мастер — не выбран. Вывод: Администратор предложил слот сегодня в 17:00, клиент согласился. Запись успешно подтверждена на коррекцию бровей сегодня в 17:00.",
+  "transcript_summary": "Суть обращения: услуга — коррекция бровей, дата — сегодня, время — 17:00, мастер — не выбран. Пересказ диалога: После системного сообщения автоинформатора клиент запросил запись на коррекцию бровей. Администратор оперативно подобрал свободное время на сегодня в 17:00. Клиент подтвердил предложенный слот, и администратор завершил оформление записи. Вывод: Администратор предложил слот сегодня в 17:00, клиент согласился. Запись успешно подтверждена на коррекцию бровей сегодня в 17:00.",
   "booking_status": "согласие",
   "formatted_transcript": "Менеджер: Салон «Фешен лук студио», слушаю.\\nКлиент: Мне бы записаться на коррекцию бровей.\\nМенеджер: Есть сегодня в 17:00, подойдёт?\\nКлиент: Да, давайте.",
   "key_facts": {
@@ -826,11 +832,18 @@ export function extractEssenceDetails(transcript: string, existingSummary?: stri
  * Нормализует резюме так, чтобы оно ВСЕГДА содержало краткую суть обращения
  * (услуга, дата, время, мастер) и блок выводов/итогов.
  */
+/**
+ * Нормализует резюме так, чтобы оно ВСЕГДА содержало 3 четких блока:
+ * 1) Краткая суть обращения (услуга, дата, время, мастер);
+ * 2) Краткий пересказ разговора (СТРОГО 2–4 предложения);
+ * 3) Вывод (итог диалога, предложения администратора и результат).
+ */
 export function formatSummaryWithEssence(
   rawSummary: string,
   transcript: string,
-  extractedDetails?: EssenceDetails
-): { formattedSummary: string; essence: EssenceDetails } {
+  extractedDetails?: EssenceDetails,
+  customSalonName?: string
+): { formattedSummary: string; essence: EssenceDetails; retelling?: string; conclusion?: string } {
   // Звонок не состоялся
   if (
     /разговор не состоялся|звонок не состоялся|диалог отсутствует/i.test(rawSummary) &&
@@ -838,34 +851,94 @@ export function formatSummaryWithEssence(
   ) {
     return {
       formattedSummary: rawSummary,
-      essence: { service: null, date: null, time: null, master: null }
+      essence: { service: null, date: null, time: null, master: null },
+      retelling: '',
+      conclusion: rawSummary
     };
   }
 
   const essence = extractedDetails || extractEssenceDetails(transcript, rawSummary);
-
-  // Если модель уже вернула валидный шаблон с «Суть обращения:» и «Вывод:»
-  if (/суть обращения/i.test(rawSummary) && /вывод/i.test(rawSummary)) {
-    return { formattedSummary: rawSummary.trim(), essence };
-  }
-
   const serviceStr = essence.service || 'не указана';
   const dateStr = essence.date || 'не указана';
   const timeStr = essence.time || 'не указано';
   const masterStr = essence.master || 'не выбран';
-
   const essencePrefix = `Суть обращения: услуга — ${serviceStr}, дата — ${dateStr}, время — ${timeStr}, мастер — ${masterStr}.`;
 
-  // Очищаем rawSummary от дублирующихся префиксов
-  let conclusionPart = rawSummary
-    .replace(/^суть обращения:[^.]*\.?/i, '')
-    .trim();
-  if (conclusionPart.toLowerCase().startsWith('вывод:')) {
-    conclusionPart = conclusionPart.replace(/^вывод:\s*/i, '').trim();
+  // Попытка извлечь существующие блоки из rawSummary
+  const retellingMatch = rawSummary.match(/(?:пересказ диалога|краткий пересказ(?: разговора)?|пересказ разговора)\s*:\s*([\s\S]*?)(?=(?:вывод\s*:|$))/i);
+  const conclusionMatch = rawSummary.match(/вывод\s*:\s*([\s\S]*)$/i);
+
+  let retellingText = retellingMatch ? retellingMatch[1].trim() : '';
+  let conclusionText = conclusionMatch ? conclusionMatch[1].trim() : '';
+
+  // Если модель вернула единый текст без явных блоков пересказа и вывода
+  if (!retellingText && !conclusionText) {
+    const cleanRaw = rawSummary
+      .replace(/^суть обращения:[^.]*\.?/i, '')
+      .trim();
+
+    if (cleanRaw.length > 0) {
+      // Разделим на предложения
+      const sentences = cleanRaw.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 0);
+      if (sentences.length >= 3) {
+        conclusionText = sentences[sentences.length - 1].trim();
+        retellingText = sentences.slice(0, sentences.length - 1).join(' ').trim();
+      } else {
+        conclusionText = cleanRaw;
+      }
+    }
+  } else if (!retellingText && conclusionText) {
+    const preConclusion = rawSummary
+      .replace(/^суть обращения:[^.]*\.?/i, '')
+      .replace(/вывод\s*:[\s\S]*$/i, '')
+      .trim();
+    if (preConclusion.length > 20) {
+      retellingText = preConclusion;
+    }
   }
 
-  const finalSummary = `${essencePrefix} Вывод: ${conclusionPart || 'Клиент проконсультирован по регламенту салона.'}`;
-  return { formattedSummary: finalSummary, essence };
+  // Если пересказ диалога всё ещё пуст — синтезируем строго 2–4 связных предложения
+  if (!retellingText) {
+    const isBooking = /запис|соглас|подтвержд/i.test(conclusionText || rawSummary || transcript);
+    const isDeclined = /отказ|не удобн|не подход/i.test(conclusionText || rawSummary || transcript);
+
+    const s1 = essence.service
+      ? `Клиент позвонил в салон по вопросу записи на услугу «${essence.service}».`
+      : `Клиент обратился в салон красоты по вопросам обслуживания и записи.`;
+
+    const s2 = (essence.date || essence.time || essence.master)
+      ? `Администратор поприветствовал клиента и предложил свободное время${essence.date ? ` на ${essence.date}` : ''}${essence.time ? ` в ${essence.time}` : ''}${essence.master ? ` к мастеру ${essence.master}` : ''}.`
+      : `Администратор предоставил подробную консультацию по графику и условиям визита.`;
+
+    const s3 = isBooking
+      ? `Клиент согласовал предложенные условия и выбрал удобное для себя время.`
+      : (isDeclined
+          ? `Клиент не смог подтвердить визит из-за неподходящего расписания или изменения планов.`
+          : `Стороны обсудили детали визита и стоимость процедур.`);
+
+    const s4 = isBooking
+      ? `Сотрудник зафиксировал бронирование в расписании и завершил разговор на доброжелательной ноте.`
+      : `Администратор вежливо ответил на все вопросы и предложил обращаться при необходимости.`;
+
+    retellingText = `${s1} ${s2} ${s3} ${s4}`;
+  }
+
+  if (!conclusionText) {
+    conclusionText = 'Администратор вежливо проконсультировал клиента по регламенту салона.';
+  }
+
+  // Очистка от возможных дублей заголовков
+  retellingText = retellingText.replace(/^(?:пересказ диалога|краткий пересказ(?: разговора)?):\s*/i, '').trim();
+  conclusionText = conclusionText.replace(/^вывод:\s*/i, '').trim();
+
+  const formattedSummary = `${essencePrefix} Пересказ диалога: ${retellingText} Вывод: ${conclusionText}`;
+
+  return {
+    formattedSummary,
+    essence,
+    retelling: retellingText,
+    conclusion: conclusionText
+  };
 }
 
 /**
@@ -988,12 +1061,17 @@ function parseGigaChatJson(text: string, customSalonName?: string): AnalysisResu
   const time = parsedKeyFacts.time || parsed.time || extracted.time;
   const master = parsedKeyFacts.master || parsed.master || extracted.master;
 
-  const { formattedSummary, essence } = formatSummaryWithEssence(rawSummary, formattedTranscript || '', {
-    service: service || null,
-    date: date || null,
-    time: time || null,
-    master: master || null,
-  });
+  const { formattedSummary, essence } = formatSummaryWithEssence(
+    rawSummary,
+    formattedTranscript || '',
+    {
+      service: service || null,
+      date: date || null,
+      time: time || null,
+      master: master || null,
+    },
+    salon
+  );
 
   const comment =
     parsed.operator_comment && parsed.operator_comment.trim().length > 0
@@ -1178,7 +1256,7 @@ function generateLocalFallbackAnalysis(
     conclusionText = `Администратор вежливо проконсультировал клиента по регламенту салона «${salon}» («${cleanSnippet}»).`;
   }
 
-  const { formattedSummary } = formatSummaryWithEssence(conclusionText, clean, essence);
+  const { formattedSummary } = formatSummaryWithEssence(conclusionText, clean, essence, salon);
 
   const score = hasDialogue ? (isDispute ? 7 : 9) : 7;
   const comment = hasDialogue
@@ -1209,4 +1287,176 @@ function generateLocalFallbackAnalysis(
     recommendations: `Соблюдать стандарты сервиса и вежливого общения салона «${salon}».`,
   };
 }
+
+/**
+ * Локальный генератор следующих шагов (Next Steps) для администратора
+ */
+export function generateLocalNextSteps(call: CallRecord, customSalonName?: string): string[] {
+  const salon = (customSalonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
+  const rawStatus = (call.booking_status || call.key_facts?.booking_status || '').toLowerCase().trim();
+  const outcome = (call.key_facts?.call_outcome || '').toLowerCase().trim();
+  const isBooking = rawStatus === 'согласие' || rawStatus.includes('соглас') || outcome === 'запись';
+  const isDeclined = rawStatus === 'отказ' || rawStatus.includes('отказ') || outcome === 'отказ';
+  const isDispute = Boolean(call.key_facts?.is_dispute);
+
+  const kf: Partial<KeyFacts> = call.key_facts || {};
+  const service = kf.service || 'услугу';
+  const date = kf.date || null;
+  const time = kf.time || null;
+  const master = kf.master || null;
+  const clientName = call.client_name ? `клиента ${call.client_name}` : 'клиента';
+
+  const steps: string[] = [];
+
+  if (isBooking) {
+    const bookingDetails = [
+      service !== 'услугу' ? `услуга: «${service}»` : null,
+      date ? `дата: ${date}` : null,
+      time ? `время: ${time}` : null,
+      master ? `мастер: ${master}` : null,
+    ].filter(Boolean).join(', ');
+
+    steps.push(`Внести подтвержденную запись ${clientName} в CRM Yclients (${bookingDetails || 'согласованные слоты'}).`);
+    steps.push(`Отправить ${clientName} подтверждение бронирования и адрес студии в WhatsApp/SMS.`);
+    if (master) {
+      steps.push(`Проверить график мастера ${master} и подготовить рабочее место/расходные материалы.`);
+    } else {
+      steps.push(`Назначить квалифицированного специалиста на процедуру «${service}» в расписании салона «${salon}».`);
+    }
+    steps.push(`Установить автоматическое напоминание за 24 часа до визита для подтверждения явки.`);
+  } else if (isDispute) {
+    steps.push(`Зафиксировать обращение в журнале претензий и передать управляющему салона «${salon}».`);
+    steps.push(`Поднять историю предыдущих визитов ${clientName} и подготовить фактуру (${kf.dispute_reason || 'вопрос по качеству сервиса'}).`);
+    steps.push(`Согласовать с управляющим вариант сервисной компенсации или скидки для сохранения лояльности.`);
+    steps.push(`Связаться с клиентом в течение 2 часов для предоставления персонального решения.`);
+  } else if (isDeclined) {
+    steps.push(`Отметить в CRM причину отказа клиента (не подошло время / отъезд / высокая стоимость).`);
+    steps.push(`Добавить контакт ${clientName} в базу потенциальных клиентов с тегом «Интересовался: ${service}».`);
+    steps.push(`Запланировать отправку персонального спецпредложения через 10-14 дней от салона «${salon}».`);
+  } else {
+    // Консультация / справочное обращение
+    steps.push(`Создать карточку ${clientName} в CRM Yclients с пометкой интересующей услуги («${service}»).`);
+    steps.push(`Направить клиенту в мессенджер прайс-лист, фото портфолио работ и ссылку на онлайн-запись в салон «${salon}».`);
+    if (master) {
+      steps.push(`Уточнить ближайшие свободные окна у мастера ${master} и предложить клиенту.`);
+    }
+    steps.push(`Поставить напоминание администратору: контрольный звонок через 48 часов, если запись не будет оформлена.`);
+  }
+
+  // Отработка обещаний администратора
+  if (Array.isArray(kf.promises) && kf.promises.length > 0) {
+    kf.promises.forEach(p => {
+      if (p && typeof p === 'string' && p.trim()) {
+        steps.push(`Выполнить зафиксированное обещание: ${p.trim()}`);
+      }
+    });
+  }
+
+  return steps;
+}
+
+/**
+ * Интеллектуальная генерация Next Steps (следующих шагов) по итогам звонка для администратора
+ */
+export async function generateNextStepsWithAI(
+  call: CallRecord,
+  customSalonName?: string
+): Promise<{ steps: string[]; items: NextStepItem[] }> {
+  const salon = (customSalonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
+
+  // Если GigaChat не настроен или транскрипт слишком короткий — используем локальный генератор
+  if (!isGigaChatConfigured() || !call.transcript || call.transcript.length < 15) {
+    const fallbackSteps = generateLocalNextSteps(call, salon);
+    const items: NextStepItem[] = fallbackSteps.map((text, idx) => ({
+      id: `step-${Date.now()}-${idx + 1}`,
+      text,
+      completed: false,
+    }));
+    return { steps: fallbackSteps, items };
+  }
+
+  const prompt = `Ты — старший управляющий и координатор клиентского сервиса салона красоты «${salon}».
+Твоя задача — составить четкий, практичный список задач (Next Steps / Следующие шаги) для дежурного администратора салона по итогам телефонного разговора.
+
+ДАННЫЕ ЗВОНКА:
+- Статус записи: ${call.booking_status || call.key_facts?.booking_status || 'консультация'}
+- Суть обращения: ${call.key_facts?.client_issue || 'консультация'}
+- Услуга: ${call.key_facts?.service || 'не указана'}
+- Желаемая дата: ${call.key_facts?.date || 'не указана'}
+- Желаемое время: ${call.key_facts?.time || 'не указано'}
+- Мастер: ${call.key_facts?.master || 'не указан'}
+- Обещания клиенту: ${(call.key_facts?.promises || []).join('; ') || 'нет'}
+- Конфликт/спор: ${call.key_facts?.is_dispute ? 'ДА: ' + (call.key_facts?.dispute_reason || '') : 'НЕТ'}
+- Резюме диалога: ${call.summary || 'нет'}
+
+СТЕНОГРАММА ДИАЛОГА:
+${call.transcript}
+
+ТРЕБОВАНИЯ К NEXT STEPS:
+1. Составь от 3 до 5 конкретных шагов для администратора салона.
+2. Каждый шаг должен начинаться с глагола в неопределенной форме (Внести, Отправить, Позвонить, Проверить, Подготовить, Согласовать).
+3. Шаги должны учитывать специфику работы салона красоты (CRM Yclients, мессенджеры WhatsApp/Telegram, напоминания, расходники, график мастеров).
+4. Обязательно учти договоренности и обещания, зафиксированные в диалоге.
+5. Верни результат СТРОГО в формате JSON-массива строк, без пояснительного текста до и после:
+["действие 1", "действие 2", "действие 3"]`;
+
+  try {
+    const token = await getGigaChatToken();
+    const model = (call.model_used && call.model_used.startsWith('GigaChat') ? call.model_used : 'GigaChat:Lite') as GigaChatModel;
+
+    const response = await gigaChatQueue.enqueue(async () => {
+      const res = await axios.post(
+        'https://gigachat.devices.sberbank.ru/api/v1/chat/completions',
+        {
+          model: model,
+          messages: [
+            { role: 'system', content: `Ты — старший управляющий салона «${salon}». Отвечай ТОЛЬКО валидным JSON-массивом строк.` },
+            { role: 'user', content: prompt }
+          ],
+          temperature: 0.2,
+          max_tokens: 1000
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+          },
+          httpsAgent,
+          timeout: 25000
+        }
+      );
+      return res.data;
+    }, 'Генерация Next Steps');
+
+    const content = response.choices?.[0]?.message?.content || '';
+    const cleanJson = content.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
+    const parsed = JSON.parse(cleanJson);
+
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      const steps: string[] = parsed
+        .map((s: any) => String(s).trim())
+        .filter((s: string) => s.length > 0);
+
+      const items: NextStepItem[] = steps.map((text, idx) => ({
+        id: `step-${Date.now()}-${idx + 1}`,
+        text,
+        completed: false,
+      }));
+
+      return { steps, items };
+    }
+  } catch (err: any) {
+    console.warn(`[GigaChat NextSteps] Сбой онлайн-генерации: ${err.message}. Переход на резервный генератор.`);
+  }
+
+  // Резервный расчет
+  const fallbackSteps = generateLocalNextSteps(call, salon);
+  const items: NextStepItem[] = fallbackSteps.map((text, idx) => ({
+    id: `step-${Date.now()}-${idx + 1}`,
+    text,
+    completed: false,
+  }));
+  return { steps: fallbackSteps, items };
+}
+
 

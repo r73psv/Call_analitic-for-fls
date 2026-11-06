@@ -158,3 +158,196 @@ export function generateCallCsv(call: CallRecord, userRole: string = 'manager', 
   // Возвращаем строку с UTF-8 BOM (\uFEFF) для мгновенного корректного открытия в Microsoft Excel
   return '\uFEFF' + rows.join('\r\n');
 }
+
+/**
+ * Генерация сводного реестра звонков в CSV для отчетов управляющего салоном
+ * Формат полностью совместим с Excel (русская локаль, разделитель ';', UTF-8 BOM, маскирование 152-ФЗ)
+ */
+export function generateCallsTableCsv(
+  calls: CallRecord[],
+  userRole: string = 'manager',
+  customSalonName?: string,
+  filterTitle?: string
+): string {
+  const salonName = (customSalonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
+  const rows: string[] = [];
+
+  // Время генерации (Самара, UTC+4)
+  const nowSamara = new Date().toLocaleString('ru-RU', {
+    timeZone: 'Europe/Samara',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+
+  // KPI метрики выборки для управляющего
+  let bookedCount = 0;
+  let declinedCount = 0;
+  let consultationCount = 0;
+  let disputeCount = 0;
+  let totalScore = 0;
+  let scoredCallsCount = 0;
+  let totalDurationSec = 0;
+
+  calls.forEach(call => {
+    const rawStatus = (call.booking_status || call.key_facts?.booking_status || '').toLowerCase().trim();
+    const outcome = (call.key_facts?.call_outcome || '').toLowerCase().trim();
+    if (rawStatus === 'согласие' || rawStatus.includes('соглас') || outcome === 'запись') {
+      bookedCount++;
+    } else if (rawStatus === 'отказ' || rawStatus.includes('отказ') || outcome === 'отказ') {
+      declinedCount++;
+    } else {
+      consultationCount++;
+    }
+
+    if (call.key_facts?.is_dispute) {
+      disputeCount++;
+    }
+
+    if (call.operator_score !== null && call.operator_score !== undefined) {
+      totalScore += Number(call.operator_score);
+      scoredCallsCount++;
+    }
+
+    totalDurationSec += call.duration_seconds || 0;
+  });
+
+  const totalCalls = calls.length;
+  const conversionRate = totalCalls > 0 ? ((bookedCount / totalCalls) * 100).toFixed(1) : '0.0';
+  const disputeRate = totalCalls > 0 ? ((disputeCount / totalCalls) * 100).toFixed(1) : '0.0';
+  const avgScore = scoredCallsCount > 0 ? (totalScore / scoredCallsCount).toFixed(1) : '—';
+  const avgDuration = totalCalls > 0 ? Math.round(totalDurationSec / totalCalls) : 0;
+  const avgDurationText = `${Math.floor(avgDuration / 60)} мин. ${avgDuration % 60} сек.`;
+
+  // Блок 1: Заголовок и паспорт реестра
+  rows.push([`# САЛОН КРАСОТЫ «${salonName.toUpperCase()}» — СВОДНЫЙ РЕЕСТР ЗВОНКОВ`, '', '', '', ''].map(escapeCsv).join(';'));
+  rows.push([`# Назначение: Отчет управляющего по контролю качества обслуживания и аудио-аудиту`, '', '', '', ''].map(escapeCsv).join(';'));
+  rows.push([`# Режим соответствия 152-ФЗ: ПЕРСОНАЛЬНЫЕ ДАННЫЕ МАСКИРОВАНЫ (Роль: ${userRole})`, '', '', '', ''].map(escapeCsv).join(';'));
+  rows.push([`# Параметры фильтрации / выборка: ${filterTitle || 'Все звонки журнала'}`, '', '', '', ''].map(escapeCsv).join(';'));
+  rows.push([`# Сформирован: ${nowSamara} (Самара, UTC+4)`, '', '', '', ''].map(escapeCsv).join(';'));
+  rows.push(['', '', '', '', ''].join(';'));
+
+  // Блок 2: Сводные KPI управляющего
+  rows.push(['# СВОДНЫЕ ПОКАЗАТЕЛИ ВЫБОРКИ (KPI)', '', '', '', ''].map(escapeCsv).join(';'));
+  rows.push(['Метрика', 'Значение', 'Пояснение', '', ''].map(escapeCsv).join(';'));
+  rows.push(['Всего звонков в отчете', String(totalCalls), 'Общее количество сессий вызовов'].map(escapeCsv).join(';'));
+  rows.push(['Конверсия в запись', `${conversionRate}% (${bookedCount} записей)`, 'Доля успешных записей клиентов'].map(escapeCsv).join(';'));
+  rows.push(['Отказы от записи', `${declinedCount} (${totalCalls > 0 ? ((declinedCount / totalCalls) * 100).toFixed(1) : 0}%)`, 'Клиент отказался от визита'].map(escapeCsv).join(';'));
+  rows.push(['Консультации / справка', `${consultationCount}`, 'Информационные звонки без слота'].map(escapeCsv).join(';'));
+  rows.push(['Спорные диалоги / претензии', `${disputeRate}% (${disputeCount} звонков)`, 'Зафиксированные конфликтные маркеры'].map(escapeCsv).join(';'));
+  rows.push(['Средний балл операторов', `${avgScore} / 10`, `Оценено звонков: ${scoredCallsCount}`].map(escapeCsv).join(';'));
+  rows.push(['Средняя длительность разговора', avgDurationText, `${avgDuration} сек.`].map(escapeCsv).join(';'));
+  rows.push(['', '', '', '', ''].join(';'));
+
+  // Блок 3: Заголовки таблицы звонков
+  const headers = [
+    '№',
+    'ID звонка',
+    'Дата и время (Самара)',
+    'Длительность',
+    'Длительность (сек)',
+    'Направление',
+    'Статус соединения',
+    'Администратор / Оператор',
+    'Телефон клиента (152-ФЗ)',
+    'Согласие 152-ФЗ',
+    'Статус записи (ИИ)',
+    'Услуга',
+    'Дата записи',
+    'Время записи',
+    'Мастер',
+    'Оценка ИИ (1-10)',
+    'Тональность клиента',
+    'Тональность администратора',
+    'Конфликт / Спор',
+    'Причина спора',
+    'Итог звонка',
+    'Краткая суть обращения',
+    'Краткое резюме диалога',
+    'Комментарий аудитора',
+    'Рекомендации оператору',
+    'Теги',
+    'ИИ-модель',
+  ];
+  rows.push(headers.map(escapeCsv).join(';'));
+
+  // Блок 4: Строки звонков
+  calls.forEach((call, index) => {
+    const rawPhone = call.client_phone || (call as any).full_phone || '';
+    const maskedPhone = call.client_phone_masked || maskPhone(rawPhone);
+    const clientPhone = (userRole === 'admin' && rawPhone) ? rawPhone : maskedPhone;
+
+    let dateFormatted = call.timestamp;
+    try {
+      dateFormatted = new Date(call.timestamp).toLocaleString('ru-RU', {
+        timeZone: 'Europe/Samara',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+    } catch {}
+
+    const m = Math.floor((call.duration_seconds || 0) / 60);
+    const s = (call.duration_seconds || 0) % 60;
+    const durationText = m > 0 ? `${m} мин. ${s} сек.` : `${s} сек.`;
+
+    const rawStatus = (call.booking_status || call.key_facts?.booking_status || '').toLowerCase().trim();
+    let bookingStatus = 'консультация';
+    if (rawStatus === 'согласие' || rawStatus.includes('соглас') || call.key_facts?.call_outcome === 'запись') {
+      bookingStatus = 'согласие';
+    } else if (rawStatus === 'отказ' || rawStatus.includes('отказ') || call.key_facts?.call_outcome === 'отказ') {
+      bookingStatus = 'отказ';
+    } else if (rawStatus === 'не применимо' || call.key_facts?.call_outcome === 'автоответчик') {
+      bookingStatus = 'не применимо';
+    }
+
+    const recommendationsText = Array.isArray(call.recommendations)
+      ? call.recommendations.join('; ')
+      : (call.recommendations || '');
+
+    const tagsText = Array.isArray(call.tags)
+      ? call.tags.join(', ')
+      : '';
+
+    const row = [
+      index + 1,
+      call.call_id,
+      dateFormatted,
+      durationText,
+      call.duration_seconds || 0,
+      call.type === 'outgoing' ? 'Исходящий' : 'Входящий',
+      call.status || 'completed',
+      call.operator_name || 'Не указан',
+      clientPhone,
+      call.consent_status || 'active',
+      bookingStatus,
+      call.key_facts?.service || '',
+      call.key_facts?.date || '',
+      call.key_facts?.time || '',
+      call.key_facts?.master || '',
+      call.operator_score !== null && call.operator_score !== undefined ? call.operator_score : '',
+      call.key_facts?.tone_client || '',
+      call.key_facts?.tone_manager || '',
+      call.key_facts?.is_dispute ? 'ДА' : 'НЕТ',
+      call.key_facts?.dispute_reason || '',
+      call.key_facts?.call_outcome || '',
+      call.key_facts?.client_issue || '',
+      call.summary || '',
+      call.operator_comment || '',
+      recommendationsText,
+      tagsText,
+      call.model_used || '',
+    ];
+
+    rows.push(row.map(escapeCsv).join(';'));
+  });
+
+  return '\uFEFF' + rows.join('\r\n');
+}
+
