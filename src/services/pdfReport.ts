@@ -247,11 +247,21 @@ export function generateCallAuditPdf(call: CallRecord, userRole: string = 'manag
   doc.font('AppFontBold').fontSize(8.5).fillColor('#334155').text('КРАТКОЕ СОДЕРЖАНИЕ (РЕЗЮМЕ ОБРАЩЕНИЯ)', margin + 10, summaryHeaderY + 5);
 
   doc.y = summaryHeaderY + 24;
-  doc
-    .font('AppFont')
-    .fontSize(8.5)
-    .fillColor('#1e293b')
-    .text(call.summary || 'Резюме диалога отсутствует.', margin + 10, doc.y, { width: contentWidth - 20, lineGap: 3 });
+  const summaryText = call.summary || 'Резюме диалога отсутствует.';
+  const summaryMatch = summaryText.match(/суть обращения\s*:\s*([\s\S]*?)(?:вывод\s*:\s*([\s\S]*))?$/i);
+  if (summaryMatch && summaryMatch[1] && summaryMatch[2]) {
+    doc.font('AppFontBold').fontSize(8.5).fillColor('#4338ca').text('Суть обращения: ', margin + 10, doc.y, { continued: true });
+    doc.font('AppFont').fillColor('#1e293b').text(summaryMatch[1].trim(), { width: contentWidth - 20, lineGap: 2 });
+    doc.moveDown(0.3);
+    doc.font('AppFontBold').fontSize(8.5).fillColor('#047857').text('Вывод: ', margin + 10, doc.y, { continued: true });
+    doc.font('AppFont').fillColor('#1e293b').text(summaryMatch[2].trim(), { width: contentWidth - 20, lineGap: 3 });
+  } else {
+    doc
+      .font('AppFont')
+      .fontSize(8.5)
+      .fillColor('#1e293b')
+      .text(summaryText, margin + 10, doc.y, { width: contentWidth - 20, lineGap: 3 });
+  }
   doc.moveDown(0.6);
 
   // 7. Recommendations (Рекомендации для администратора)

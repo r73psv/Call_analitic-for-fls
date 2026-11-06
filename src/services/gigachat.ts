@@ -40,11 +40,20 @@ export function getSystemPrompt(customSalonName?: string): string {
 - "консультация" — клиент получил только справочную информацию без записи;
 - "не применимо" — разговор не состоялся.
 
-ШАГ 4. РЕЗЮМЕ (transcript_summary) — 2–4 предложения, вся цепочка:
-а) запрос клиента (мастер, услуга, желаемые дата/время);
-б) что предложил администратор (слоты, альтернативные мастера);
-в) ОБЯЗАТЕЛЬНЫЙ финальный вывод: чем закончилось — согласие, отказ (с конкретной причиной) или консультация. Резюме нельзя обрывать без фиксации итога.
-Если разговор не состоялся: 'Разговор не состоялся: диалог отсутствует.'
+ШАГ 4. РЕЗЮМЕ (transcript_summary) — ОБЯЗАТЕЛЬНО должно содержать ДВЕ части:
+1) Краткая суть обращения с фиксацией 4 параметров:
+   - Услуга: какая услуга/процедура интересует клиента (или "не указана", если не называлась);
+   - Дата: желаемая или согласованная дата визита (или "не указана");
+   - Время: желаемое или согласованное время визита (или "не указано");
+   - Мастер: имя или категория мастера (или "не выбран", если мастер не выбирался).
+2) Вывод и итог обращения: что предложил администратор, чем закончился разговор (согласие/запись оформлена, отказ с конкретной причиной, консультация или договоренность о перезвоне), дальнейшие действия.
+
+СТРОГИЙ ШАБЛОН РЕЗЮМЕ:
+«Суть обращения: услуга — <услуга>, дата — <дата>, время — <время>, мастер — <мастер>. Вывод: <итог диалога, предложения администратора и результат разговора>.»
+Пример: «Суть обращения: услуга — аппаратный маникюр с шеллаком, дата — завтра, время — 18:30, мастер — Кристина. Вывод: Администратор Мария предложила слоты на 18:30 и 20:00, клиент согласовала визит на 18:30 к Кристине; запись успешно оформлена.»
+
+Если разговор не состоялся (тишина, гудки, автоответчик, сброс):
+«Разговор не состоялся: диалог отсутствует.»
 
 ШАГ 5. КЛЮЧЕВЫЕ ФАКТЫ (key_facts)
 - is_dispute, dispute_reason;
@@ -57,7 +66,11 @@ export function getSystemPrompt(customSalonName?: string): string {
   * "отмена" — клиент отменил существующую запись;
   * "не состоялся" — диалога не было (тишина, гудки, сброс, автоответчик, автоинформатор).
 - booking_status — строго дублирует значение из Шага 3;
-- client_issue — конкретная суть обращения.
+- client_issue — конкретная суть обращения;
+- service — название услуги или null (если не названа);
+- date — дата записи или null (если не названа);
+- time — время записи или null (если не названо);
+- master — имя мастера или null (если не выбран).
 
 ШАГ 6. ОЦЕНКА ОПЕРАТОРА (operator_score)
 - Оценку (целое от 1 до 10) ставь ТОЛЬКО если разговор состоялся (is_conversation = true).
@@ -72,7 +85,7 @@ export function getSystemPrompt(customSalonName?: string): string {
 ФОРМАТ ОТВЕТА (JSON, без пояснений вне JSON):
 {
   "is_conversation": true | false,
-  "transcript_summary": "...",
+  "transcript_summary": "Суть обращения: услуга — ..., дата — ..., время — ..., мастер — .... Вывод: ...",
   "booking_status": "согласие|отказ|консультация|не применимо",
   "formatted_transcript": "Менеджер: ...\\nКлиент: ...",
   "key_facts": {
@@ -82,7 +95,11 @@ export function getSystemPrompt(customSalonName?: string): string {
     "tone_manager": "нейтральный|позитивный|негативный",
     "call_outcome": "запись|отказ|консультация|перезвон|отмена|не состоялся",
     "booking_status": "согласие|отказ|консультация|не применимо",
-    "client_issue": "..."
+    "client_issue": "...",
+    "service": "название услуги или null",
+    "date": "дата записи или null",
+    "time": "время записи или null",
+    "master": "имя мастера или null"
   },
   "operator_score": 1-10 | null,
   "operator_comment": "...",
@@ -146,7 +163,7 @@ export const FEW_SHOT_EXAMPLES = `
 Ответ:
 {
   "is_conversation": true,
-  "transcript_summary": "Клиент уточнил график работы салона на сегодня. Администратор ответил, что салон работает до 20:00. Клиент поблагодарил и завершил разговор — запись не оформлялась, это консультация.",
+  "transcript_summary": "Суть обращения: услуга — не указана (справочная информация), дата — не указана, время — не указано, мастер — не выбран. Вывод: Клиент уточнил график работы салона на сегодня. Администратор ответил, что салон работает до 20:00. Клиент поблагодарил и завершил разговор — запись не оформлялась, проведена консультация.",
   "booking_status": "консультация",
   "formatted_transcript": "Менеджер: Салон «Фешен лук студио», добрый день.\\nКлиент: До скольки вы работаете сегодня?\\nМенеджер: До 20:00.\\nКлиент: Спасибо.",
   "key_facts": {
@@ -156,7 +173,11 @@ export const FEW_SHOT_EXAMPLES = `
     "tone_manager": "нейтральный",
     "call_outcome": "консультация",
     "booking_status": "консультация",
-    "client_issue": "Уточнение графика работы салона"
+    "client_issue": "Уточнение графика работы салона",
+    "service": null,
+    "date": null,
+    "time": null,
+    "master": null
   },
   "operator_score": 8,
   "operator_comment": "Администратор чётко и быстро ответил на вопрос клиента.",
@@ -168,7 +189,7 @@ export const FEW_SHOT_EXAMPLES = `
 Ответ:
 {
   "is_conversation": true,
-  "transcript_summary": "Клиент хотел записаться на маникюр к мастеру Анне. Администратор предложил слот завтра в 15:00. Клиент согласился, запись подтверждена на маникюр к Анне завтра в 15:00.",
+  "transcript_summary": "Суть обращения: услуга — маникюр, дата — завтра, время — 15:00, мастер — Анна. Вывод: Администратор предложил слот завтра в 15:00. Клиент согласился, запись успешно подтверждена на маникюр к мастеру Анне на завтра в 15:00.",
   "booking_status": "согласие",
   "formatted_transcript": "Менеджер: Салон «Фешен лук студио», добрый день.\\nКлиент: Здравствуйте, хочу записаться на маникюр к Анне.\\nМенеджер: Анна свободна завтра в 15:00, вам удобно?\\nКлиент: Да, отлично, записывайте.\\nМенеджер: Записала вас на завтра, 15:00, к Анне.\\nКлиент: Спасибо.",
   "key_facts": {
@@ -178,7 +199,11 @@ export const FEW_SHOT_EXAMPLES = `
     "tone_manager": "позитивный",
     "call_outcome": "запись",
     "booking_status": "согласие",
-    "client_issue": "Запись на маникюр к мастеру Анне"
+    "client_issue": "Запись на маникюр к мастеру Анне",
+    "service": "маникюр",
+    "date": "завтра",
+    "time": "15:00",
+    "master": "Анна"
   },
   "operator_score": 9,
   "operator_comment": "Администратор вежливо предложил конкретный слот и подтвердил запись.",
@@ -190,7 +215,7 @@ export const FEW_SHOT_EXAMPLES = `
 Ответ:
 {
   "is_conversation": true,
-  "transcript_summary": "Клиент хотел записаться на стрижку на выходные. Администратор предложил субботу в 12:00, но клиент отказался, так как будет в отъезде. Запись не оформлена — отказ из-за неудобного времени.",
+  "transcript_summary": "Суть обращения: услуга — стрижка, дата — выходные (суббота), время — 12:00, мастер — не выбран. Вывод: Администратор предложил субботу в 12:00, но клиент отказался, так как будет в отъезде. Запись не оформлена — отказ из-за неудобного времени.",
   "booking_status": "отказ",
   "formatted_transcript": "Менеджер: Салон «Фешен лук студио», добрый день.\\nКлиент: Хочу стрижку на выходных.\\nМенеджер: На выходных есть суббота в 12:00.\\nКлиент: Нет, я буду в отъезде, не подходит.\\nМенеджер: Хорошо, звоните.\\nКлиент: До свидания.",
   "key_facts": {
@@ -200,7 +225,11 @@ export const FEW_SHOT_EXAMPLES = `
     "tone_manager": "нейтральный",
     "call_outcome": "отказ",
     "booking_status": "отказ",
-    "client_issue": "Запись на стрижку на выходные"
+    "client_issue": "Запись на стрижку на выходные",
+    "service": "стрижка",
+    "date": "суббота (выходные)",
+    "time": "12:00",
+    "master": null
   },
   "operator_score": 6,
   "operator_comment": "Администратор предложил только один слот и не предложил альтернативы.",
@@ -212,7 +241,7 @@ export const FEW_SHOT_EXAMPLES = `
 Ответ:
 {
   "is_conversation": true,
-  "transcript_summary": "Клиент хотел записаться на окрашивание, но не определился со временем. Администратор договорился созвониться завтра утром. Итог — перезвон, запись пока не оформлена.",
+  "transcript_summary": "Суть обращения: услуга — окрашивание, дата — не определена, время — после 10:00 (для звонка), мастер — не выбран. Вывод: Клиент хотел записаться на окрашивание, но не определился со временем. Администратор договорился созвониться завтра утром после 10:00. Запись пока не оформлена, зафиксирован перезвон.",
   "booking_status": "консультация",
   "formatted_transcript": "Менеджер: Салон «Фешен лук студио», добрый день.\\nКлиент: Хочу записаться на окрашивание, но не знаю, когда освобожусь.\\nМенеджер: Давайте я вам позвоню завтра утром?\\nКлиент: Да, удобно, после 10:00.",
   "key_facts": {
@@ -222,7 +251,11 @@ export const FEW_SHOT_EXAMPLES = `
     "tone_manager": "позитивный",
     "call_outcome": "перезвон",
     "booking_status": "консультация",
-    "client_issue": "Запись на окрашивание, время не определено"
+    "client_issue": "Запись на окрашивание, время не определено",
+    "service": "окрашивание",
+    "date": "завтра (перезвон)",
+    "time": "после 10:00",
+    "master": null
   },
   "operator_score": 8,
   "operator_comment": "Администратор взял инициативу и договорился о повторном звонке.",
@@ -240,7 +273,7 @@ export const FEW_SHOT_EDGE_CASES = `
 Ответ:
 {
   "is_conversation": true,
-  "transcript_summary": "Клиент уточнил стоимость педикюра. Администратор назвал цену — от 1800 рублей. Клиент поблагодарил и завершил разговор; запись не оформлялась, это консультация.",
+  "transcript_summary": "Суть обращения: услуга — педикюр (уточнение цены), дата — не указана, время — не указано, мастер — не выбран. Вывод: Администратор назвал стоимость педикюра от 1800 рублей. Клиент поблагодарил и завершил разговор; запись не оформлялась, проведена консультация.",
   "booking_status": "консультация",
   "formatted_transcript": "Менеджер: Салон «Фешен лук студио».\\nКлиент: Сколько стоит педикюр?\\nМенеджер: От 1800 рублей.\\nКлиент: Понял, спасибо.",
   "key_facts": {
@@ -250,7 +283,11 @@ export const FEW_SHOT_EDGE_CASES = `
     "tone_manager": "нейтральный",
     "call_outcome": "консультация",
     "booking_status": "консультация",
-    "client_issue": "Уточнение стоимости педикюра"
+    "client_issue": "Уточнение стоимости педикюра",
+    "service": "педикюр",
+    "date": null,
+    "time": null,
+    "master": null
   },
   "operator_score": 8,
   "operator_comment": "Администратор быстро и чётко назвал цену.",
@@ -272,7 +309,11 @@ export const FEW_SHOT_EDGE_CASES = `
     "tone_manager": "нейтральный",
     "call_outcome": "не состоялся",
     "booking_status": "не применимо",
-    "client_issue": null
+    "client_issue": null,
+    "service": null,
+    "date": null,
+    "time": null,
+    "master": null
   },
   "operator_score": null,
   "operator_comment": "Разговор не состоялся (диалог отсутствует).",
@@ -294,7 +335,11 @@ export const FEW_SHOT_EDGE_CASES = `
     "tone_manager": "нейтральный",
     "call_outcome": "не состоялся",
     "booking_status": "не применимо",
-    "client_issue": null
+    "client_issue": null,
+    "service": null,
+    "date": null,
+    "time": null,
+    "master": null
   },
   "operator_score": null,
   "operator_comment": "Разговор не состоялся (диалог отсутствует).",
@@ -306,7 +351,7 @@ export const FEW_SHOT_EDGE_CASES = `
 Ответ:
 {
   "is_conversation": true,
-  "transcript_summary": "Клиент хотела записаться на стрижку и укладку, удобное время — пятница после работы. Администратор предложил 18:30 у Ольги и 19:00 у Елены. Клиент выбрала 18:30, запись подтверждена на пятницу к Ольге на стрижку и укладку.",
+  "transcript_summary": "Суть обращения: услуга — стрижка и укладка, дата — пятница, время — 18:30, мастер — Ольга. Вывод: Администратор предложил варианты в 18:30 у Ольги и в 19:00 у Елены. Клиент выбрала 18:30 к Ольге; запись подтверждена на пятницу к мастеру Ольге на стрижку и укладку.",
   "booking_status": "согласие",
   "formatted_transcript": "Менеджер: Салон «Фешен лук студио», добрый день.\\nКлиент: Здравствуйте, хотела бы записаться на стрижку и укладку.\\nМенеджер: Когда вам удобно?\\nКлиент: Лучше в пятницу после работы.\\nМенеджер: В пятницу есть 18:30 у мастера Ольги и 19:00 у Елены.\\nКлиент: 18:30 подойдёт.\\nМенеджер: Записала вас на пятницу, 18:30, к Ольге на стрижку и укладку.\\nКлиент: Отлично, спасибо большое.",
   "key_facts": {
@@ -316,7 +361,11 @@ export const FEW_SHOT_EDGE_CASES = `
     "tone_manager": "позитивный",
     "call_outcome": "запись",
     "booking_status": "согласие",
-    "client_issue": "Запись на стрижку и укладку к мастеру Ольге"
+    "client_issue": "Запись на стрижку и укладку к мастеру Ольге",
+    "service": "стрижка и укладка",
+    "date": "пятница",
+    "time": "18:30",
+    "master": "Ольга"
   },
   "operator_score": 10,
   "operator_comment": "Администратор предложил два варианта времени и чётко подтвердил запись.",
@@ -328,7 +377,7 @@ export const FEW_SHOT_EDGE_CASES = `
 Ответ:
 {
   "is_conversation": true,
-  "transcript_summary": "После автоинформатора клиент дозвонился до администратора и попросил записать его на коррекцию бровей. Администратор предложил сегодня в 17:00, клиент согласился. Запись подтверждена на коррекцию бровей сегодня в 17:00.",
+  "transcript_summary": "Суть обращения: услуга — коррекция бровей, дата — сегодня, время — 17:00, мастер — не выбран. Вывод: Администратор предложил слот сегодня в 17:00, клиент согласился. Запись успешно подтверждена на коррекцию бровей сегодня в 17:00.",
   "booking_status": "согласие",
   "formatted_transcript": "Менеджер: Салон «Фешен лук студио», слушаю.\\nКлиент: Мне бы записаться на коррекцию бровей.\\nМенеджер: Есть сегодня в 17:00, подойдёт?\\nКлиент: Да, давайте.",
   "key_facts": {
@@ -338,7 +387,11 @@ export const FEW_SHOT_EDGE_CASES = `
     "tone_manager": "нейтральный",
     "call_outcome": "запись",
     "booking_status": "согласие",
-    "client_issue": "Запись на коррекцию бровей"
+    "client_issue": "Запись на коррекцию бровей",
+    "service": "коррекция бровей",
+    "date": "сегодня",
+    "time": "17:00",
+    "master": null
   },
   "operator_score": 9,
   "operator_comment": "Администратор предложил конкретное время и подтвердил запись.",
@@ -683,6 +736,138 @@ export async function analyzeWithGigaChat(
   }
 }
 
+export interface EssenceDetails {
+  service: string | null;
+  date: string | null;
+  time: string | null;
+  master: string | null;
+}
+
+/**
+ * Извлекает 4 параметра сути обращения (услуга, дата, время, мастер)
+ * из текста транскрипта и/или существующего резюме.
+ */
+export function extractEssenceDetails(transcript: string, existingSummary?: string): EssenceDetails {
+  const combined = `${existingSummary || ''}\n${transcript || ''}`;
+
+  // 1. Услуга
+  let service: string | null = null;
+  const serviceSummaryMatch = existingSummary?.match(/(?:услуга|процедура)\s*[—–:\-]\s*([^,\n;.]+)/i);
+  if (serviceSummaryMatch && !serviceSummaryMatch[1].toLowerCase().includes('не указан')) {
+    service = serviceSummaryMatch[1].trim();
+  } else {
+    const servicePatterns: [RegExp, string][] = [
+      [/(?:аппаратн\w*\s+)?маникюр\w*(?:\s+с\s+покрытием(?:\s+шеллак|\s+гель-лак)?)?/i, 'аппаратный маникюр'],
+      [/педикюр\w*/i, 'педикюр'],
+      [/стрижк\w*(?:\s+и\s+укладк\w*)?/i, 'стрижка и укладка'],
+      [/укладк\w*/i, 'укладка'],
+      [/окрашиван\w*/i, 'окрашивание волос'],
+      [/мелирован\w*/i, 'мелирование'],
+      [/коррекц\w*\s+бровей|архитектур\w*\s+бровей|окрашивание\s+бровей|брови/i, 'коррекция бровей'],
+      [/наращиван\w*\s+ресниц|ламинирован\w*\s+ресниц|ресниц\w*/i, 'ресницы'],
+      [/косметолог\w*|чистк\w*\s+лица|пилинг/i, 'прием косметолога'],
+      [/массаж\w*/i, 'массаж'],
+      [/депиляц\w*|шугаринг|эпиляц\w*/i, 'депиляция'],
+      [/кератин\w*|ботокс\w*\s+(?:для\s+)?волос/i, 'уход для волос']
+    ];
+    for (const [pattern] of servicePatterns) {
+      const match = combined.match(pattern);
+      if (match) {
+        service = match[0].trim();
+        break;
+      }
+    }
+  }
+
+  // 2. Дата
+  let date: string | null = null;
+  const dateSummaryMatch = existingSummary?.match(/дата\s*[—–:\-]\s*([^,\n;.]+)/i);
+  if (dateSummaryMatch && !dateSummaryMatch[1].toLowerCase().includes('не указан')) {
+    date = dateSummaryMatch[1].trim();
+  } else {
+    const dateMatch = combined.match(/\b(сегодня|завтра|послезавтра|в\s+понедельник|во\s+вторник|в\s+среду|в\s+четверг|в\s+пятницу|в\s+субботу|в\s+воскресенье|на\s+выходных|на\s+выходные|\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря))\b/i);
+    if (dateMatch) {
+      date = dateMatch[0].trim();
+    }
+  }
+
+  // 3. Время
+  let time: string | null = null;
+  const timeSummaryMatch = existingSummary?.match(/время\s*[—–:\-]\s*([^,\n;.]+)/i);
+  if (timeSummaryMatch && !timeSummaryMatch[1].toLowerCase().includes('не указан')) {
+    time = timeSummaryMatch[1].trim();
+  } else {
+    const timeMatch = combined.match(/\b([012]?\d:[0-5]\d)\b|\bна\s+([012]?\d(?::[0-5]\d)?)\b|\bв\s+([012]?\d:[0-5]\d)\b|\b(утром|вечером|после\s+\d{1,2}(?::\d{2})?)\b/i);
+    if (timeMatch) {
+      time = (timeMatch[1] || timeMatch[2] || timeMatch[3] || timeMatch[4] || timeMatch[0]).trim();
+    }
+  }
+
+  // 4. Мастер
+  let master: string | null = null;
+  const masterSummaryMatch = existingSummary?.match(/мастер\s*[—–:\-]\s*([^,\n;.]+)/i);
+  if (masterSummaryMatch && !masterSummaryMatch[1].toLowerCase().includes('не выбран')) {
+    master = masterSummaryMatch[1].trim();
+  } else {
+    const masterMatch = combined.match(/(?:к\s+мастеру|мастеру|мастер|к)\s+([А-ЯЁ][а-яё]+)/i);
+    if (masterMatch) {
+      const candidate = masterMatch[1].trim();
+      const forbiddenNames = ['Салон', 'Клиент', 'Менеджер', 'Администратор', 'Вам', 'Нам', 'Завтра', 'Сегодня', 'Здравствуйте', 'Добрый', 'Пожалуйста', 'Спасибо'];
+      if (!forbiddenNames.includes(candidate)) {
+        master = candidate;
+      }
+    }
+  }
+
+  return { service, date, time, master };
+}
+
+/**
+ * Нормализует резюме так, чтобы оно ВСЕГДА содержало краткую суть обращения
+ * (услуга, дата, время, мастер) и блок выводов/итогов.
+ */
+export function formatSummaryWithEssence(
+  rawSummary: string,
+  transcript: string,
+  extractedDetails?: EssenceDetails
+): { formattedSummary: string; essence: EssenceDetails } {
+  // Звонок не состоялся
+  if (
+    /разговор не состоялся|звонок не состоялся|диалог отсутствует/i.test(rawSummary) &&
+    !transcript.toLowerCase().includes('клиент:')
+  ) {
+    return {
+      formattedSummary: rawSummary,
+      essence: { service: null, date: null, time: null, master: null }
+    };
+  }
+
+  const essence = extractedDetails || extractEssenceDetails(transcript, rawSummary);
+
+  // Если модель уже вернула валидный шаблон с «Суть обращения:» и «Вывод:»
+  if (/суть обращения/i.test(rawSummary) && /вывод/i.test(rawSummary)) {
+    return { formattedSummary: rawSummary.trim(), essence };
+  }
+
+  const serviceStr = essence.service || 'не указана';
+  const dateStr = essence.date || 'не указана';
+  const timeStr = essence.time || 'не указано';
+  const masterStr = essence.master || 'не выбран';
+
+  const essencePrefix = `Суть обращения: услуга — ${serviceStr}, дата — ${dateStr}, время — ${timeStr}, мастер — ${masterStr}.`;
+
+  // Очищаем rawSummary от дублирующихся префиксов
+  let conclusionPart = rawSummary
+    .replace(/^суть обращения:[^.]*\.?/i, '')
+    .trim();
+  if (conclusionPart.toLowerCase().startsWith('вывод:')) {
+    conclusionPart = conclusionPart.replace(/^вывод:\s*/i, '').trim();
+  }
+
+  const finalSummary = `${essencePrefix} Вывод: ${conclusionPart || 'Клиент проконсультирован по регламенту салона.'}`;
+  return { formattedSummary: finalSummary, essence };
+}
+
 /**
  * Разбирает ответ модели, опираясь на явные поля (is_conversation, call_outcome, booking_status),
  * а не на хрупкий поиск ключевых слов. Возвращает согласованный AnalysisResult.
@@ -752,6 +937,10 @@ function parseGigaChatJson(text: string, customSalonName?: string): AnalysisResu
         call_outcome: 'не состоялся',
         booking_status: 'не применимо',
         client_issue: null,
+        service: null,
+        date: null,
+        time: null,
+        master: null,
       },
       operator_score: null,
       operator_comment: 'Разговор не состоялся (диалог отсутствует).',
@@ -788,8 +977,24 @@ function parseGigaChatJson(text: string, customSalonName?: string): AnalysisResu
     score = 7;
   }
 
-  const summary =
+  const rawSummary =
     parsed.transcript_summary || parsed.summary || 'Краткое содержание диалога с результатом обращения.';
+
+  // Извлекаем суть обращения: услуга, дата, время, мастер
+  const parsedKeyFacts = parsed.key_facts || {};
+  const extracted = extractEssenceDetails(formattedTranscript || '', rawSummary);
+  const service = parsedKeyFacts.service || parsed.service || extracted.service;
+  const date = parsedKeyFacts.date || parsed.date || extracted.date;
+  const time = parsedKeyFacts.time || parsed.time || extracted.time;
+  const master = parsedKeyFacts.master || parsed.master || extracted.master;
+
+  const { formattedSummary, essence } = formatSummaryWithEssence(rawSummary, formattedTranscript || '', {
+    service: service || null,
+    date: date || null,
+    time: time || null,
+    master: master || null,
+  });
+
   const comment =
     parsed.operator_comment && parsed.operator_comment.trim().length > 0
       ? parsed.operator_comment
@@ -797,7 +1002,7 @@ function parseGigaChatJson(text: string, customSalonName?: string): AnalysisResu
   const recommendations = parsed.recommendations || `Соблюдать стандарты сервиса салона «${salon}».`;
 
   const result: AnalysisResult = {
-    transcript_summary: summary,
+    transcript_summary: formattedSummary,
     booking_status: bookingStatus,
     formatted_transcript: formattedTranscript,
     key_facts: {
@@ -807,7 +1012,11 @@ function parseGigaChatJson(text: string, customSalonName?: string): AnalysisResu
       tone_manager: parsed.key_facts?.tone_manager || 'нейтральный',
       call_outcome: outcome,
       booking_status: bookingStatus,
-      client_issue: parsed.key_facts?.client_issue || `Обращение в салон «${salon}»`,
+      client_issue: parsed.key_facts?.client_issue || (essence.service ? `Запись на ${essence.service}` : `Обращение в салон «${salon}»`),
+      service: essence.service,
+      date: essence.date,
+      time: essence.time,
+      master: essence.master,
     },
     operator_score: score,
     operator_comment: comment,
@@ -848,6 +1057,10 @@ function generateLocalFallbackAnalysis(
         call_outcome: 'не состоялся',
         booking_status: 'не применимо',
         client_issue: 'Звонок менее 10 секунд / диалог отсутствует',
+        service: null,
+        date: null,
+        time: null,
+        master: null,
       },
       operator_score: null,
       operator_comment: `Оценка не выставляется: разговор не состоялся (длительность ${callDurationSeconds} сек менее 10 секунд).`,
@@ -876,6 +1089,10 @@ function generateLocalFallbackAnalysis(
         call_outcome: 'не состоялся',
         booking_status: 'не применимо',
         client_issue: 'Отсутствует разборчивая речь в аудиозаписи',
+        service: null,
+        date: null,
+        time: null,
+        master: null,
       },
       operator_score: null,
       operator_comment: `Оценка не выставляется: аудиозапись${durLabel} не содержит разборчивого диалога оператора и клиента.`,
@@ -909,6 +1126,10 @@ function generateLocalFallbackAnalysis(
         call_outcome: 'не состоялся',
         booking_status: 'не применимо',
         client_issue: 'Звонок не состоялся / автоответчик',
+        service: null,
+        date: null,
+        time: null,
+        master: null,
       },
       operator_score: null,
       operator_comment: 'Разговор не состоялся: зафиксирован автоответчик (оценка не выставляется).',
@@ -939,18 +1160,25 @@ function generateLocalFallbackAnalysis(
   const bookingStatus = isBooking ? 'согласие' : (isDeclined ? 'отказ' : 'консультация');
 
   const cleanSnippet = clean.replace(/^(клиент:|менеджер:|администратор:)\s*/gim, '').trim().slice(0, 160);
-  const durPrefix = callDurationSeconds !== undefined ? `[${callDurationSeconds} сек.] ` : '';
 
-  let summaryText = '';
+  // Извлекаем суть обращения (услуга, дата, время, мастер)
+  const essence = extractEssenceDetails(clean);
+  const masterLabel = essence.master ? ` к мастеру ${essence.master}` : '';
+  const dateLabel = essence.date ? ` на ${essence.date}` : '';
+  const timeLabel = essence.time ? ` в ${essence.time}` : '';
+
+  let conclusionText = '';
   if (isBooking) {
-    summaryText = `${durPrefix}Клиент обратился в салон «${salon}». Достигнута договоренность о записи на услуги. Статус: согласие.`;
+    conclusionText = `Администратор согласовал запись${masterLabel}${dateLabel}${timeLabel}. Запись успешно подтверждена.`;
   } else if (isDeclined) {
-    summaryText = `${durPrefix}Клиент обратился в салон «${salon}», но предложенное время не подошло. Статус: отказ от записи.`;
+    conclusionText = `Администратор предложил варианты визита${dateLabel}${timeLabel}, но клиент отказался из-за неудобного времени или отъезда.`;
   } else if (isDispute) {
-    summaryText = `${durPrefix}Обращение клиента с вопросом/претензией по обслуживанию. Требуется перезвон.`;
+    conclusionText = `Зафиксировано обращение с вопросом/претензией по обслуживанию. Достигнута договоренность о повторном контакте/перезвоне.`;
   } else {
-    summaryText = `${durPrefix}Короткий диалог / консультация: «${cleanSnippet}»`;
+    conclusionText = `Администратор вежливо проконсультировал клиента по регламенту салона «${salon}» («${cleanSnippet}»).`;
   }
+
+  const { formattedSummary } = formatSummaryWithEssence(conclusionText, clean, essence);
 
   const score = hasDialogue ? (isDispute ? 7 : 9) : 7;
   const comment = hasDialogue
@@ -960,7 +1188,7 @@ function generateLocalFallbackAnalysis(
     : 'Краткий обмен репликами. Полноценная оценка регламента не выставляется.';
 
   return {
-    transcript_summary: summaryText,
+    transcript_summary: formattedSummary,
     booking_status: bookingStatus,
     formatted_transcript: transcript,
     key_facts: {
@@ -970,7 +1198,11 @@ function generateLocalFallbackAnalysis(
       tone_manager: 'позитивный',
       call_outcome: outcome,
       booking_status: bookingStatus,
-      client_issue: isDispute ? 'Вопрос по обслуживанию' : 'Консультация / обращение в салон',
+      client_issue: isDispute ? 'Вопрос по обслуживанию' : (essence.service ? `Запись на ${essence.service}` : 'Консультация / обращение в салон'),
+      service: essence.service,
+      date: essence.date,
+      time: essence.time,
+      master: essence.master,
     },
     operator_score: score,
     operator_comment: comment,

@@ -87,6 +87,11 @@ export interface KeyFacts {
   call_outcome: 'запись' | 'консультация' | 'отказ' | 'перезвон' | 'успешно' | 'не успешно' | 'перенесён' | 'автоответчик' | string;
   booking_status?: 'согласие' | 'отказ' | 'консультация' | 'не применимо' | string;
   client_issue?: string;
+  // Суть обращения: услуга, дата, время, мастер
+  service?: string | null;
+  date?: string | null;
+  time?: string | null;
+  master?: string | null;
 }
 
 export interface TokenUsage {
@@ -317,7 +322,11 @@ export interface AnalysisResult {
     tone_manager: string;
     call_outcome: string;
     booking_status?: 'согласие' | 'отказ' | 'консультация' | 'не применимо' | string;
-    client_issue: string;
+    client_issue: string | null;
+    service?: string | null;
+    date?: string | null;
+    time?: string | null;
+    master?: string | null;
   };
   operator_score: number | null;
   operator_comment: string;

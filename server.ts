@@ -12,7 +12,7 @@ import dotenv from 'dotenv';
 import { CallRecord, LogEntry, SystemConfig, ModelType, DashboardStats, KeyFacts, VkConfig, YclientsConfig, GigaChatModel, SystemNotification, NotificationType, UserRole } from './src/types.js';
 import { transcribeWithRetry, fixDuplicatedTranscript, refineTranscriptRoles } from './src/services/speechkit.js';
 import { transcribeAudio } from './src/services/transcriptionService.js';
-import { analyzeWithRetry, getGigaChatQueueStatus } from './src/services/gigachat.js';
+import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence } from './src/services/gigachat.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
 import { readStoreSync, writeStore } from './src/store/store.js';
 import { readConsentStoreSync, writeConsentStore } from './src/store/consent-store.js';
@@ -150,15 +150,21 @@ const SEED_CALLS: CallRecord[] = [
     status: 'completed',
     is_demo: true,
     transcript: `Менеджер: Добрый день! Салон красоты "Лик 28", меня зовут Мария. Чем я могу вам помочь?\nКлиент: Здравствуйте. Я бы хотела записаться на аппаратный маникюр с покрытием шеллак на завтра на вечер.\nМенеджер: Да, конечно, Елена. Завтра на вечер есть свободное время на 18:30 и на 20:00. Какой мастер вам больше нравится — Кристина или Анна?\nКлиент: Давайте к Кристине на 18:30. Сколько это будет стоить?\nМенеджер: Аппаратный маникюр с покрытием у Кристины стоит 2100 рублей. По времени займет около полутора часов. Записываю вас на завтра на 18:30.\nКлиент: Отлично, спасибо большое!\nМенеджер: Пожалуйста! За полчаса до визита мы пришлем вам напоминание в WhatsApp. Ждем вас!`,
-    summary: 'Клиент Елена Кузнецова обратилась для записи на аппаратный маникюр с покрытием шеллак на завтрашний вечер. Администратор Мария оперативно предложила свободное время и уточнила предпочтения по мастерам. Разговор завершился успешной записью на 18:30 к мастеру Кристине.',
+    summary: 'Суть обращения: услуга — аппаратный маникюр с шеллаком, дата — завтра, время — 18:30, мастер — Кристина. Вывод: Администратор Мария оперативно предложила свободные слоты (18:30 и 20:00). Клиент согласовала визит на 18:30 к мастеру Кристине; запись успешно оформлена, обещано напоминание в WhatsApp.',
+    booking_status: 'согласие',
     key_facts: {
       is_dispute: false,
       dispute_reason: null,
       promises: ['Прислать напоминание в WhatsApp за полчаса до визита'],
       tone_client: 'нейтральный',
       tone_manager: 'спокойный',
-      call_outcome: 'успешно',
-      client_issue: 'Запись на маникюр'
+      call_outcome: 'запись',
+      booking_status: 'согласие',
+      client_issue: 'Запись на аппаратный маникюр с покрытием шеллак',
+      service: 'аппаратный маникюр с покрытием шеллак',
+      date: 'завтра',
+      time: '18:30',
+      master: 'Кристина'
     },
     trigger_phrases: [],
     recommendations: [
@@ -179,15 +185,21 @@ const SEED_CALLS: CallRecord[] = [
     status: 'completed',
     is_demo: true,
     transcript: `Клиент: Здравствуйте! Мне пришло сообщение, что моя запись к косметологу на сегодня отменена! Вы издеваетесь? Я уже еду к вам!\nМенеджер: Здравствуйте! Приносим свои глубочайшие извинения. Дело в том, что мастер экстренно заболел, и мы физически не можем провести процедуру прямо сейчас.\nКлиент: Я уже второй раз к вам записываюсь, и вы вечно отменяете! Мне это абсолютно не подходит! Я трачу свое время на дорогу!\nМенеджер: Мы прекрасно вас понимаем и искренне сожалеем. Давайте мы подберем вам другого топ-мастера на удобное время со скидкой 30% на процедуру в качестве компенсации?\nКлиент: Ладно. А когда есть свободное время у другого мастера?\nМенеджер: Завтра в 12:00 или в 15:00 есть окна у Ирины, она ведущий специалист. И мы сделаем вам скидку.\nКлиент: Хорошо, давайте завтра на 12:00 к Ирине.\nМенеджер: Отлично, записала вас на завтра на 12:00 к Ирине. Мы перезвоним вам сегодня вечером, чтобы подтвердить, что все в силе, и зафиксируем скидку 30%. Еще раз извините за неудобства.`,
-    summary: 'Клиент Анна Васильева позвонила в негодовании из-за отмены ее записи к косметологу день-в-день. Менеджер Дмитрий извинился, объяснил причину (болезнь мастера) и сгладил конфликт, предложив другого мастера со скидкой 30%. Клиентка согласилась перенести визит на завтра.',
+    summary: 'Суть обращения: услуга — прием косметолога, дата — завтра, время — 12:00, мастер — Ирина. Вывод: Клиент выразила претензию из-за отмены визита день-в-день по причине болезни мастера. Менеджер Дмитрий применил амортизацию и согласовал перенос визита на завтра к ведущему специалисту Ирине со скидкой 30%; запись подтверждена.',
+    booking_status: 'согласие',
     key_facts: {
       is_dispute: true,
       dispute_reason: 'Клиент недоволен отменой записи день-в-день',
       promises: ['Предоставить скидку 30% на процедуру у косметолога Ирины', 'Перезвонить сегодня вечером для подтверждения записи'],
       tone_client: 'недовольный',
       tone_manager: 'спокойный',
-      call_outcome: 'перенесён',
-      client_issue: 'Отмена записи день-в-день'
+      call_outcome: 'запись',
+      booking_status: 'согласие',
+      client_issue: 'Отмена записи день-в-день / перенос к косметологу',
+      service: 'прием косметолога',
+      date: 'завтра',
+      time: '12:00',
+      master: 'Ирина'
     },
     trigger_phrases: [
       'Вы издеваетесь? Я уже еду к вам!',
@@ -1043,19 +1055,25 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
     ? 'Запись успешно подтверждена.' 
     : (isDeclined ? 'Клиент отказалась от предложенного слота из-за невозможности быть в городе/неподходящего времени.' : 'Разговор завершился консультацией.');
 
-  const durPrefix = callDurationSeconds !== undefined ? `[${callDurationSeconds} сек.] ` : '';
+  // Извлекаем суть обращения (услуга, дата, время, мастер)
+  const essence = extractEssenceDetails(cleanTranscript);
+  const masterLabel = essence.master ? ` к мастеру ${essence.master}` : '';
+  const dateLabel = essence.date ? ` на ${essence.date}` : '';
+  const timeLabel = essence.time ? ` в ${essence.time}` : '';
   const cleanSnippet = cleanTranscript.replace(/^(клиент:|менеджер:|администратор:)\s*/gim, '').trim().slice(0, 160);
 
-  let summary = '';
+  let conclusionText = '';
   if (isBooked) {
-    summary = `${durPrefix}Клиент обратился в салон «${currentSalon}». Достигнута договоренность о записи на процедуры. Итог: ${outcomeText}`;
+    conclusionText = `Администратор согласовал запись${masterLabel}${dateLabel}${timeLabel}. Запись успешно подтверждена.`;
   } else if (isDeclined) {
-    summary = `${durPrefix}Клиент обратился в салон «${currentSalon}». Итог: ${outcomeText}`;
+    conclusionText = `Администратор предложил варианты визита${dateLabel}${timeLabel}, однако клиент отказался из-за занятости или неподходящего времени.`;
   } else if (isDispute) {
-    summary = `${durPrefix}Обращение клиента с вопросом/претензией по обслуживанию. Требуется перезвон.`;
+    conclusionText = `Зафиксировано обращение с вопросом/претензией по обслуживанию. Достигнута договоренность о повторном контакте/перезвоне.`;
   } else {
-    summary = `${durPrefix}Краткий диалог / консультация: «${cleanSnippet}»`;
+    conclusionText = `Администратор вежливо проконсультировал клиента по регламенту салона «${currentSalon}» («${cleanSnippet}»).`;
   }
+
+  const { formattedSummary } = formatSummaryWithEssence(conclusionText, cleanTranscript, essence);
 
   const score = hasDialogue ? (isDispute ? 7 : 9) : null;
   const operatorComment = hasDialogue
@@ -1066,7 +1084,7 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
 
   return {
     transcript: cleanTranscript,
-    summary,
+    summary: formattedSummary,
     booking_status: bookingStatus,
     key_facts: {
       is_dispute: isDispute,
@@ -1076,7 +1094,11 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
       tone_manager: 'спокойный',
       call_outcome: outcome,
       booking_status: bookingStatus,
-      client_issue: isDispute ? 'Вопрос по обслуживанию' : 'Запись к мастеру / консультация'
+      client_issue: isDispute ? 'Вопрос по обслуживанию' : (essence.service ? `Запись на ${essence.service}` : 'Запись к мастеру / консультация'),
+      service: essence.service,
+      date: essence.date,
+      time: essence.time,
+      master: essence.master,
     },
     trigger_phrases: triggerPhrases,
     recommendations: [

@@ -9,7 +9,8 @@ import {
   ThumbsUp, Volume2, MessageSquare, 
   MessageCircle, Database, Download, ExternalLink, Zap,
   ShieldCheck, Lock, Clock, Mic, FileText, FileSpreadsheet, Smartphone, HeartHandshake,
-  CheckCircle2, XCircle, HelpCircle, Tag, Tags, Plus, X, Bookmark, Trash2
+  CheckCircle2, XCircle, HelpCircle, Tag, Tags, Plus, X, Bookmark, Trash2,
+  Scissors, Calendar, UserCheck, Sparkles
 } from 'lucide-react';
 import { CallRecord } from '../types.js';
 import { ReanalyzeButton } from './ReanalyzeButton.js';
@@ -77,6 +78,52 @@ export function CallDetails({
   const [exportingFormat, setExportingFormat] = useState<'pdf' | 'csv' | null>(null);
   const [exportSuccessFormat, setExportSuccessFormat] = useState<'pdf' | 'csv' | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+
+  // Извлечение параметров сути обращения (услуга, дата, время, мастер)
+  const essence = useMemo(() => {
+    const kf = (call.key_facts || {}) as any;
+    let service = kf.service || null;
+    let date = kf.date || null;
+    let time = kf.time || null;
+    let master = kf.master || null;
+
+    const summary = call.summary || '';
+    if (!service) {
+      const m = summary.match(/(?:услуга|процедура)\s*[—–:\-]\s*([^,\n;.]+)/i);
+      if (m && !m[1].toLowerCase().includes('не указан')) service = m[1].trim();
+    }
+    if (!date) {
+      const m = summary.match(/дата\s*[—–:\-]\s*([^,\n;.]+)/i);
+      if (m && !m[1].toLowerCase().includes('не указан')) date = m[1].trim();
+    }
+    if (!time) {
+      const m = summary.match(/время\s*[—–:\-]\s*([^,\n;.]+)/i);
+      if (m && !m[1].toLowerCase().includes('не указан')) time = m[1].trim();
+    }
+    if (!master) {
+      const m = summary.match(/мастер\s*[—–:\-]\s*([^,\n;.]+)/i);
+      if (m && !m[1].toLowerCase().includes('не выбран')) master = m[1].trim();
+    }
+
+    return { service, date, time, master };
+  }, [call]);
+
+  // Разделение резюме на суть обращения и выводы
+  const summaryParts = useMemo(() => {
+    const summary = (call.summary || '').trim();
+    if (!summary) return { essence: '', conclusion: '', raw: 'Резюме не сформировано' };
+
+    const regex = /суть обращения\s*:\s*([\s\S]*?)(?:вывод\s*:\s*([\s\S]*))?$/i;
+    const match = summary.match(regex);
+    if (match) {
+      return {
+        essence: match[1]?.trim() || '',
+        conclusion: match[2]?.trim() || '',
+        raw: summary
+      };
+    }
+    return { essence: '', conclusion: '', raw: summary };
+  }, [call.summary]);
 
   // Categorical Tag Management State
   const [customTagInput, setCustomTagInput] = useState('');
@@ -820,11 +867,14 @@ export function CallDetails({
           </div>
 
           {/* Summary Box */}
-          <div className="border border-slate-100 rounded-xl p-4 bg-white shadow-3xs">
-            <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
-              <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                Краткое содержание (Резюме диалога)
-              </h3>
+          <div className="border border-slate-200/80 rounded-xl p-4 bg-white shadow-3xs">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <div className="flex items-center gap-1.5">
+                <Sparkles className="w-4 h-4 text-amber-500 shrink-0" />
+                <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
+                  Краткое содержание (Резюме диалога)
+                </h3>
+              </div>
               {bookingStatusConfig && (
                 <div className="flex items-center gap-1.5">
                   <span className="text-[11px] text-slate-400 font-medium">Статус записи:</span>
@@ -835,9 +885,81 @@ export function CallDetails({
                 </div>
               )}
             </div>
-            <p className="text-xs text-slate-700 leading-relaxed">
-              {call.summary || 'Резюме не сформировано'}
-            </p>
+
+            {/* Параметры сути обращения (услуга, дата, время, мастер) */}
+            <div className="mb-3.5 grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div className="bg-slate-50/90 border border-slate-200/70 rounded-lg p-2.5 flex items-start gap-2">
+                <div className="p-1 rounded bg-indigo-100/80 text-indigo-700 shrink-0 mt-0.5">
+                  <Scissors className="w-3.5 h-3.5" />
+                </div>
+                <div className="min-w-0">
+                  <span className="block text-[10px] font-semibold text-slate-400 uppercase leading-none mb-1">Услуга</span>
+                  <span className="text-xs font-medium text-slate-800 truncate block" title={essence.service || 'не указана'}>
+                    {essence.service || 'не указана'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="bg-slate-50/90 border border-slate-200/70 rounded-lg p-2.5 flex items-start gap-2">
+                <div className="p-1 rounded bg-blue-100/80 text-blue-700 shrink-0 mt-0.5">
+                  <Calendar className="w-3.5 h-3.5" />
+                </div>
+                <div className="min-w-0">
+                  <span className="block text-[10px] font-semibold text-slate-400 uppercase leading-none mb-1">Дата</span>
+                  <span className="text-xs font-medium text-slate-800 truncate block" title={essence.date || 'не указана'}>
+                    {essence.date || 'не указана'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="bg-slate-50/90 border border-slate-200/70 rounded-lg p-2.5 flex items-start gap-2">
+                <div className="p-1 rounded bg-amber-100/80 text-amber-700 shrink-0 mt-0.5">
+                  <Clock className="w-3.5 h-3.5" />
+                </div>
+                <div className="min-w-0">
+                  <span className="block text-[10px] font-semibold text-slate-400 uppercase leading-none mb-1">Время</span>
+                  <span className="text-xs font-medium text-slate-800 truncate block" title={essence.time || 'не указано'}>
+                    {essence.time || 'не указано'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="bg-slate-50/90 border border-slate-200/70 rounded-lg p-2.5 flex items-start gap-2">
+                <div className="p-1 rounded bg-emerald-100/80 text-emerald-700 shrink-0 mt-0.5">
+                  <UserCheck className="w-3.5 h-3.5" />
+                </div>
+                <div className="min-w-0">
+                  <span className="block text-[10px] font-semibold text-slate-400 uppercase leading-none mb-1">Мастер</span>
+                  <span className="text-xs font-medium text-slate-800 truncate block" title={essence.master || 'не выбран'}>
+                    {essence.master || 'не выбран'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Текст резюме с выделением сути обращения и выводов */}
+            {summaryParts.essence && summaryParts.conclusion ? (
+              <div className="space-y-2 text-xs leading-relaxed">
+                <div className="p-3 bg-slate-50 rounded-lg border border-slate-200/60">
+                  <div className="font-semibold text-slate-700 mb-0.5 flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 inline-block"></span>
+                    <span>Суть обращения:</span>
+                  </div>
+                  <p className="text-slate-800">{summaryParts.essence}</p>
+                </div>
+                <div className="p-3 bg-emerald-50/60 rounded-lg border border-emerald-200/60">
+                  <div className="font-semibold text-emerald-900 mb-0.5 flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block"></span>
+                    <span>Вывод:</span>
+                  </div>
+                  <p className="text-slate-800">{summaryParts.conclusion}</p>
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs text-slate-700 leading-relaxed bg-slate-50 p-3 rounded-lg border border-slate-200/60">
+                {call.summary || 'Резюме не сформировано'}
+              </p>
+            )}
           </div>
 
           {/* Key Facts Box */}
