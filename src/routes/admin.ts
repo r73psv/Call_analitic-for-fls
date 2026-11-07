@@ -17,6 +17,7 @@ import { invalidateGigaChatTokenCache } from '../services/gigachat-auth.js';
 import { invalidateAuthorizedKeyCache, getAuthorizedKeyInfo, getIamToken, testYandexSpeechKit } from '../services/yandex-auth.js';
 import { setStoreEncryptionKey, isStoreEncryptionKeyConfigured } from '../store/crypto-store.js';
 import { scanTempFiles, cleanTempFiles, runCleanupNow } from '../store/cleanup.js';
+import { getDefaultSystemPrompt } from '../services/gigachat.js';
 import { SystemCredentials, GigaChatModel, AutoCleanupSettings, LogEntry } from '../types.js';
 
 export const adminRouter = Router();
@@ -48,6 +49,8 @@ adminRouter.get('/credentials', async (req: Request, res: Response) => {
       gigachatModel: creds.gigachatModel || store.config.default_gigachat_model || 'GigaChat:Lite',
       gigachatScope: creds.gigachatScope || process.env.GIGACHAT_SCOPE || 'GIGACHAT_API_PERS',
       gigachatConfigured: !!(creds.gigachatAuthKey || process.env.GIGACHAT_AUTH_KEY),
+      customSystemPrompt: store.config.customSystemPrompt || creds.customSystemPrompt || '',
+      defaultSystemPrompt: getDefaultSystemPrompt(store.config.salonName || creds.salonName || process.env.SALON_NAME || 'Fashion Look Studio'),
 
       // Yandex SpeechKit
       yandexApiKey: creds.yandexApiKey || process.env.YC_API_KEY || '',
@@ -232,6 +235,11 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
         store.config.activeModel = body.gigachatModel;
         process.env.GIGACHAT_DEFAULT_MODEL = body.gigachatModel;
       }
+    }
+    if (body.customSystemPrompt !== undefined) {
+      const cleanPrompt = String(body.customSystemPrompt).trim();
+      creds.customSystemPrompt = cleanPrompt;
+      store.config.customSystemPrompt = cleanPrompt;
     }
 
     // 2. Yandex SpeechKit
@@ -808,6 +816,47 @@ adminRouter.post('/cleanup/run', async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     res.status(500).json({ error: `Ошибка выполнения очистки: ${err.message}` });
+  }
+});
+
+/**
+ * GET /api/admin/default-system-prompt
+ * Возвращает эталонный заводской системный промпт для текущего салона
+ */
+adminRouter.get('/default-system-prompt', async (_req: Request, res: Response) => {
+  try {
+    const store = await readStore();
+    const salon = store.config.salonName || store.config.credentials?.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
+    const defaultPrompt = getDefaultSystemPrompt(salon);
+    res.json({ success: true, defaultSystemPrompt: defaultPrompt });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/admin/reset-system-prompt
+ * Сбрасывает пользовательский системный промпт до заводского
+ */
+adminRouter.post('/reset-system-prompt', async (req: Request, res: Response) => {
+  try {
+    const store = await readStore();
+    store.config.customSystemPrompt = '';
+    if (store.config.credentials) {
+      store.config.credentials.customSystemPrompt = '';
+    }
+    await writeStore(store);
+    const salon = store.config.salonName || store.config.credentials?.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
+    const defaultPrompt = getDefaultSystemPrompt(salon);
+    await logAccess(
+      getCurrentUser(req)?.name || 'admin',
+      'write',
+      'Системный промпт ИИ (GigaChat) сброшен к заводскому значению по умолчанию',
+      req.ip || '127.0.0.1'
+    );
+    res.json({ success: true, message: 'Системный промпт успешно сброшен к заводскому значению', defaultSystemPrompt: defaultPrompt });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 

@@ -76,6 +76,7 @@ export interface SystemCredentials {
   yclientsSalonId?: string;
   adminPasswordHash?: string;
   adminPasswordSalt?: string;
+  customSystemPrompt?: string;
 }
 
 export interface KeyFacts {
@@ -271,6 +272,7 @@ export interface SystemConfig {
   yandexCloudConfigured?: boolean;
   gigachatConfigured?: boolean;
   encryptionActive?: boolean;
+  customSystemPrompt?: string;
   credentials?: SystemCredentials;
   ttlSettings?: {
     audioDays: number;

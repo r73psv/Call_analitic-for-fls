@@ -21,6 +21,7 @@ settingsRouter.get('/', async (req: Request, res: Response) => {
       default_gigachat_model: defaultModel,
       activeModel: defaultModel,
       encryption_active: true,
+      customSystemPrompt: store.config.customSystemPrompt || '',
       yandex_speechkit_configured: !!process.env.YC_SERVICE_ACCOUNT_KEY_FILE,
       gigachat_configured: !!process.env.GIGACHAT_AUTH_KEY,
     });
@@ -32,9 +33,9 @@ settingsRouter.get('/', async (req: Request, res: Response) => {
 // PUT /api/settings
 settingsRouter.put('/', requireRole(['admin']), async (req: Request, res: Response) => {
   try {
-    const { default_gigachat_model, salonName } = req.body;
-    if (!default_gigachat_model && salonName === undefined) {
-      return res.status(400).json({ error: 'Необходимо указать default_gigachat_model или salonName' });
+    const { default_gigachat_model, salonName, customSystemPrompt } = req.body;
+    if (!default_gigachat_model && salonName === undefined && customSystemPrompt === undefined) {
+      return res.status(400).json({ error: 'Необходимо указать default_gigachat_model, salonName или customSystemPrompt' });
     }
 
     const store = await readStore();
@@ -59,12 +60,20 @@ settingsRouter.put('/', requireRole(['admin']), async (req: Request, res: Respon
       store.config.credentials.salonName = cleanSalonName;
     }
 
+    if (customSystemPrompt !== undefined) {
+      const cleanPrompt = String(customSystemPrompt).trim();
+      store.config.customSystemPrompt = cleanPrompt;
+      if (!store.config.credentials) store.config.credentials = {};
+      store.config.credentials.customSystemPrompt = cleanPrompt;
+    }
+
     await writeStore(store);
 
     res.json({
       success: true,
       salonName: store.config.salonName || 'Fashion Look Studio',
       default_gigachat_model: store.config.default_gigachat_model,
+      customSystemPrompt: store.config.customSystemPrompt || '',
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

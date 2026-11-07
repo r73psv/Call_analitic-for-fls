@@ -9,7 +9,7 @@ import {
   HelpCircle, Calendar, RefreshCw, Clock, Globe, Zap, 
   CheckCircle2, AlertTriangle, Trash2, Cpu, Eye, EyeOff, Save, AlertCircle,
   Upload, FileCode, Folder, Copy, Check, FileCheck, ChevronDown, ChevronUp,
-  Building2, RotateCcw, Users, PhoneCall, Radio
+  Building2, RotateCcw, Users, PhoneCall, Radio, Sparkles, FileText
 } from 'lucide-react';
 import { GigaChatModel, MegafonApiVersion } from '../../types.js';
 import { S3SyncPanel } from '../S3SyncPanel.js';
@@ -39,6 +39,13 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
   const [testingGiga, setTestingGiga] = useState(false);
   const [gigaTestResult, setGigaTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [queueStatus, setQueueStatus] = useState<{ pending: number; isProcessing: boolean; totalProcessed: number } | null>(null);
+
+  // Системный промпт ИИ (GigaChat)
+  const [customSystemPrompt, setCustomSystemPrompt] = useState('');
+  const [defaultSystemPrompt, setDefaultSystemPrompt] = useState('');
+  const [savingPromptOnly, setSavingPromptOnly] = useState(false);
+  const [promptSaveSuccess, setPromptSaveSuccess] = useState<string | null>(null);
+  const [promptSaveError, setPromptSaveError] = useState<string | null>(null);
 
   // 152-ФЗ Шифрование (STORE_ENCRYPTION_KEY)
   const [storeEncryptionKey, setStoreEncryptionKey] = useState('');
@@ -165,6 +172,8 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
       if (data.gigachatScope) {
         setGigachatScope(data.gigachatScope);
       }
+      setCustomSystemPrompt(data.customSystemPrompt || '');
+      setDefaultSystemPrompt(data.defaultSystemPrompt || '');
 
       setStoreEncryptionKey(data.storeEncryptionKey || '');
       setStoreEncryptionKeyConfigured(!!data.storeEncryptionKeyConfigured);
@@ -258,6 +267,7 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
         gigachatAuthKey,
         gigachatModel,
         gigachatScope,
+        customSystemPrompt: customSystemPrompt.trim(),
         storeEncryptionKey,
         yandexApiKey,
         yandexFolderId,
@@ -347,6 +357,67 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
     } finally {
       setSavingSalonOnly(false);
     }
+  };
+
+  const handleSavePromptOnly = async () => {
+    setSavingPromptOnly(true);
+    setPromptSaveSuccess(null);
+    setPromptSaveError(null);
+    try {
+      const res = await fetch('/api/admin/credentials', {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({ customSystemPrompt: customSystemPrompt.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Ошибка сохранения системного промпта');
+      setPromptSaveSuccess('Системный промпт ИИ успешно сохранён и активирован для всех звонков!');
+      setTimeout(() => setPromptSaveSuccess(null), 4000);
+    } catch (err: any) {
+      setPromptSaveError(err.message);
+    } finally {
+      setSavingPromptOnly(false);
+    }
+  };
+
+  const handleResetPromptToDefault = async () => {
+    if (!confirm('Сбросить системный промпт ИИ к заводскому эталонному значению?')) return;
+    setSavingPromptOnly(true);
+    setPromptSaveSuccess(null);
+    setPromptSaveError(null);
+    try {
+      const res = await fetch('/api/admin/reset-system-prompt', {
+        method: 'POST',
+        headers: getHeaders(),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Ошибка сброса промпта');
+      setCustomSystemPrompt('');
+      if (data.defaultSystemPrompt) {
+        setDefaultSystemPrompt(data.defaultSystemPrompt);
+      }
+      setPromptSaveSuccess('Системный промпт успешно сброшен к заводскому значению по умолчанию!');
+      setTimeout(() => setPromptSaveSuccess(null), 4000);
+    } catch (err: any) {
+      setPromptSaveError(err.message);
+    } finally {
+      setSavingPromptOnly(false);
+    }
+  };
+
+  const handleLoadDefaultIntoEditor = () => {
+    if (defaultSystemPrompt) {
+      setCustomSystemPrompt(defaultSystemPrompt);
+      setPromptSaveSuccess('Заводской эталонный промпт скопирован в редактор. Вы можете отредактировать его и сохранить.');
+      setTimeout(() => setPromptSaveSuccess(null), 4000);
+    }
+  };
+
+  const handleAppendInstruction = (snippet: string) => {
+    const current = customSystemPrompt.trim() || defaultSystemPrompt.trim();
+    setCustomSystemPrompt(`${current}\n\n${snippet}`);
+    setPromptSaveSuccess('Правило добавлено в текст промпта. Нажмите «Сохранить промпт» для применения.');
+    setTimeout(() => setPromptSaveSuccess(null), 4000);
   };
 
   const handleGenerateEncryptionKey = () => {
@@ -953,6 +1024,179 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
                 {gigaTestResult.msg}
               </span>
             )}
+          </div>
+        </div>
+
+        {/* 1.1. Настройка системного промпта ИИ (Сбер GigaChat) */}
+        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs space-y-4 lg:col-span-2" id="ai-system-prompt-card">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 pb-3 border-b border-slate-100">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 bg-emerald-50 text-emerald-700 rounded-xl">
+                <Sparkles className="w-5 h-5 text-emerald-600" />
+              </div>
+              <div>
+                <h4 className="font-bold text-slate-900 text-xs">Системный промпт ИИ (GigaChat)</h4>
+                <p className="text-[11px] text-slate-500">
+                  Инструкции для модели по извлечению параметров звонка (ФИО мастера/клиента, услуги, даты, время)
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full border ${
+                customSystemPrompt.trim().length > 0
+                  ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                  : 'bg-slate-100 text-slate-700 border-slate-200'
+              }`}>
+                {customSystemPrompt.trim().length > 0 ? '✓ Пользовательский промпт активен' : '⚙️ Заводской эталон (по умолчанию)'}
+              </span>
+            </div>
+          </div>
+
+          {/* Информационный баннер по правилам извлечения (ФИО с заглавной буквы, 152-ФЗ, запрет паразитных слов) */}
+          <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-2 text-xs">
+            <div className="font-bold text-slate-800 flex items-center gap-1.5 text-xs">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+              Регламент модели по извлечению данных из устной речи (152-ФЗ и орфография РФ):
+            </div>
+            <ul className="text-[11px] text-slate-600 space-y-1 list-disc pl-4 leading-relaxed">
+              <li>
+                <strong className="text-slate-800">Фамилии и имена (ФИО) строго с заглавной буквы:</strong> В русском языке любые имена и фамилии специалистов («Елена Валиулова», «Татьяна Валиулова», «Арина Егорова», «Кристина») ВСЕГДА пишутся с прописной (заглавной) буквы, даже если в стенограмме распознано со строчной.
+              </li>
+              <li>
+                <strong className="text-slate-800">Категорический запрет мусорных слов:</strong> Модели строго запрещено подставлять в поле мастера предлоги, местоимения, частицы и глаголы («Меня Вот», «Записались», «Будете», «Оставьте», «Студио», «Вас Плохо»). Мастер — это только реальное имя или фамилия человека.
+              </li>
+              <li>
+                <strong className="text-slate-800">Услуги, даты и время записи:</strong> Четкая фиксация названия процедуры («маникюр с покрытием», «педикюр», «макияж»), даты («8 ноября», «5 января», «завтра») и времени в формате «ЧЧ:ММ» («15:00», «19:00»), включая распознавание устного счета («15 0 0» → «15:00»).
+              </li>
+            </ul>
+          </div>
+
+          {/* Быстрые вставки правил */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label className="block text-xs font-bold text-slate-700">
+                Быстрая вставка директив в промпт:
+              </label>
+              <span className="text-[10px] text-slate-400">
+                Нажмите кнопку, чтобы добавить правило в конец промпта
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => handleAppendInstruction('ВНИМАНИЕ: Все фамилии и имена мастеров и клиентов ВСЕГДА пиши С ЗАГЛАВНОЙ БУКВЫ («Елена Валиулова», «Татьяна Валиулова»). Любые имена из устной речи приводи к заглавной букве!')}
+                className="px-2.5 py-1 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-800 font-medium rounded-lg border border-slate-200 transition-colors"
+              >
+                + Правило ФИО с заглавной буквы
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAppendInstruction('СТРОГИЙ ЗАПРЕТ: Никогда не пиши в поле мастера слова-паразиты («Меня Вот», «Записались», «Будете», «Студио»)! Мастер — это строго имя реального сотрудника салона.')}
+                className="px-2.5 py-1 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-800 font-medium rounded-lg border border-slate-200 transition-colors"
+              >
+                + Запрет мусорных слов («Меня Вот»)
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAppendInstruction('ФОРМАТ ВРЕМЕНИ: Фиксируй время строго в формате ЧЧ:ММ («15:00», «19:00»). Устный счет вроде «15 0 0» или «13 0 0» распознавай как «15:00» и «13:00».')}
+                className="px-2.5 py-1 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-800 font-medium rounded-lg border border-slate-200 transition-colors"
+              >
+                + Формат времени ЧЧ:ММ
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAppendInstruction(`НАЗВАНИЕ САЛОНА: Официальное название салона — «${salonName || 'Fashion Look Studio'}». Регламент приветствия обязателен.`)}
+                className="px-2.5 py-1 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-800 font-medium rounded-lg border border-slate-200 transition-colors"
+              >
+                + Бренд салона
+              </button>
+            </div>
+          </div>
+
+          {/* Редактор промпта */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label className="block text-xs font-bold text-slate-700">
+                Текст системного промпта для GigaChat:
+              </label>
+              <div className="flex items-center gap-3 text-[11px] text-slate-400 font-mono">
+                <span>Символов: {customSystemPrompt.length || defaultSystemPrompt.length}</span>
+                <span>Слов: {(customSystemPrompt || defaultSystemPrompt).split(/\s+/).filter(Boolean).length}</span>
+              </div>
+            </div>
+
+            <div className="relative">
+              <textarea
+                rows={11}
+                value={customSystemPrompt}
+                onChange={(e) => setCustomSystemPrompt(e.target.value)}
+                placeholder={defaultSystemPrompt || 'Используется системный промпт по умолчанию...'}
+                className="w-full px-3.5 py-2.5 bg-slate-900 text-slate-100 border border-slate-700 rounded-xl text-xs font-mono leading-relaxed focus:ring-2 focus:ring-emerald-500 focus:outline-none shadow-inner"
+                id="admin-ai-system-prompt-textarea"
+              />
+              {!customSystemPrompt && (
+                <div className="absolute right-3 bottom-3 pointer-events-none text-[11px] text-slate-400 bg-slate-800/80 px-2 py-1 rounded border border-slate-700">
+                  Заводской промпт активен (поле пустое)
+                </div>
+              )}
+            </div>
+
+            <p className="text-[11px] text-slate-500">
+              Если поле пустое, GigaChat использует встроенный эталонный промпт с автоматической подстановкой наименования салона «{salonName || 'Fashion Look Studio'}». Заполните это поле, если хотите полностью переопределить системные правила анализа.
+            </p>
+          </div>
+
+          {/* Статусные сообщения */}
+          {promptSaveSuccess && (
+            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex items-start gap-2.5 text-xs text-emerald-800">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+              <span>{promptSaveSuccess}</span>
+            </div>
+          )}
+          {promptSaveError && (
+            <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 flex items-start gap-2.5 text-xs text-rose-800">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              <span>{promptSaveError}</span>
+            </div>
+          )}
+
+          {/* Кнопки управления промптом */}
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 pt-2 border-t border-slate-100">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleLoadDefaultIntoEditor}
+                disabled={savingPromptOnly || !defaultSystemPrompt}
+                className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5"
+                title="Загрузить текст заводского промпта в редактор для внесения правок"
+                id="load-default-prompt-btn"
+              >
+                <FileText className="w-3.5 h-3.5 text-slate-500" />
+                Загрузить заводской эталон в редактор
+              </button>
+              <button
+                type="button"
+                onClick={handleResetPromptToDefault}
+                disabled={savingPromptOnly}
+                className="px-3 py-1.5 bg-slate-100 hover:bg-rose-50 text-slate-600 hover:text-rose-700 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5"
+                title="Сбросить промпт на заводской эталон"
+                id="reset-prompt-btn"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                Сбросить к заводскому
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleSavePromptOnly}
+              disabled={savingPromptOnly}
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-400 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center justify-center gap-1.5"
+              id="save-ai-system-prompt-btn"
+            >
+              <Save className="w-3.5 h-3.5" />
+              {savingPromptOnly ? 'Сохранение...' : 'Сохранить системный промпт'}
+            </button>
           </div>
         </div>
 

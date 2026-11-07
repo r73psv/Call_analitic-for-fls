@@ -752,8 +752,9 @@ async function executeSingleModelAttempt(
     }
     const db = readDb();
     const salonName = getEffectiveSalonName(db.config);
+    const customPrompt = db.config?.customSystemPrompt || db.config?.credentials?.customSystemPrompt;
     appendLog('info', 'gigachat', `Отправка запроса на анализ в модель ${gigaModel} (салон «${salonName}»)...`);
-    const analysis = await analyzeWithRetry(anonymizedText, gigaModel, (type, msg) => appendLog(type, 'gigachat', msg), undefined, salonName);
+    const analysis = await analyzeWithRetry(anonymizedText, gigaModel, (type, msg) => appendLog(type, 'gigachat', msg), undefined, salonName, customPrompt);
     appendLog('success', 'gigachat', `Звонок успешно проанализирован моделью ${gigaModel}.`);
     return {
       success: true,
@@ -933,12 +934,14 @@ async function analyzeCallTextOrAudio(
   const currentSalon = getEffectiveSalonName(db.config);
   appendLog('info', 'gigachat', `Отправка обезличенной стенограммы на анализ в ${modelToUse} (салон «${currentSalon}», длительность: ${callDurationSeconds ?? 'н/д'} сек)...`);
   try {
+    const customPrompt = db.config?.customSystemPrompt || db.config?.credentials?.customSystemPrompt;
     const analysis = await analyzeWithRetry(
       anonymizedText,
       modelToUse,
       (type, msg) => appendLog(type, 'gigachat', msg),
       callDurationSeconds,
-      currentSalon
+      currentSalon,
+      customPrompt
     );
     appendLog('success', 'gigachat', `Анализ звонка успешно выполнен моделью ${modelToUse}.`);
     return {
@@ -3917,7 +3920,9 @@ app.post('/api/calls/webhook', async (req, res) => {
     if (payload.transcript && status !== 'missed' && payload.transcript.length > 50) {
       try {
         const gModel = (db.config.default_gigachat_model || 'GigaChat:Lite') as GigaChatModel;
-        const analysis = await analyzeWithRetry(payload.transcript, gModel);
+        const currentSalon = getEffectiveSalonName(db.config);
+        const customPrompt = db.config?.customSystemPrompt || db.config?.credentials?.customSystemPrompt;
+        const analysis = await analyzeWithRetry(payload.transcript, gModel, undefined, undefined, currentSalon, customPrompt);
         if (analysis) {
           newCall.summary = analysis.transcript_summary || newCall.summary;
           newCall.booking_status = analysis.booking_status || newCall.booking_status;
@@ -4711,7 +4716,10 @@ app.post('/api/gigachat/test', async (req, res) => {
 
   try {
     const testSample = 'Менеджер: Добрый день, салон красоты «Лик 28». Клиент: Здравствуйте, хочу узнать стоимость стрижки.';
-    const result = await analyzeWithRetry(testSample, targetModel, (type, msg) => appendLog(type, 'gigachat', msg));
+    const db = readDb();
+    const salonName = getEffectiveSalonName(db.config);
+    const customPrompt = db.config?.customSystemPrompt || db.config?.credentials?.customSystemPrompt;
+    const result = await analyzeWithRetry(testSample, targetModel, (type, msg) => appendLog(type, 'gigachat', msg), undefined, salonName, customPrompt);
     appendLog('success', 'gigachat', `Тест подключения к GigaChat (${targetModel}) успешен!`);
     return res.json({
       success: true,
@@ -5074,7 +5082,9 @@ async function startServer() {
         if (call.call_id === 'megafon-real-84462946' && call.summary && (call.summary.includes('ближайшая доступная запись была на завтра') || call.key_facts?.call_outcome === 'запись')) {
           console.log('[Migration] Обнаружен звонок megafon-real-84462946 с устаревшим резюме. Запуск авто-обновления через GigaChat...');
           const anonymized = anonymizeTranscript(call.transcript);
-          analyzeWithRetry(anonymized, 'GigaChat:Lite', (l, m) => console.log(`[GigaChat AutoSync] ${m}`))
+          const currentSalon = getEffectiveSalonName(db.config);
+          const customPrompt = db.config?.customSystemPrompt || db.config?.credentials?.customSystemPrompt;
+          analyzeWithRetry(anonymized, 'GigaChat:Lite', (l, m) => console.log(`[GigaChat AutoSync] ${m}`), undefined, currentSalon, customPrompt)
             .then(analysis => {
               const updatedDb = readDb();
               const idx = updatedDb.calls.findIndex((c: any) => c.call_id === 'megafon-real-84462946');
