@@ -9,10 +9,10 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import dotenv from 'dotenv';
-import { CallRecord, LogEntry, SystemConfig, ModelType, DashboardStats, KeyFacts, VkConfig, YclientsConfig, GigaChatModel, SystemNotification, NotificationType, UserRole } from './src/types.js';
+import { CallRecord, LogEntry, SystemConfig, ModelType, DashboardStats, KeyFacts, VkConfig, YclientsConfig, GigaChatModel, SystemNotification, NotificationType, UserRole, ContextClarification } from './src/types.js';
 import { transcribeWithRetry, fixDuplicatedTranscript, refineTranscriptRoles } from './src/services/speechkit.js';
 import { transcribeAudio } from './src/services/transcriptionService.js';
-import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI } from './src/services/gigachat.js';
+import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat } from './src/services/gigachat.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
 import { readStoreSync, writeStore } from './src/store/store.js';
 import { readConsentStoreSync, writeConsentStore } from './src/store/consent-store.js';
@@ -3338,7 +3338,8 @@ app.get('/api/calls', (req, res) => {
     const needsSummaryRepair = Boolean(
       callCopy.summary && callCopy.status === 'completed' && (
         !/пересказ диалога|краткий пересказ/i.test(callCopy.summary) ||
-        /мастер\s*[—–:\-]\s*Студио|к мастеру Студио/i.test(callCopy.summary) ||
+        /мастер\s*[—–:\-]\s*Студио|к мастеру Студио|Меня\s+Вот|Записались/i.test(callCopy.summary) ||
+        (!isMasterNameValid(callCopy.key_facts?.master) && callCopy.transcript && /(?:к|у)\s+[А-ЯЁ][а-яё]+/u.test(callCopy.transcript)) ||
         (/дата\s*[—–:\-]\s*не указан/i.test(callCopy.summary) && callCopy.transcript && /\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)|сегодня|завтра|суббот|воскресень/iu.test(callCopy.transcript)) ||
         (/время\s*[—–:\-]\s*не указан/i.test(callCopy.summary) && callCopy.transcript && /\b\d{1,2}\s+[0-5]\d|\b\d{1,2}:[0-5]\d/i.test(callCopy.transcript))
       )
@@ -3352,7 +3353,7 @@ app.get('/api/calls', (req, res) => {
           service: callCopy.key_facts?.service || null,
           date: callCopy.key_facts?.date || null,
           time: callCopy.key_facts?.time || null,
-          master: callCopy.key_facts?.master || null
+          master: isMasterNameValid(callCopy.key_facts?.master) ? callCopy.key_facts.master : null
         },
         getEffectiveSalonName()
       );
@@ -3365,7 +3366,7 @@ app.get('/api/calls', (req, res) => {
         if (!callCopy.key_facts) callCopy.key_facts = {};
         callCopy.key_facts.time = essence.time;
       }
-      if (essence.master && (!callCopy.key_facts?.master || callCopy.key_facts.master.includes('не выбран') || callCopy.key_facts.master.includes('Студио'))) {
+      if (essence.master && (!callCopy.key_facts?.master || callCopy.key_facts.master.includes('не выбран') || callCopy.key_facts.master.includes('Студио') || !isMasterNameValid(callCopy.key_facts.master))) {
         if (!callCopy.key_facts) callCopy.key_facts = {};
         callCopy.key_facts.master = essence.master;
       }
@@ -3560,7 +3561,8 @@ app.get('/api/calls/:id', (req, res) => {
   const needsSingleSummaryRepair = Boolean(
     callCopy.summary && callCopy.status === 'completed' && (
       !/пересказ диалога|краткий пересказ/i.test(callCopy.summary) ||
-      /мастер\s*[—–:\-]\s*Студио|к мастеру Студио/i.test(callCopy.summary) ||
+      /мастер\s*[—–:\-]\s*Студио|к мастеру Студио|Меня\s+Вот|Записались/i.test(callCopy.summary) ||
+      (!isMasterNameValid(callCopy.key_facts?.master) && callCopy.transcript && /(?:к|у)\s+[А-ЯЁ][а-яё]+/u.test(callCopy.transcript)) ||
       (/дата\s*[—–:\-]\s*не указан/i.test(callCopy.summary) && callCopy.transcript && /\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)|сегодня|завтра|суббот|воскресень/iu.test(callCopy.transcript)) ||
       (/время\s*[—–:\-]\s*не указан/i.test(callCopy.summary) && callCopy.transcript && /\b\d{1,2}\s+[0-5]\d|\b\d{1,2}:[0-5]\d/i.test(callCopy.transcript))
     )
@@ -3574,7 +3576,7 @@ app.get('/api/calls/:id', (req, res) => {
         service: callCopy.key_facts?.service || null,
         date: callCopy.key_facts?.date || null,
         time: callCopy.key_facts?.time || null,
-        master: callCopy.key_facts?.master || null
+        master: isMasterNameValid(callCopy.key_facts?.master) ? callCopy.key_facts.master : null
       },
       getEffectiveSalonName()
     );
@@ -3587,7 +3589,7 @@ app.get('/api/calls/:id', (req, res) => {
       if (!callCopy.key_facts) callCopy.key_facts = {};
       callCopy.key_facts.time = essence.time;
     }
-    if (essence.master && (!callCopy.key_facts?.master || callCopy.key_facts.master.includes('не выбран') || callCopy.key_facts.master.includes('Студио'))) {
+    if (essence.master && (!callCopy.key_facts?.master || callCopy.key_facts.master.includes('не выбран') || callCopy.key_facts.master.includes('Студио') || !isMasterNameValid(callCopy.key_facts.master))) {
       if (!callCopy.key_facts) callCopy.key_facts = {};
       callCopy.key_facts.master = essence.master;
     }
@@ -4162,6 +4164,62 @@ app.put('/api/calls/:id/next-steps', (req, res) => {
   writeStore(db);
 
   res.json({ success: true, call });
+});
+
+// 2.4. CLARIFY CALL CONTEXT & FACT-CHECK WITH GIGACHAT
+app.post('/api/calls/:id/clarify-context', async (req, res) => {
+  const { id } = req.params;
+  const { question, model } = req.body;
+
+  if (!question || typeof question !== 'string' || !question.trim()) {
+    return res.status(400).json({ error: 'Вопрос для уточнения контекста обязателен для заполнения' });
+  }
+
+  const db = readDb();
+  const callIndex = db.calls.findIndex((c: any) => c.call_id === id);
+  if (callIndex === -1) {
+    return res.status(404).json({ error: 'Звонок не найден' });
+  }
+
+  const call = db.calls[callIndex];
+  try {
+    const salonName = getEffectiveSalonName(db.config);
+    const result = await clarifyCallContextWithGigaChat({
+      call,
+      question: question.trim(),
+      salonName,
+      forceModel: model
+    });
+
+    const clarificationEntry: ContextClarification = {
+      id: `clarify-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      question: question.trim(),
+      answer: result.answer,
+      model: result.model,
+      provider: result.provider,
+      timestamp: result.timestamp,
+      tokens_used: result.tokens_used
+    };
+
+    if (!Array.isArray(call.context_clarifications)) {
+      call.context_clarifications = [];
+    }
+    call.context_clarifications.unshift(clarificationEntry);
+
+    db.calls[callIndex] = call;
+    writeStore(db);
+
+    appendLog('info', 'gigachat', `Уточнен контекст звонка ${id} через ${result.provider} по вопросу: "${question.trim().slice(0, 50)}..."`);
+
+    res.json({
+      success: true,
+      clarification: clarificationEntry,
+      call
+    });
+  } catch (err: any) {
+    console.error('Ошибка уточнения контекста звонка в GigaChat:', err);
+    res.status(500).json({ error: err.message || 'Ошибка обработки запроса к GigaChat' });
+  }
 });
 
 // 3. ANALYZE NEW CALL (REST API)

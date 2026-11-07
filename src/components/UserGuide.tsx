@@ -329,6 +329,22 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                   Кнопка «Переанализировать» в тулбаре позволяет повторно запустить транскрибацию и анализ звонка с выбором более мощной модели нейросети (GigaChat:Pro или GigaChat:Max) при возникновении спорных ситуаций.
                 </p>
               </div>
+
+              {/* GigaChat Clarify Context Feature */}
+              <div className="p-4 rounded-xl border border-rose-300 bg-gradient-to-br from-rose-50/70 to-amber-50/40 space-y-2.5">
+                <span className="font-bold text-rose-950 text-[11px] uppercase tracking-wider flex items-center gap-1.5">
+                  <span className="px-1.5 py-0.5 rounded bg-emerald-600 text-white font-black text-[10px]">AI</span>
+                  <span>4. Кнопка «Уточнить контекст у ИИ» (GigaChat):</span>
+                </span>
+                <p className="text-slate-700 leading-relaxed">
+                  Позволяет задать любой дополнительный вопрос по конкретному диалогу напрямую в <strong>GigaChat</strong> для получения уточненной выжимки, сверки обещаний или проверки фактов.
+                </p>
+                <ul className="list-disc list-inside space-y-1 text-slate-600 pl-1 leading-relaxed">
+                  <li><strong>Быстрые шаблоны:</strong> готовые подсказки для мгновенной проверки согласованных цен, скидок, реквизитов предоплаты, даты, времени и мастера;</li>
+                  <li><strong>Точные цитаты:</strong> модель находит в стенограмме прямые цитаты («...») и аргументирует выводы реальными репликами собеседников;</li>
+                  <li><strong>История запросов:</strong> все заданные вопросы и полученные ответы сохраняются в карточке звонка с возможностью копирования в буфер обмена.</li>
+                </ul>
+              </div>
             </div>
           </div>
         )}

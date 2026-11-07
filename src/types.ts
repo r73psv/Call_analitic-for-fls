@@ -160,6 +160,19 @@ export interface CallRecord {
   next_steps?: string[];
   next_steps_items?: NextStepItem[];
   next_steps_generated_at?: string;
+
+  // Context Clarifications with AI (Yandex.GPT)
+  context_clarifications?: ContextClarification[];
+}
+
+export interface ContextClarification {
+  id: string;
+  question: string;
+  answer: string;
+  model: 'yandexgpt' | 'GigaChat' | string;
+  provider: string;
+  timestamp: string;
+  tokens_used?: TokenUsage;
 }
 
 export interface NextStepItem {

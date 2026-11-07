@@ -10,9 +10,10 @@ import {
   MessageCircle, Database, Download, ExternalLink, Zap,
   ShieldCheck, Lock, Clock, Mic, FileText, FileSpreadsheet, Smartphone, HeartHandshake,
   CheckCircle2, XCircle, HelpCircle, Tag, Tags, Plus, X, Bookmark, Trash2,
-  Scissors, Calendar, UserCheck, Sparkles, ListTodo, CheckSquare, Square, Copy, ArrowRight
+  Scissors, Calendar, UserCheck, Sparkles, ListTodo, CheckSquare, Square, Copy, ArrowRight,
+  MessageSquareQuote, Send
 } from 'lucide-react';
-import { CallRecord, NextStepItem } from '../types.js';
+import { CallRecord, NextStepItem, ContextClarification } from '../types.js';
 import { ReanalyzeButton } from './ReanalyzeButton.js';
 import { refineTranscriptRoles } from '../services/transcriptUtils.js';
 
@@ -199,6 +200,12 @@ export function CallDetails({
     }
   };
 
+  // Clarify Context State (Yandex.GPT)
+  const [clarifyQuestion, setClarifyQuestion] = useState('');
+  const [isClarifying, setIsClarifying] = useState(false);
+  const [clarifyError, setClarifyError] = useState<string | null>(null);
+  const [copiedClarifyId, setCopiedClarifyId] = useState<string | null>(null);
+
   React.useEffect(() => {
     setVkError(null);
     setExportError(null);
@@ -208,7 +215,49 @@ export function CallDetails({
     setCopiedSteps(false);
     setIsAddingStep(false);
     setNewStepInput('');
+    setClarifyError(null);
+    setClarifyQuestion('');
+    setCopiedClarifyId(null);
   }, [call.call_id]);
+
+  const handleClarifyContext = async (questionToAsk?: string) => {
+    const q = (questionToAsk || clarifyQuestion).trim();
+    if (!q || isClarifying) return;
+
+    setIsClarifying(true);
+    setClarifyError(null);
+    try {
+      const res = await fetch(`/api/calls/${call.call_id}/clarify-context`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: q }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Ошибка сервера (${res.status})`);
+      }
+      const data = await res.json();
+      if (onCallUpdated && data.call) {
+        onCallUpdated(data.call);
+      }
+      setClarifyQuestion('');
+    } catch (err: any) {
+      setClarifyError(err.message || 'Не удалось получить ответ от GigaChat');
+    } finally {
+      setIsClarifying(false);
+    }
+  };
+
+  const scrollToClarify = () => {
+    const el = document.getElementById('clarify-context-ai-container');
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setTimeout(() => {
+        const input = document.getElementById('clarify-context-question-input');
+        if (input) input.focus();
+      }, 250);
+    }
+  };
 
   const currentNextStepsItems = useMemo<NextStepItem[]>(() => {
     if (call.next_steps_items && call.next_steps_items.length > 0) {
@@ -786,6 +835,29 @@ export function CallDetails({
             </span>
           </button>
 
+          {/* Clarify Context with GigaChat Button */}
+          <button
+            onClick={scrollToClarify}
+            disabled={!call.transcript}
+            id="btn-clarify-context-gigachat"
+            className={`text-xs font-semibold px-3.5 py-1.5 rounded-lg border flex items-center gap-1.5 transition-all cursor-pointer shadow-3xs ${
+              isClarifying
+                ? 'bg-rose-100 text-rose-800 border-rose-300 animate-pulse'
+                : call.context_clarifications && call.context_clarifications.length > 0
+                ? 'bg-rose-50 hover:bg-rose-100 text-rose-900 border-rose-200'
+                : 'bg-gradient-to-r from-rose-50 via-white to-amber-50 hover:bg-rose-100 text-rose-900 border-rose-200'
+            }`}
+            title="Отправить дополнительный вопрос по конкретному звонку в GigaChat для получения уточненной выжимки или проверки фактов"
+          >
+            <MessageSquareQuote className="w-3.5 h-3.5 text-rose-600" />
+            <span>Уточнить контекст у ИИ</span>
+            {call.context_clarifications && call.context_clarifications.length > 0 && (
+              <span className="text-[10px] bg-rose-200/80 text-rose-900 font-bold px-1.5 py-0.2 rounded-full border border-rose-300">
+                {call.context_clarifications.length}
+              </span>
+            )}
+          </button>
+
           <button
             onClick={handleVk}
             disabled={sendingVk || call.status !== 'completed'}
@@ -1154,6 +1226,183 @@ export function CallDetails({
               <p className="text-xs text-slate-700 leading-relaxed bg-slate-50 p-3 rounded-lg border border-slate-200/60">
                 {call.summary || 'Резюме не сформировано'}
               </p>
+            )}
+          </div>
+
+          {/* Clarify Context with Yandex.GPT Card */}
+          <div 
+            className="border border-rose-200/90 rounded-2xl p-4 bg-gradient-to-br from-rose-50/40 via-white to-amber-50/20 shadow-xs space-y-3.5"
+            id="clarify-context-ai-container"
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between gap-2 flex-wrap pb-2.5 border-b border-rose-100">
+              <div className="flex items-center gap-2">
+                <div className="p-1.5 rounded-lg bg-rose-600 text-white shrink-0 shadow-3xs">
+                  <MessageSquareQuote className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
+                      <span>Уточнить контекст у ИИ</span>
+                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800 border border-emerald-200 uppercase">
+                        GigaChat
+                      </span>
+                    </h3>
+                  </div>
+                  <p className="text-[11px] text-slate-500">
+                    Задайте дополнительный вопрос по конкретному звонку в GigaChat для получения уточненной выжимки или проверки фактов
+                  </p>
+                </div>
+              </div>
+
+              {call.context_clarifications && call.context_clarifications.length > 0 && (
+                <span className="text-[11px] text-rose-800 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-md font-medium">
+                  Ответов: <strong>{call.context_clarifications.length}</strong>
+                </span>
+              )}
+            </div>
+
+            {/* Suggested Prompt Chips */}
+            <div className="space-y-1.5">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                Быстрые вопросы для проверки фактов:
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  'Была ли названа точная цена услуги и порядок оплаты?',
+                  'На какую дату, время и к какому мастеру договорились?',
+                  'Какие обязательства или обещания дал оператор?',
+                  'Были ли упомянуты скидки, акции или условия отмены?',
+                  'Были ли признаки конфликта или недовольства клиента?'
+                ].map((presetQ, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => {
+                      setClarifyQuestion(presetQ);
+                      handleClarifyContext(presetQ);
+                    }}
+                    disabled={isClarifying || !call.transcript}
+                    className="text-[11px] text-slate-700 bg-white hover:bg-rose-50 hover:text-rose-900 hover:border-rose-300 border border-slate-200/90 rounded-lg px-2.5 py-1 text-left transition-all cursor-pointer shadow-3xs disabled:opacity-50"
+                  >
+                    💬 {presetQ}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Input & Submit Form */}
+            <form 
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleClarifyContext();
+              }}
+              className="space-y-2 pt-1"
+            >
+              <div className="relative">
+                <input
+                  type="text"
+                  id="clarify-context-question-input"
+                  value={clarifyQuestion}
+                  onChange={(e) => setClarifyQuestion(e.target.value)}
+                  placeholder="Задайте любой вопрос по звонку (например: 'Какая предоплата требуется и в какой банк?')..."
+                  disabled={isClarifying || !call.transcript}
+                  className="w-full pl-3.5 pr-28 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 transition-all disabled:opacity-60"
+                />
+                <button
+                  type="submit"
+                  disabled={isClarifying || !clarifyQuestion.trim() || !call.transcript}
+                  id="btn-submit-clarify-question"
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all shadow-3xs cursor-pointer"
+                >
+                  {isClarifying ? (
+                    <>
+                      <Zap className="w-3.5 h-3.5 animate-spin text-rose-200" />
+                      <span>Анализ...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Send className="w-3.5 h-3.5" />
+                      <span>Спросить</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {clarifyError && (
+                <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <p>{clarifyError}</p>
+                </div>
+              )}
+            </form>
+
+            {/* Existing clarifications list for this call */}
+            {call.context_clarifications && call.context_clarifications.length > 0 && (
+              <div className="space-y-3 pt-2 border-t border-rose-100">
+                <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider block">
+                  История уточнений по звонку:
+                </span>
+
+                <div className="space-y-3">
+                  {call.context_clarifications.map((item) => (
+                    <div 
+                      key={item.id}
+                      className="bg-white border border-rose-200/70 rounded-xl p-3.5 shadow-3xs space-y-2 hover:border-rose-300 transition-colors"
+                    >
+                      {/* Question Header */}
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-start gap-2">
+                          <span className="p-1 rounded-md bg-rose-100 text-rose-800 font-bold text-[10px] mt-0.5 shrink-0">
+                            Вопрос
+                          </span>
+                          <span className="text-xs font-bold text-slate-900 leading-snug">
+                            {item.question}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-slate-400 font-mono shrink-0">
+                          {item.timestamp ? new Date(item.timestamp).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : ''}
+                        </span>
+                      </div>
+
+                      {/* Answer Content */}
+                      <div className="p-3 bg-slate-50/80 rounded-lg border border-slate-200/80 text-xs text-slate-800 leading-relaxed whitespace-pre-line font-normal">
+                        {item.answer}
+                      </div>
+
+                      {/* Footer: Provider badge & Copy Button */}
+                      <div className="flex items-center justify-between text-[11px] pt-1 text-slate-500">
+                        <span className="inline-flex items-center gap-1 font-medium text-slate-600">
+                          <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
+                          <span>Провайдер: <strong>{item.provider || item.model}</strong></span>
+                        </span>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(`Вопрос: ${item.question}\nОтвет: ${item.answer}`);
+                            setCopiedClarifyId(item.id);
+                            setTimeout(() => setCopiedClarifyId(null), 3000);
+                          }}
+                          className="px-2 py-0.5 rounded text-[11px] text-slate-600 hover:text-slate-900 hover:bg-slate-100 border border-transparent hover:border-slate-200 flex items-center gap-1 transition-all cursor-pointer"
+                        >
+                          {copiedClarifyId === item.id ? (
+                            <>
+                              <Check className="w-3 h-3 text-emerald-600" />
+                              <span className="text-emerald-700 font-semibold">Скопировано</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3 h-3 text-slate-400" />
+                              <span>Копировать</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
 
