@@ -45,6 +45,9 @@ export function generateCallCsv(call: CallRecord, userRole: string = 'manager', 
   const recommendationsText = Array.isArray(call.recommendations)
     ? call.recommendations.join('; ')
     : (call.recommendations || '');
+  const mistakesText = Array.isArray(call.operator_mistakes)
+    ? call.operator_mistakes.join('; ')
+    : (call.operator_mistakes || '');
   const promisesText = Array.isArray(call.key_facts?.promises)
     ? call.key_facts.promises.join('; ')
     : '';
@@ -73,6 +76,7 @@ export function generateCallCsv(call: CallRecord, userRole: string = 'manager', 
     ['Используемая ИИ-модель', call.model_used || 'GigaChat:Lite', 'Сбер GigaChat / SpeechKit'],
     ['Статус записи (ИИ-анализ)', bookingStatus, 'согласие / отказ / консультация'],
     ['Оценка работы оператора', call.operator_score !== null && call.operator_score !== undefined ? `${call.operator_score}/10` : 'Без оценки', 'Шкала 1-10'],
+    ['Ошибки и недочеты менеджера', mistakesText || 'Грубых ошибок не допущено', 'Причины снижения оценки'],
     ['Итог разговора', call.key_facts?.call_outcome || 'не указан', 'Категория результата'],
     ['Конфликт / Спор', call.key_facts?.is_dispute ? 'ДА' : 'НЕТ', call.key_facts?.dispute_reason || 'Конфликтов не зафиксировано'],
     ['Тональность клиента', call.key_facts?.tone_client || 'нейтральный', 'Эмоциональный окрас'],
@@ -85,7 +89,7 @@ export function generateCallCsv(call: CallRecord, userRole: string = 'manager', 
     ['Мастер', call.key_facts?.master || 'не выбран', 'Выбранный специалист'],
     ['Комментарий аудитора', call.operator_comment || '', 'Анализ работы сотрудника'],
     ['Краткое содержание диалога', call.summary || '', 'Резюме разговора от ИИ'],
-    ['Рекомендации для администратора', recommendationsText || '', 'Точки роста сервиса'],
+    ['Рекомендации и советы по оптимизации', recommendationsText || '', 'Точки роста сервиса'],
     ['Обезличенная стенограмма диалога (152-ФЗ)', transcript, 'Диалог по ролям: Менеджер / Клиент'],
   ];
 
@@ -260,6 +264,7 @@ export function generateCallsTableCsv(
     'Время записи',
     'Мастер',
     'Оценка ИИ (1-10)',
+    'Ошибки менеджера',
     'Тональность клиента',
     'Тональность администратора',
     'Конфликт / Спор',
@@ -268,7 +273,7 @@ export function generateCallsTableCsv(
     'Краткая суть обращения',
     'Краткое резюме диалога',
     'Комментарий аудитора',
-    'Рекомендации оператору',
+    'Рекомендации и советы по оптимизации',
     'Теги',
     'ИИ-модель',
   ];
@@ -311,6 +316,10 @@ export function generateCallsTableCsv(
       ? call.recommendations.join('; ')
       : (call.recommendations || '');
 
+    const mistakesText = Array.isArray(call.operator_mistakes)
+      ? call.operator_mistakes.join('; ')
+      : (call.operator_mistakes || '');
+
     const tagsText = Array.isArray(call.tags)
       ? call.tags.join(', ')
       : '';
@@ -332,6 +341,7 @@ export function generateCallsTableCsv(
       call.key_facts?.time || '',
       call.key_facts?.master || '',
       call.operator_score !== null && call.operator_score !== undefined ? call.operator_score : '',
+      mistakesText || 'Грубых ошибок не допущено',
       call.key_facts?.tone_client || '',
       call.key_facts?.tone_manager || '',
       call.key_facts?.is_dispute ? 'ДА' : 'НЕТ',

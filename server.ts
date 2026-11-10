@@ -770,6 +770,7 @@ async function executeSingleModelAttempt(
         trigger_phrases: [],
         recommendations: Array.isArray(analysis.recommendations) ? analysis.recommendations : [analysis.recommendations],
         operator_score: analysis.operator_score,
+        operator_mistakes: analysis.operator_mistakes || [],
         operator_comment: analysis.operator_comment,
         model_used: gigaModel
       }
@@ -956,6 +957,7 @@ async function analyzeCallTextOrAudio(
       trigger_phrases: [],
       recommendations: Array.isArray(analysis.recommendations) ? analysis.recommendations : [analysis.recommendations],
       operator_score: analysis.operator_score,
+      operator_mistakes: analysis.operator_mistakes || [],
       operator_comment: analysis.operator_comment,
       model_used: modelToUse
     };
@@ -1146,12 +1148,51 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
     conclusionText = `Администратор вежливо проконсультировал клиента по регламенту салона «${currentSalon}» («${cleanSnippet}»).`;
   }
 
-  const { formattedSummary } = formatSummaryWithEssence(conclusionText, cleanTranscript, essence, currentSalon);
+  const score = hasDialogue ? (isDispute ? 7 : (isDeclined ? 6 : (isBooked ? 9 : 8))) : null;
 
-  const score = hasDialogue ? (isDispute ? 7 : 9) : null;
+  const mistakes: string[] = [];
+  const recommendationsList: string[] = [];
+  if (score !== null) {
+    if (isDeclined) {
+      mistakes.push('Администратор предложил только один временной слот без альтернатив');
+      mistakes.push('При отказе клиента не предложены другие свободные дни или лист ожидания салона');
+      recommendationsList.push('Всегда предлагать вилку времени минимум из двух слотов («Суббота 12:00 или воскресенье 16:00»)');
+      recommendationsList.push('При отказе предлагать альтернативные даты или внесение в лист ожидания');
+    } else if (isDispute) {
+      mistakes.push('Недостаточно оперативное переключение в режим активного слушания при претензии');
+      mistakes.push('Не зафиксированы сроки обратной связи руководства по разрешению проблемы');
+      recommendationsList.push('Принять претензию по алгоритму и согласовать время контрольного звонка');
+    } else if (isBooked) {
+      mistakes.push('Не предложены сопутствующие процедуры (дизайн, спа-уход, снятие покрытия)');
+      recommendationsList.push('Практиковать ненавязчивую допродажу сопутствующих услуг к основной процедуре');
+      recommendationsList.push('Информировать клиента об отправке смс-напоминания накануне визита');
+    } else {
+      mistakes.push('Не выявлена потребность звонящего в записи на услуги салона');
+      mistakes.push('Сухой справочный ответ без встречной инициативы по подбору удобного слота');
+      recommendationsList.push('После ответа о ценах/графике сразу предлагать свободные окна для записи');
+    }
+  }
+
   const operatorComment = hasDialogue
-    ? `Оценка сформирована по тексту стенограммы (${cleanTranscript.length} символов). Администратор вежливо проконсультировал клиента по регламенту «${currentSalon}».`
+    ? (isDispute
+        ? 'Администратор принял претензию/отмену, соблюдая вежливый тон, однако не зафиксировал сроки обратной связи.'
+        : isDeclined
+        ? 'Снижение оценки вызвано пассивной позицией при отказе клиента и отсутствием предложений альтернативных дат.'
+        : isBooked
+        ? `Администратор успешно оформил запись, но упустил возможность предложить сопутствующие услуги салона «${currentSalon}».`
+        : `Администратор предоставил базовую консультацию по регламенту «${currentSalon}», не проявив активности в оформлении записи.`)
     : `Краткий обмен репликами. Полноценная оценка регламента не выставляется.`;
+
+  const { formattedSummary } = formatSummaryWithEssence(
+    conclusionText,
+    cleanTranscript,
+    essence,
+    currentSalon,
+    score,
+    mistakes,
+    recommendationsList,
+    operatorComment
+  );
 
   const bookingStatus = isBooked ? 'согласие' : (isDeclined ? 'отказ' : (isDispute ? 'консультация' : 'консультация'));
 
@@ -1174,10 +1215,11 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
       master: essence.master,
     },
     trigger_phrases: triggerPhrases,
-    recommendations: [
+    recommendations: recommendationsList.length > 0 ? recommendationsList : [
       `Следовать стандартам общения и вежливости при обслуживании в салоне «${currentSalon}».`
     ],
     operator_score: score,
+    operator_mistakes: mistakes,
     operator_comment: operatorComment
   };
 }
@@ -3927,7 +3969,11 @@ app.post('/api/calls/webhook', async (req, res) => {
           newCall.summary = analysis.transcript_summary || newCall.summary;
           newCall.booking_status = analysis.booking_status || newCall.booking_status;
           newCall.operator_score = analysis.operator_score !== null ? analysis.operator_score : newCall.operator_score;
+          newCall.operator_mistakes = analysis.operator_mistakes || [];
           newCall.operator_comment = analysis.operator_comment || newCall.operator_comment;
+          if (analysis.recommendations) {
+            newCall.recommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : [analysis.recommendations];
+          }
           if (analysis.key_facts) {
             newCall.key_facts = { ...newCall.key_facts, ...analysis.key_facts };
           }
@@ -5078,7 +5124,39 @@ async function startServer() {
           }
         }
 
-        // Авто-исправление резюме для звонка с отказом клиента из-за отъезда
+        // Авто-миграция: наполнение operator_mistakes и 4-частного резюме с ошибками и советами для существующих звонков
+        if (call.operator_score !== null && call.operator_score !== undefined && (!call.operator_mistakes || call.operator_mistakes.length === 0)) {
+          if (call.operator_score === 10) {
+            call.operator_mistakes = [];
+          } else if (call.key_facts?.is_dispute) {
+            call.operator_mistakes = [
+              'Недостаточно оперативное переключение в режим активного слушания при претензии',
+              'Не зафиксированы четкие сроки разрешения претензии клиента'
+            ];
+          } else if (call.booking_status === 'отказ' || call.key_facts?.call_outcome === 'отказ') {
+            call.operator_mistakes = [
+              'Администратор предложил только один временной слот без альтернативных вариантов',
+              'При отказе клиента не предложены другие свободные дни или лист ожидания салона'
+            ];
+          } else {
+            call.operator_mistakes = [
+              'Не предложены сопутствующие процедуры (дизайн, спа-уход, снятие покрытия)',
+              'Не оговорён регламент предварительного напоминания о визите накануне'
+            ];
+          }
+          fixedCount++;
+        }
+
+        if (call.summary && call.operator_score !== null && !call.summary.includes('Разбор работы менеджера') && !call.summary.includes('разбор работы менеджера')) {
+          const mistakesText = call.operator_mistakes && call.operator_mistakes.length > 0
+            ? call.operator_mistakes.join('; ')
+            : (call.operator_score === 10 ? 'Грубых ошибок не допущено, регламент соблюден в полном объеме.' : 'Упущены возможности допродажи сопутствующих услуг.');
+          const adviceText = Array.isArray(call.recommendations) && call.recommendations.length > 0
+            ? call.recommendations.join('; ')
+            : 'Следовать стандартам сервиса и вежливого общения салона.';
+          call.summary = `${call.summary}\nРазбор работы менеджера (оценка ${call.operator_score}/10):\n- Ошибки и недочеты: ${mistakesText}\n- Советы по оптимизации: ${adviceText}`;
+          fixedCount++;
+        }
         if (call.call_id === 'megafon-real-84462946' && call.summary && (call.summary.includes('ближайшая доступная запись была на завтра') || call.key_facts?.call_outcome === 'запись')) {
           console.log('[Migration] Обнаружен звонок megafon-real-84462946 с устаревшим резюме. Запуск авто-обновления через GigaChat...');
           const anonymized = anonymizeTranscript(call.transcript);

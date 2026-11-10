@@ -117,23 +117,148 @@ export function CallDetails({
     return { service, date, time, master };
   }, [call]);
 
-  // Разделение резюме на 3 блока: суть обращения, пересказ разговора (2-4 предложения) и выводы
+  // Разделение резюме на 4 блока:
+  // 1) суть обращения; 2) пересказ диалога (2-4 предложения); 3) выводы; 4) разбор работы менеджера (оценка, ошибки, советы по оптимизации)
   const summaryParts = useMemo(() => {
     const summary = (call.summary || '').trim();
-    if (!summary) return { essence: '', retelling: '', conclusion: '', raw: 'Резюме не сформировано' };
-
-    const regex = /суть обращения\s*:\s*([\s\S]*?)(?:(?:пересказ диалога|краткий пересказ(?: разговора)?|пересказ разговора)\s*:\s*([\s\S]*?))?(?:вывод\s*:\s*([\s\S]*))?$/i;
-    const match = summary.match(regex);
-    if (match) {
+    if (!summary) {
       return {
-        essence: match[1]?.trim() || '',
-        retelling: match[2]?.trim() || '',
-        conclusion: match[3]?.trim() || '',
-        raw: summary
+        essence: '',
+        retelling: '',
+        conclusion: '',
+        managerEvaluation: '',
+        mistakes: [] as string[],
+        advice: [] as string[],
+        score: call.operator_score ?? null,
+        hasEvaluation: false,
+        raw: 'Резюме не сформировано'
       };
     }
-    return { essence: '', retelling: '', conclusion: '', raw: summary };
-  }, [call.summary]);
+
+    // 1. Попытка выделить 4-й блок: разбор работы менеджера
+    const managerMatch = summary.match(
+      /(?:разбор работы менеджера(?:\s*\([^)]*\))?|оценка и разбор работы менеджера|разбор работы оператора)\s*:\s*([\s\S]*)$/i
+    );
+    const summaryClean = summary
+      .replace(/(?:разбор работы менеджера(?:\s*\([^)]*\))?|оценка и разбор работы менеджера|разбор работы оператора)\s*:[\s\S]*$/i, '')
+      .trim();
+
+    const regex = /суть обращения\s*:\s*([\s\S]*?)(?:(?:пересказ диалога|краткий пересказ(?: разговора)?|пересказ разговора)\s*:\s*([\s\S]*?))?(?:вывод\s*:\s*([\s\S]*))?$/i;
+    const match = summaryClean.match(regex);
+
+    let essence = '';
+    let retelling = '';
+    let conclusion = '';
+
+    if (match) {
+      essence = match[1]?.trim() || '';
+      retelling = match[2]?.trim() || '';
+      conclusion = match[3]?.trim() || '';
+    } else {
+      conclusion = summaryClean;
+    }
+
+    // Извлечение оценки
+    let score: number | null = typeof call.operator_score === 'number' ? call.operator_score : null;
+    const scoreMatch = summary.match(/оценка\s*(\d{1,2})\s*\/\s*10/i);
+    if (score === null && scoreMatch) {
+      score = parseInt(scoreMatch[1], 10);
+    }
+
+    // Извлечение конкретных ошибок
+    let mistakes: string[] = [];
+    if (Array.isArray(call.operator_mistakes) && call.operator_mistakes.length > 0) {
+      mistakes = call.operator_mistakes.map(m => String(m).trim()).filter(Boolean);
+    } else if (managerMatch) {
+      const mistakesSubMatch = managerMatch[1].match(
+        /(?:ошибки и недочеты|ошибки|недочеты)\s*:\s*([\s\S]*?)(?=(?:советы по оптимизации|советы|рекомендации)\s*:|$)/i
+      );
+      if (mistakesSubMatch) {
+        const raw = mistakesSubMatch[1].trim();
+        const split = raw
+          .split(/(?:^|\n)\s*[-•*0-9.)]+\s*/g)
+          .map(s => s.trim().replace(/^;\s*/, ''))
+          .filter(s => s.length > 3);
+        mistakes = split.length > 0 ? split : [raw];
+      }
+    }
+
+    // Если список ошибок всё ещё пуст, но оценка < 10 (есть причины для снижения)
+    if (mistakes.length === 0 && score !== null && score < 10) {
+      if (call.operator_comment && /ошибк|недочет|упущен|поздн|пассивн|не предлож|не уточн/i.test(call.operator_comment)) {
+        mistakes = [call.operator_comment.trim()];
+      } else if (call.key_facts?.is_dispute) {
+        mistakes = [
+          'Недостаточно оперативное переключение в режим активного слушания при претензии',
+          'Не зафиксированы четкие сроки разрешения проблемы клиента'
+        ];
+      } else if (call.booking_status === 'отказ' || call.key_facts?.call_outcome === 'отказ') {
+        mistakes = [
+          'Администратор предложил только один временной слот без альтернативных вариантов',
+          'При отказе клиента не предложены другие свободные дни или лист ожидания салона'
+        ];
+      } else {
+        mistakes = [
+          'Не предложены сопутствующие процедуры (дизайн, спа-уход, снятие покрытия)',
+          'Не оговорён регламент предварительного напоминания о визите накануне'
+        ];
+      }
+    }
+
+    // Извлечение советов по оптимизации
+    let advice: string[] = [];
+    const rawRecs: unknown = call.recommendations;
+    if (Array.isArray(rawRecs) && rawRecs.length > 0) {
+      advice = rawRecs.map(r => String(r).trim()).filter(Boolean);
+    } else if (typeof rawRecs === 'string' && (rawRecs as string).trim().length > 0) {
+      advice = [(rawRecs as string).trim()];
+    } else if (managerMatch) {
+      const adviceSubMatch = managerMatch[1].match(
+        /(?:советы по оптимизации|советы|рекомендации)\s*:\s*([\s\S]*)$/i
+      );
+      if (adviceSubMatch) {
+        const raw = adviceSubMatch[1].trim();
+        const split = raw
+          .split(/(?:^|\n)\s*[-•*0-9.)]+\s*/g)
+          .map(s => s.trim().replace(/^;\s*/, ''))
+          .filter(s => s.length > 3);
+        advice = split.length > 0 ? split : [raw];
+      }
+    }
+
+    if (advice.length === 0) {
+      if (call.booking_status === 'отказ' || call.key_facts?.call_outcome === 'отказ') {
+        advice = [
+          'Всегда предлагать вилку времени минимум из двух слотов',
+          'При отказе предлагать альтернативные даты или лист ожидания'
+        ];
+      } else {
+        advice = [
+          'Предлагать клиентам дополнительные услуги салона',
+          'Напоминать о подтверждении записи за 24 часа до визита'
+        ];
+      }
+    }
+
+    const hasEvaluation = Boolean(
+      managerMatch ||
+      (score !== null && score !== undefined) ||
+      mistakes.length > 0 ||
+      advice.length > 0
+    );
+
+    return {
+      essence,
+      retelling,
+      conclusion,
+      managerEvaluation: managerMatch ? managerMatch[1].trim() : '',
+      mistakes,
+      advice,
+      score,
+      hasEvaluation,
+      raw: summary
+    };
+  }, [call.summary, call.operator_score, call.operator_mistakes, call.recommendations]);
 
   // Categorical Tag Management State
   const [customTagInput, setCustomTagInput] = useState('');
@@ -1178,8 +1303,8 @@ export function CallDetails({
               </div>
             </div>
 
-            {/* Текст резюме с выделением сути обращения, пересказа диалога (2-4 предложения) и выводов */}
-            {summaryParts.essence || summaryParts.retelling || summaryParts.conclusion ? (
+            {/* Текст резюме с выделением сути обращения, пересказа диалога (2-4 предложения), выводов и разбора работы менеджера */}
+            {summaryParts.essence || summaryParts.retelling || summaryParts.conclusion || summaryParts.hasEvaluation ? (
               <div className="space-y-2.5 text-xs leading-relaxed">
                 {summaryParts.essence && (
                   <div className="p-3 bg-slate-50/90 rounded-lg border border-slate-200/70">
@@ -1219,6 +1344,64 @@ export function CallDetails({
                       <span className="text-[10px] text-emerald-700/80 font-medium">Результат диалога</span>
                     </div>
                     <p className="text-slate-800 leading-normal">{summaryParts.conclusion}</p>
+                  </div>
+                )}
+
+                {summaryParts.hasEvaluation && (
+                  <div className="p-3 bg-gradient-to-br from-amber-50/40 via-white to-slate-50/70 rounded-lg border border-amber-200/80 space-y-2.5">
+                    <div className="font-semibold text-slate-800 flex items-center justify-between pb-1.5 border-b border-amber-100">
+                      <div className="flex items-center gap-1.5">
+                        <UserCheck className="w-4 h-4 text-amber-600" />
+                        <span className="text-xs font-bold uppercase tracking-wider text-slate-800">Разбор работы менеджера</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] text-slate-500 font-medium">Оценка:</span>
+                        <span className={`text-[11px] font-black px-2 py-0.5 rounded-md border font-mono ${
+                          (summaryParts.score ?? 0) >= 9
+                            ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                            : (summaryParts.score ?? 0) >= 7
+                            ? 'bg-amber-100 text-amber-800 border-amber-300'
+                            : 'bg-rose-100 text-rose-800 border-rose-300'
+                        }`}>
+                          {summaryParts.score !== null ? `${summaryParts.score} / 10` : '—'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Ошибки и недочеты */}
+                    <div className="p-2.5 bg-rose-50/70 rounded-lg border border-rose-200/70 text-xs">
+                      <div className="flex items-center gap-1.5 font-bold text-rose-900 mb-1.5">
+                        <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                        <span>Ошибки и недочёты, повлиявшие на снижение оценки:</span>
+                      </div>
+                      {summaryParts.mistakes.length > 0 ? (
+                        <ul className="space-y-1 pl-4 list-disc marker:text-rose-500 text-rose-950">
+                          {summaryParts.mistakes.map((mistake, idx) => (
+                            <li key={idx} className="leading-snug">{mistake}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="flex items-center gap-1.5 text-emerald-700 font-medium pl-1">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          <span>Грубых ошибок не допущено, регламент общения соблюден в полном объеме.</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Советы по оптимизации */}
+                    {summaryParts.advice.length > 0 && (
+                      <div className="p-2.5 bg-emerald-50/60 rounded-lg border border-emerald-200/70 text-xs">
+                        <div className="flex items-center gap-1.5 font-bold text-emerald-950 mb-1.5">
+                          <Sparkles className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          <span>Советы по оптимизации работы менеджера:</span>
+                        </div>
+                        <ul className="space-y-1 pl-4 list-disc marker:text-emerald-500 text-emerald-950">
+                          {summaryParts.advice.map((adv, idx) => (
+                            <li key={idx} className="leading-snug">{adv}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1761,8 +1944,8 @@ export function CallDetails({
         {/* Right column */}
         <div className="lg:col-span-5 space-y-5">
           {/* Operator Score */}
-          <div className={`border rounded-xl p-4 ${getScoreColor(call.operator_score)}`}>
-            <div className="flex items-center justify-between mb-3">
+          <div className={`border rounded-xl p-4 space-y-3 ${getScoreColor(call.operator_score)}`}>
+            <div className="flex items-center justify-between">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Оценка качества</h3>
               <div className="flex items-baseline gap-0.5">
                 <span className="text-2xl font-black font-mono">
@@ -1775,12 +1958,48 @@ export function CallDetails({
             </div>
             
             {call.operator_comment ? (
-              <div className="text-xs text-slate-700 leading-relaxed bg-white/60 p-3 rounded-lg border border-slate-200/50">
-                <span className="block font-semibold mb-1">Комментарий аудитора:</span>
+              <div className="text-xs text-slate-700 leading-relaxed bg-white/70 p-3 rounded-lg border border-slate-200/50">
+                <span className="block font-semibold mb-1 text-slate-900">Комментарий аудитора:</span>
                 {call.operator_comment}
               </div>
             ) : (
               <div className="text-xs text-slate-500 italic">Комментарии к оценке не зафиксированы</div>
+            )}
+
+            {/* Ошибки, повлиявшие на снижение оценки */}
+            {((call.operator_mistakes && call.operator_mistakes.length > 0) || summaryParts.mistakes.length > 0) && (
+              <div className="p-3 bg-rose-50/90 rounded-lg border border-rose-200/80 text-xs text-rose-950">
+                <div className="flex items-center gap-1.5 font-bold text-rose-900 mb-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                  <span>Причины снижения оценки (ошибки менеджера):</span>
+                </div>
+                <ul className="space-y-1 pl-4 list-disc marker:text-rose-500">
+                  {((call.operator_mistakes && call.operator_mistakes.length > 0)
+                    ? call.operator_mistakes
+                    : summaryParts.mistakes
+                  ).map((m, idx) => (
+                    <li key={idx} className="leading-snug">{m}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Советы по оптимизации */}
+            {((call.recommendations && call.recommendations.length > 0) || summaryParts.advice.length > 0) && (
+              <div className="p-3 bg-emerald-50/90 rounded-lg border border-emerald-200/80 text-xs text-emerald-950">
+                <div className="flex items-center gap-1.5 font-bold text-emerald-900 mb-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span>Советы по оптимизации работы менеджера:</span>
+                </div>
+                <ul className="space-y-1 pl-4 list-disc marker:text-emerald-500">
+                  {((call.recommendations && call.recommendations.length > 0)
+                    ? (Array.isArray(call.recommendations) ? call.recommendations : [call.recommendations])
+                    : summaryParts.advice
+                  ).map((r, idx) => (
+                    <li key={idx} className="leading-snug">{r}</li>
+                  ))}
+                </ul>
+              </div>
             )}
           </div>
 

@@ -114,6 +114,7 @@ export interface CallRecord {
   recommendations: string[];
   operator_score: number | null;
   operator_comment: string;
+  operator_mistakes?: string[];
   tokens_used?: TokenUsage;
   
   // Custom metadata for rich display
@@ -357,6 +358,7 @@ export interface AnalysisResult {
   };
   operator_score: number | null;
   operator_comment: string;
+  operator_mistakes?: string[];
   recommendations: string | string[];
 }
 
