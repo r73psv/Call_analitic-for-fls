@@ -123,7 +123,7 @@ export const ConsentModal: React.FC<ConsentModalProps> = ({
               className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-emerald-500 text-xs font-mono"
             />
             <p className="text-[11px] text-slate-400 mt-1">
-              * Номер хранится в зашифрованном виде, в интерфейсе маскируется как ****1234
+              * Номер хранится в зашифрованном виде, в интерфейсе маскируется как ****123456
             </p>
           </div>
 

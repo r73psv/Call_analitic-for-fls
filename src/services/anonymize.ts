@@ -37,13 +37,17 @@ export function anonymizeTranscript(transcript: string): string {
 }
 
 /**
- * Маскирование номера телефона в формат "****1234"
+ * Маскирование номера телефона в формат "****123456" (6 последних цифр номера клиента)
  */
 export function maskPhone(phone: string): string {
-  if (!phone) return 'Клиент (****0000)';
+  if (!phone) return 'Клиент (****000000)';
   const clean = phone.replace(/\D/g, '');
-  if (clean.length >= 4) {
-    return `****${clean.slice(-4)}`;
+  if (clean.length >= 6) {
+    return `****${clean.slice(-6)}`;
+  }
+  if (clean.length > 0) {
+    return `****${clean}`;
   }
   return phone;
 }
+

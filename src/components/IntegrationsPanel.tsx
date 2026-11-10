@@ -1105,7 +1105,7 @@ export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: 
               <div>
                 <label className="block font-medium text-slate-600 mb-1">Статус 152-ФЗ:</label>
                 <div className="p-2 bg-slate-50 border border-slate-200 rounded-lg text-[11px] text-slate-600">
-                  Только маска <b>Клиент (****1234)</b>
+                  Только маска <b>Клиент (****123456)</b>
                 </div>
               </div>
             </div>

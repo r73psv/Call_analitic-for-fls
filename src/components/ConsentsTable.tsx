@@ -242,7 +242,7 @@ export const ConsentsTable: React.FC<ConsentsTableProps> = ({ userRole = 'admin'
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Поиск по маске (****1234)..."
+            placeholder="Поиск по маске (****123456)..."
             className="w-full pl-9 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
           />
         </div>

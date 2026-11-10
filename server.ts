@@ -241,9 +241,9 @@ const SEED_CALLS: CallRecord[] = [
     duration_seconds: 210,
     model_used: 'GigaChat:Lite',
     audio_url: 'https://cp.megafon.ru/record/megafon-call-89103.mp3',
-    client_name: 'Ольга Смирнова (1500)',
+    client_name: 'Ольга Смирнова (551500)',
     client_phone: '+79165551500',
-    client_phone_masked: '****1500',
+    client_phone_masked: '****551500',
     operator_name: 'Светлана (администратор)',
     status: 'completed',
     is_demo: true,
@@ -1665,12 +1665,13 @@ function parseAtsDateToIso(dateStr: string): string {
   return !isNaN(finalFallback.getTime()) ? finalFallback.toISOString() : new Date().toISOString();
 }
 
-// Helper to extract the last 4 digits of a phone number
-function getPhoneLastFour(phone: string): string {
+// Helper to extract the last 6 digits of a phone number
+function getPhoneLastSix(phone: string): string {
   if (!phone || phone === 'Не определен') return '';
   const digits = phone.replace(/\D/g, '');
-  return digits.length >= 4 ? digits.slice(-4) : digits;
+  return digits.length >= 6 ? digits.slice(-6) : (digits.length >= 4 ? digits.slice(-4) : digits);
 }
+const getPhoneLastFour = getPhoneLastSix;
 
 // Search the Megafon VATS API for the actual direct recording link corresponding to a communication ID
 async function findRealRecordingLinkFromApi(communicationId: string, token: string): Promise<string | null> {
@@ -2132,8 +2133,8 @@ async function getRealMegafonCalls(fromDate: Date, toDate: Date, token: string):
         rawClientName = rawClientName.split('(')[0].trim();
       }
       
-      const lastFour = getPhoneLastFour(clientPhone);
-      const clientName = lastFour ? `${rawClientName} (${lastFour})` : rawClientName;
+      const lastSix = getPhoneLastSix(clientPhone);
+      const clientName = lastSix ? `${rawClientName} (${lastSix})` : rawClientName;
       
       let operatorName = 'Менеджер';
       if (item.employees && Array.isArray(item.employees) && item.employees.length > 0) {
@@ -2619,7 +2620,8 @@ setInterval(async () => {
           });
           for (const row of rows) {
             const isAnswered = row.type !== 'missed' && row.duration > 0;
-            const lastFour = row.client ? row.client.slice(-4) : '';
+            const cleanClient = row.client ? row.client.replace(/\D/g, '') : '';
+            const lastSix = cleanClient.length >= 6 ? cleanClient.slice(-6) : (cleanClient || (row.client ? row.client.slice(-6) : ''));
             newCalls.push({
               call_id: row.uid.startsWith('megafon-') ? row.uid : `megafon-real-${row.uid}`,
               timestamp: row.start,
@@ -2628,7 +2630,7 @@ setInterval(async () => {
               type: row.type === 'out' ? 'outgoing' : 'incoming',
               client_phone: row.client,
               full_phone: row.client,
-              client_name: lastFour ? `Клиент (${lastFour})` : 'Клиент',
+              client_name: lastSix ? `Клиент (${lastSix})` : 'Клиент',
               operator_name: row.account || 'Администратор',
               record_play_uri: row.record && row.record.startsWith('http') ? row.record : undefined,
               status: isAnswered ? 'запись готова' : 'пропущен'
@@ -2981,7 +2983,8 @@ const handleAtsPoll = async (req: express.Request, res: express.Response) => {
       appendLog('info', 'megafon', `[ВАТС REST] Получено записей звонков из истории: ${rows.length}`);
       for (const row of rows) {
         const isAnswered = row.type !== 'missed' && row.duration > 0;
-        const lastFour = row.client ? row.client.slice(-4) : '';
+        const cleanClient = row.client ? row.client.replace(/\D/g, '') : '';
+        const lastSix = cleanClient.length >= 6 ? cleanClient.slice(-6) : (cleanClient || (row.client ? row.client.slice(-6) : ''));
         newCalls.push({
           call_id: row.uid.startsWith('megafon-') ? row.uid : `megafon-real-${row.uid}`,
           timestamp: row.start,
@@ -2990,7 +2993,7 @@ const handleAtsPoll = async (req: express.Request, res: express.Response) => {
           type: row.type === 'out' ? 'outgoing' : 'incoming',
           client_phone: row.client,
           full_phone: row.client,
-          client_name: lastFour ? `Клиент (${lastFour})` : 'Клиент',
+          client_name: lastSix ? `Клиент (${lastSix})` : 'Клиент',
           operator_name: row.account || 'Администратор',
           record_play_uri: row.record && row.record.startsWith('http') ? row.record : undefined,
           status: isAnswered ? 'запись готова' : 'пропущен'
@@ -3072,8 +3075,9 @@ async function handleMegafonWcgpWebhook(req: express.Request, res: express.Respo
     const isAnswered = status === 'Success' && duration > 0;
     const direction = typeStr === 'out' ? 'outgoing' : 'incoming';
 
-    const lastFour = phone.slice(-4);
-    const clientName = lastFour ? `Клиент (${lastFour})` : 'Клиент';
+    const cleanPhoneDigits = phone.replace(/\D/g, '');
+    const lastSix = cleanPhoneDigits.length >= 6 ? cleanPhoneDigits.slice(-6) : (cleanPhoneDigits || phone.slice(-6));
+    const clientName = lastSix ? `Клиент (${lastSix})` : 'Клиент';
     const operatorName = user ? (ext ? `${user} (доб. ${ext})` : user) : (groupRealName || 'Администратор');
 
     const extCall: any = {
@@ -3145,10 +3149,10 @@ async function handleMegafonWcgpWebhook(req: express.Request, res: express.Respo
       });
 
       if (existingCall) {
-        contactName = existingCall.client_name || `Клиент (${cleanPhone.slice(-4)})`;
+        contactName = existingCall.client_name || `Клиент (${cleanPhone.length >= 6 ? cleanPhone.slice(-6) : cleanPhone})`;
         responsible = existingCall.operator_name || 'admin';
       } else {
-        contactName = `Клиент (${cleanPhone.slice(-4)})`;
+        contactName = `Клиент (${cleanPhone.length >= 6 ? cleanPhone.slice(-6) : cleanPhone})`;
       }
     }
 
@@ -3299,7 +3303,8 @@ app.post('/api/megafon/rest/fetch-history', async (req, res) => {
 
     for (const row of rows) {
       const isAnswered = row.type !== 'missed' && row.duration > 0;
-      const lastFour = row.client ? row.client.slice(-4) : '';
+      const cleanClient = row.client ? row.client.replace(/\D/g, '') : '';
+      const lastSix = cleanClient.length >= 6 ? cleanClient.slice(-6) : (cleanClient || (row.client ? row.client.slice(-6) : ''));
       const extCall: any = {
         call_id: row.uid.startsWith('megafon-') ? row.uid : `megafon-real-${row.uid}`,
         timestamp: row.start,
@@ -3308,7 +3313,7 @@ app.post('/api/megafon/rest/fetch-history', async (req, res) => {
         type: row.type === 'out' ? 'outgoing' : 'incoming',
         client_phone: row.client,
         full_phone: row.client,
-        client_name: lastFour ? `Клиент (${lastFour})` : 'Клиент',
+        client_name: lastSix ? `Клиент (${lastSix})` : 'Клиент',
         operator_name: row.account || 'Администратор',
         record_play_uri: row.record && row.record.startsWith('http') ? row.record : undefined,
         status: isAnswered ? 'запись готова' : 'пропущен'
@@ -3875,7 +3880,7 @@ app.post('/api/notifications/test', (req, res) => {
     duration_seconds: 135,
     model_used: 'GigaChat:Lite',
     client_name: 'Елена Васильева (тест)',
-    client_phone_masked: '+7 (927) ***-55-44',
+    client_phone_masked: '****005544',
     operator_name: 'Мария (администратор)',
     status: 'completed',
     summary: 'Тестовый звонок: клиент подтвердил запись на стрижку и окрашивание на 15:00.',
@@ -3921,7 +3926,9 @@ app.post('/api/calls/webhook', async (req, res) => {
     const callId = payload.call_id || payload.id || `ats-${Date.now()}`;
     const clientPhone = payload.phone || payload.client_phone || payload.caller || '';
     const maskedPhone = maskPhone(clientPhone);
-    const clientName = payload.client_name || `Клиент (${maskedPhone.slice(-4) || 'АТС'})`;
+    const clientCleanDigits = clientPhone.replace(/\D/g, '');
+    const clientSix = clientCleanDigits.length >= 6 ? clientCleanDigits.slice(-6) : (clientCleanDigits || (maskedPhone.length >= 6 ? maskedPhone.slice(-6) : maskedPhone));
+    const clientName = payload.client_name || `Клиент (${clientSix || 'АТС'})`;
     const operatorName = payload.operator_name || payload.employee || 'Дежурный администратор';
     const duration = Number(payload.duration || payload.duration_seconds || 0);
     const status = payload.status === 'missed' || duration === 0 ? 'missed' : 'completed';
@@ -5121,6 +5128,51 @@ async function startServer() {
           if (cleaned !== call.transcript) {
             call.transcript = cleaned;
             fixedCount++;
+          }
+        }
+
+        // Авто-миграция: обновление маскированного номера клиента до 6 последних цифр
+        if (call.call_id === 'megafon-call-89101') {
+          call.full_phone = '+79270003344';
+          call.client_phone = '+79270003344';
+          call.client_phone_masked = '****003344';
+          call.client_name = 'Елена Кузнецова (003344)';
+          fixedCount++;
+        } else if (call.call_id === 'megafon-call-89102') {
+          call.full_phone = '+79270006677';
+          call.client_phone = '+79270006677';
+          call.client_phone_masked = '****006677';
+          call.client_name = 'Анна Васильева (006677)';
+          fixedCount++;
+        } else if (call.call_id === 'megafon-call-89103') {
+          call.full_phone = '+79165551500';
+          call.client_phone = '+79165551500';
+          call.client_phone_masked = '****551500';
+          call.client_name = 'Ольга Смирнова (551500)';
+          fixedCount++;
+        }
+
+        const rawPhone = call.full_phone || call.client_phone;
+        if (rawPhone && typeof rawPhone === 'string') {
+          const newMasked = maskPhone(rawPhone);
+          if (call.client_phone_masked !== newMasked) {
+            call.client_phone_masked = newMasked;
+            fixedCount++;
+          }
+          const cleanP = rawPhone.replace(/\D/g, '');
+          if (cleanP.length >= 6 && call.client_name) {
+            const sixDigits = cleanP.slice(-6);
+            if (call.client_name.includes('(')) {
+              const base = call.client_name.split('(')[0].trim();
+              const expectedName = `${base} (${sixDigits})`;
+              if (call.client_name !== expectedName) {
+                call.client_name = expectedName;
+                fixedCount++;
+              }
+            } else if (call.client_name === 'Клиент') {
+              call.client_name = `Клиент (${sixDigits})`;
+              fixedCount++;
+            }
           }
         }
 

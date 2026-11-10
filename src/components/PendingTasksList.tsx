@@ -260,8 +260,11 @@ export function PendingTasksList({
   const maskPhone = (phone?: string) => {
     if (!phone) return '—';
     if (userRole === 'admin' || userRole === 'manager') return phone;
-    if (phone.length <= 4) return '****' + phone;
-    return '****' + phone.slice(-4);
+    const clean = phone.replace(/\D/g, '');
+    if (clean.length >= 6) return '****' + clean.slice(-6);
+    if (clean.length > 0) return '****' + clean;
+    if (phone.length <= 6) return '****' + phone;
+    return '****' + phone.slice(-6);
   };
 
   return (

@@ -39,9 +39,9 @@ export async function registerConsent(data: {
     ? hashPhone(cleanDigits) 
     : crypto.createHash('sha256').update(`call-${data.call_id || Date.now()}`).digest('hex');
   
-  const phoneMasked = cleanDigits.length >= 4 
-    ? `****${cleanDigits.slice(-4)}` 
-    : (data.client_phone && data.client_phone !== 'Не определен' ? data.client_phone : `Клиент (${(data.call_id || '').slice(-6)})`);
+  const phoneMasked = cleanDigits.length >= 6 
+    ? `****${cleanDigits.slice(-6)}` 
+    : (cleanDigits.length > 0 ? `****${cleanDigits}` : (data.client_phone && data.client_phone !== 'Не определен' ? data.client_phone : `Клиент (${(data.call_id || '').slice(-6)})`));
 
   const store = await readConsentStore();
   
@@ -120,9 +120,9 @@ export async function ensureAutoConsent(
     ? hashPhone(cleanDigits) 
     : crypto.createHash('sha256').update(`call-${callId || Date.now()}`).digest('hex');
   
-  const phoneMasked = cleanDigits.length >= 4 
-    ? `****${cleanDigits.slice(-4)}` 
-    : (fullPhone && fullPhone !== 'Не определен' ? fullPhone : `Клиент (${(callId || '').slice(-6)})`);
+  const phoneMasked = cleanDigits.length >= 6 
+    ? `****${cleanDigits.slice(-6)}` 
+    : (cleanDigits.length > 0 ? `****${cleanDigits}` : (fullPhone && fullPhone !== 'Не определен' ? fullPhone : `Клиент (${(callId || '').slice(-6)})`));
 
   const store = await readConsentStore();
 
@@ -195,9 +195,9 @@ export async function syncConsentsFromCalls(calls: any[]): Promise<number> {
       ? crypto.createHash('sha256').update(cleanDigits).digest('hex')
       : crypto.createHash('sha256').update(`call-${call.call_id}`).digest('hex');
 
-    const phoneMasked = cleanDigits.length >= 4 
-      ? `****${cleanDigits.slice(-4)}` 
-      : (call.client_name && String(call.client_name).includes('(') ? String(call.client_name) : `Клиент (${String(call.call_id).slice(-6)})`);
+    const phoneMasked = cleanDigits.length >= 6 
+      ? `****${cleanDigits.slice(-6)}` 
+      : (cleanDigits.length > 0 ? `****${cleanDigits}` : (call.client_name && String(call.client_name).includes('(') ? String(call.client_name) : `Клиент (${String(call.call_id).slice(-6)})`));
 
     const isAnswered = call.is_answered !== false && (call.duration_seconds > 0 || call.status === 'completed');
     const targetStatus = isAnswered ? 'active' : 'not_applicable';

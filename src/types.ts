@@ -185,7 +185,7 @@ export interface NextStepItem {
 
 export interface ConsentRecord {
   consent_id: string;              // UUID
-  client_phone_masked: string;     // "****1234"
+  client_phone_masked: string;     // "****123456"
   client_phone_hash: string;       // SHA-256 full phone number
   consent_date: string;            // ISO 8601
   consent_method: 'voice' | 'written' | 'digital';
