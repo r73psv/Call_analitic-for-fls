@@ -9,6 +9,7 @@ import os from 'os';
 import { readStore, writeStore } from './store.js';
 import { readConsentStore, writeConsentStore } from './consent-store.js';
 import { ConsentRecord, AccessLogEntry, LogEntry } from '../types.js';
+import { archiveCallsToS3 } from '../services/s3-archive.js';
 
 export interface CleanupStats {
   audioRemoved: number;
@@ -19,6 +20,8 @@ export interface CleanupStats {
   tempFilesCleaned: number;
   tempBytesCleaned: number;
   revokedConsentsCleaned: number;
+  callsArchivedToS3?: number;
+  archiveS3Key?: string;
   timestamp: string;
 }
 
@@ -186,6 +189,19 @@ export async function runCleanup(): Promise<CleanupStats> {
   const ttlAccessLogDays = logRetentionDays;
   const ttlRevokedConsentDays = parseInt(process.env.TTL_REVOKED_CONSENT_DAYS || '1095', 10);
 
+  // 0. Автоматическая архивация звонков старше TTL_LOG_DAYS дней в S3 хранилище (152-ФЗ)
+  if (autoCleanup?.archiveCallsToS3 !== false) {
+    try {
+      const archiveResult = await archiveCallsToS3(logRetentionDays);
+      stats.callsArchivedToS3 = archiveResult.archivedCount;
+      if (archiveResult.s3Key) {
+        stats.archiveS3Key = archiveResult.s3Key;
+      }
+    } catch (archiveErr: any) {
+      console.warn('[Cleanup S3 Archive Warning]', archiveErr.message);
+    }
+  }
+
   const initialCount = store.calls.length;
 
   for (const call of store.calls) {
@@ -264,6 +280,7 @@ export async function runCleanup(): Promise<CleanupStats> {
     tempBytesCleaned: stats.tempBytesCleaned,
     audioCleaned: stats.audioRemoved,
     contentCleaned: stats.contentRemoved,
+    callsArchivedToS3: stats.callsArchivedToS3 || 0,
     timestamp: stats.timestamp
   };
 

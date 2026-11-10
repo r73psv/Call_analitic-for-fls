@@ -206,7 +206,8 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
               <ul className="list-disc list-inside space-y-1 text-slate-600 pl-1 leading-relaxed">
                 <li><strong>Автоматическое автоинформирование:</strong> при соединении озвучивается уведомление о записи для контроля качества;</li>
                 <li><strong>Журнал согласий:</strong> фиксация даты, маскированного номера и хэша согласия на обработку биометрии/речи;</li>
-                <li><strong>Обезличивание:</strong> перед отправкой в нейросеть Сбер GigaChat из текста вырезаются телефоны, фамилии и платежные данные.</li>
+                <li><strong>Обезличивание:</strong> перед отправкой в нейросеть Сбер GigaChat из текста вырезаются телефоны, фамилии и платежные данные;</li>
+                <li><strong>Автоматическая архивация в S3:</strong> звонки старше TTL_LOG_DAYS дней шифруются (AES-256-GCM) и архивируются в S3-хранилище для соблюдения регламентных сроков хранения персональных данных.</li>
               </ul>
             </div>
           </div>
@@ -595,7 +596,7 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                   <li><strong>Распознавание речи (STT):</strong> Yandex Cloud SpeechKit (русская речь, диаризация ролей).</li>
                   <li><strong>Нейросеть (LLM):</strong> Сбер GigaChat (Lite/Pro/Max) через доверенные сертификаты Минцифры РФ.</li>
                   <li><strong>Безопасность:</strong> AES-256-GCM шифрование локальной базы, маскирование номеров 152-ФЗ.</li>
-                  <li><strong>Резервное копирование:</strong> S3 Timeweb Cloud (@aws-sdk/client-s3).</li>
+                  <li><strong>Резервное копирование и архивация 152-ФЗ:</strong> S3 Timeweb Cloud (@aws-sdk/client-s3), автоматическая архивация звонков старше TTL_LOG_DAYS дней.</li>
                 </ul>
               </div>
 

@@ -32,13 +32,37 @@ const STATUS_BADGES: Record<string, { label: string; className: string }> = {
   NotFound: { label: 'Не найден', className: 'bg-purple-50 text-purple-600 border-purple-200' }
 };
 
+export function getCallStarRating(score: number | null | undefined): number | null {
+  if (score === null || score === undefined || isNaN(score)) return null;
+  return Math.max(1, Math.min(5, Math.ceil(score / 2)));
+}
+
+export const POPULAR_KEYWORDS = [
+  'Маникюр',
+  'Педикюр',
+  'Шеллак',
+  'Запись',
+  'Оплата',
+  'Претензия',
+  'Скидка',
+  'Перенос',
+  'Озон',
+  'Консультация',
+  'Отказ'
+];
+
 export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls, userRole }: CallListProps) {
   const [searchTerm, setSearchTerm] = useState('');
   
-  // 4 Primary Filter Criteria (requested by user)
+  // Primary Filter Criteria: Date Range, Star Rating (1-5), and Keywords
   const [datePreset, setDatePreset] = useState<string>('all');
   const [startDate, setStartDate] = useState<string>('');
   const [endDate, setEndDate] = useState<string>('');
+  const [starFilter, setStarFilter] = useState<number | 'all' | 'none'>('all');
+  const [starFilterMode, setStarFilterMode] = useState<'exact' | 'min'>('exact');
+  const [keywordFilter, setKeywordFilter] = useState<string>('');
+
+  // Additional Filter Criteria
   const [operatorFilter, setOperatorFilter] = useState<string>('all');
   const [scoreFilter, setScoreFilter] = useState<string>('all');
   const [toneFilter, setToneFilter] = useState<string>('all');
@@ -124,6 +148,55 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
     return { disputes, booked, declined, lowScore, topScore, missed, processing };
   }, [uniqueCalls]);
 
+  // Star rating distribution calculation for counter badges (1-5 stars)
+  const starDistribution = useMemo(() => {
+    const counts: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    let unrated = 0;
+    uniqueCalls.forEach(call => {
+      const star = getCallStarRating(call.operator_score);
+      if (star !== null) {
+        counts[star] = (counts[star] || 0) + 1;
+      } else {
+        unrated++;
+      }
+    });
+    return { counts, unrated };
+  }, [uniqueCalls]);
+
+  // Date preset helper synchronizing preset with startDate/endDate
+  const handleDatePresetChange = (preset: string) => {
+    setDatePreset(preset);
+    const now = new Date();
+    const formatYmd = (dateObj: Date) => {
+      const year = dateObj.getFullYear();
+      const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+      const day = String(dateObj.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
+
+    if (preset === 'all') {
+      setStartDate('');
+      setEndDate('');
+    } else if (preset === 'today') {
+      const today = formatYmd(now);
+      setStartDate(today);
+      setEndDate(today);
+    } else if (preset === 'yesterday') {
+      const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+      const yestStr = formatYmd(yesterday);
+      setStartDate(yestStr);
+      setEndDate(yestStr);
+    } else if (preset === 'week') {
+      const weekAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7);
+      setStartDate(formatYmd(weekAgo));
+      setEndDate(formatYmd(now));
+    } else if (preset === 'month') {
+      const monthAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30);
+      setStartDate(formatYmd(monthAgo));
+      setEndDate(formatYmd(now));
+    }
+  };
+
   // Tone matching logic helper
   const matchesTone = (call: CallRecord, toneChoice: string): boolean => {
     if (toneChoice === 'all') return true;
@@ -155,65 +228,37 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
 
   // Date range matching logic helper (Samara/Moscow timezone friendly)
   const matchesDate = (timestamp: string): boolean => {
-    if (datePreset === 'all') return true;
+    if (datePreset === 'all' && !startDate && !endDate) return true;
     const d = new Date(timestamp);
     if (isNaN(d.getTime())) return true;
 
-    const now = new Date();
-    const formatYmd = (dateObj: Date) => {
-      const year = dateObj.getFullYear();
-      const month = String(dateObj.getMonth() + 1).padStart(2, '0');
-      const day = String(dateObj.getDate()).padStart(2, '0');
-      return `${year}-${month}-${day}`;
-    };
-
-    const todayStr = formatYmd(now);
-
-    if (datePreset === 'today') {
-      return formatYmd(d) === todayStr;
+    if (startDate) {
+      const start = new Date(`${startDate}T00:00:00`);
+      if (d < start) return false;
     }
-
-    if (datePreset === 'yesterday') {
-      const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-      return formatYmd(d) === formatYmd(yesterday);
+    if (endDate) {
+      const end = new Date(`${endDate}T23:59:59.999`);
+      if (d > end) return false;
     }
-
-    if (datePreset === 'week') {
-      const weekAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7);
-      return d >= weekAgo;
-    }
-
-    if (datePreset === 'month') {
-      const monthAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30);
-      return d >= monthAgo;
-    }
-
-    if (datePreset === 'custom') {
-      if (startDate) {
-        const start = new Date(`${startDate}T00:00:00`);
-        if (d < start) return false;
-      }
-      if (endDate) {
-        const end = new Date(`${endDate}T23:59:59.999`);
-        if (d > end) return false;
-      }
-      return true;
-    }
-
     return true;
   };
 
   // Main filter engine with deduplication protection
   const filteredCalls = useMemo(() => {
     const term = searchTerm.toLowerCase().trim();
+    const kw = keywordFilter.toLowerCase().trim();
     const seenIds = new Set<string>();
 
     return uniqueCalls.filter(call => {
       if (!call || !call.call_id) return false;
       if (seenIds.has(call.call_id)) return false;
 
-      // 1. Keyword search (client name, masked phone, operator, ID, summary, transcript, issues, comments, promises)
-      if (term) {
+      // Helper function to match text across all relevant call facts and content
+      const matchesSearch = (query: string): boolean => {
+        if (!query) return true;
+        const q = query.toLowerCase().trim();
+        if (!q) return true;
+
         const maskedPhone = (call.client_phone_masked || '').toLowerCase();
         const clientName = (call.client_name || '').toLowerCase();
         const operatorName = (call.operator_name || '').toLowerCase();
@@ -223,39 +268,75 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
         const comment = (call.operator_comment || '').toLowerCase();
         const issue = (call.key_facts?.client_issue || '').toLowerCase();
         const disputeReason = (call.key_facts?.dispute_reason || '').toLowerCase();
+        const service = (call.key_facts?.service || '').toLowerCase();
+        const master = (call.key_facts?.master || '').toLowerCase();
+        const appointmentDate = (call.key_facts?.appointment_date || '').toLowerCase();
+        const appointmentTime = (call.key_facts?.appointment_time || '').toLowerCase();
         const triggerPhrases = Array.isArray(call.trigger_phrases) ? call.trigger_phrases.join(' ').toLowerCase() : '';
         const promises = Array.isArray(call.key_facts?.promises) ? call.key_facts.promises.join(' ').toLowerCase() : '';
+        const nextSteps = Array.isArray(call.next_steps) ? call.next_steps.join(' ').toLowerCase() : '';
+        const mistakes = Array.isArray(call.operator_mistakes) 
+          ? call.operator_mistakes.join(' ').toLowerCase() 
+          : (typeof call.operator_mistakes === 'string' ? (call.operator_mistakes as string).toLowerCase() : '');
+        const recommendations = Array.isArray(call.operator_recommendations) 
+          ? call.operator_recommendations.join(' ').toLowerCase() 
+          : (typeof call.operator_recommendations === 'string' ? (call.operator_recommendations as string).toLowerCase() : '');
         const tagText = Array.isArray(call.tags) ? call.tags.join(' ').toLowerCase() : '';
 
-        const matches = 
-          maskedPhone.includes(term) ||
-          clientName.includes(term) ||
-          operatorName.includes(term) ||
-          callId.includes(term) ||
-          summary.includes(term) ||
-          transcript.includes(term) ||
-          comment.includes(term) ||
-          issue.includes(term) ||
-          disputeReason.includes(term) ||
-          triggerPhrases.includes(term) ||
-          promises.includes(term) ||
-          tagText.includes(term);
+        return (
+          maskedPhone.includes(q) ||
+          clientName.includes(q) ||
+          operatorName.includes(q) ||
+          callId.includes(q) ||
+          summary.includes(q) ||
+          transcript.includes(q) ||
+          comment.includes(q) ||
+          issue.includes(q) ||
+          disputeReason.includes(q) ||
+          service.includes(q) ||
+          master.includes(q) ||
+          appointmentDate.includes(q) ||
+          appointmentTime.includes(q) ||
+          triggerPhrases.includes(q) ||
+          promises.includes(q) ||
+          nextSteps.includes(q) ||
+          mistakes.includes(q) ||
+          recommendations.includes(q) ||
+          tagText.includes(q)
+        );
+      };
 
-        if (!matches) return false;
-      }
+      // 1. Keyword and Search Term Filtering
+      if (term && !matchesSearch(term)) return false;
+      if (kw && !matchesSearch(kw)) return false;
 
-      // 2. Date Filter (Параметр: по дате)
+      // 2. Date Filter (Параметр: диапазон дат)
       if (!matchesDate(call.timestamp)) {
         return false;
       }
 
-      // 3. Operator Name Filter (Параметр: по имени оператора)
+      // 3. 1-5 Star Rating Filter (Параметр: оценка 1-5 звезд)
+      if (starFilter !== 'all') {
+        const callStar = getCallStarRating(call.operator_score);
+        if (starFilter === 'none') {
+          if (callStar !== null) return false;
+        } else {
+          if (callStar === null) return false;
+          if (starFilterMode === 'min') {
+            if (callStar < (starFilter as number)) return false;
+          } else {
+            if (callStar !== starFilter) return false;
+          }
+        }
+      }
+
+      // 4. Operator Name Filter (Параметр: по имени оператора)
       if (operatorFilter !== 'all') {
         const op = (call.operator_name || '').trim().toLowerCase();
         if (op !== operatorFilter.trim().toLowerCase()) return false;
       }
 
-      // 4. AI Score Filter (Параметр: по оценке ИИ)
+      // 5. Raw AI Score Filter (Параметр: по оценке ИИ)
       if (scoreFilter !== 'all') {
         const score = call.operator_score;
         if (scoreFilter === 'high') {
@@ -269,12 +350,12 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
         }
       }
 
-      // 5. Conversation Tone Filter (Параметр: по тональности разговора)
+      // 6. Conversation Tone Filter (Параметр: по тональности разговора)
       if (!matchesTone(call, toneFilter)) {
         return false;
       }
 
-      // 6. Quick preset filter
+      // 7. Quick preset filter
       if (quickPreset !== 'all') {
         if (quickPreset === 'disputes' && !call.key_facts?.is_dispute) return false;
         if (quickPreset === 'booked' && call.booking_status !== 'согласие' && call.key_facts?.call_outcome !== 'запись') return false;
@@ -291,7 +372,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
         if (quickPreset === 'processing' && call.status !== 'processing') return false;
       }
 
-      // 7. Status filter (Анализ и статус записи)
+      // 8. Status filter (Анализ и статус записи)
       if (statusFilter !== 'all') {
         if (statusFilter === 'completed' && call.status !== 'completed') return false;
         if (statusFilter === 'processing' && call.status !== 'processing') return false;
@@ -311,18 +392,18 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
         }
       }
 
-      // 8. Model filter
+      // 9. Model filter
       if (modelFilter !== 'all') {
         if (call.model_used !== modelFilter) return false;
       }
 
-      // 9. Dispute filter
+      // 10. Dispute filter
       if (disputeFilter !== 'all') {
         if (disputeFilter === 'dispute' && !call.key_facts?.is_dispute) return false;
         if (disputeFilter === 'no_dispute' && call.key_facts?.is_dispute) return false;
       }
 
-      // 10. Categorical Tag filter
+      // 11. Categorical Tag filter
       if (tagFilter !== 'all') {
         if (!Array.isArray(call.tags) || !call.tags.includes(tagFilter)) return false;
       }
@@ -330,13 +411,15 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
       seenIds.add(call.call_id);
       return true;
     });
-  }, [uniqueCalls, searchTerm, datePreset, startDate, endDate, operatorFilter, scoreFilter, toneFilter, quickPreset, statusFilter, modelFilter, disputeFilter, tagFilter]);
+  }, [uniqueCalls, searchTerm, keywordFilter, datePreset, startDate, endDate, starFilter, starFilterMode, operatorFilter, scoreFilter, toneFilter, quickPreset, statusFilter, modelFilter, disputeFilter, tagFilter]);
 
   // Count active filters
   const activeFiltersCount = useMemo(() => {
     let count = 0;
     if (searchTerm.trim() !== '') count++;
-    if (datePreset !== 'all') count++;
+    if (keywordFilter.trim() !== '') count++;
+    if (datePreset !== 'all' || startDate !== '' || endDate !== '') count++;
+    if (starFilter !== 'all') count++;
     if (operatorFilter !== 'all') count++;
     if (scoreFilter !== 'all') count++;
     if (toneFilter !== 'all') count++;
@@ -346,13 +429,16 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
     if (disputeFilter !== 'all') count++;
     if (tagFilter !== 'all') count++;
     return count;
-  }, [searchTerm, datePreset, operatorFilter, scoreFilter, toneFilter, quickPreset, statusFilter, modelFilter, disputeFilter, tagFilter]);
+  }, [searchTerm, keywordFilter, datePreset, startDate, endDate, starFilter, operatorFilter, scoreFilter, toneFilter, quickPreset, statusFilter, modelFilter, disputeFilter, tagFilter]);
 
   const resetAllFilters = () => {
     setSearchTerm('');
+    setKeywordFilter('');
     setDatePreset('all');
     setStartDate('');
     setEndDate('');
+    setStarFilter('all');
+    setStarFilterMode('exact');
     setOperatorFilter('all');
     setScoreFilter('all');
     setToneFilter('all');
@@ -937,7 +1023,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
         </div>
       </div>
 
-      {/* 3. Dedicated Call Filtering Panel (Панель фильтрации звонков: дата, оператор, оценка ИИ, тональность) */}
+      {/* 3. Dedicated Call Filtering Panel (Панель фильтрации звонков: диапазон дат, 1-5 звезд, ключевые слова + доп. параметры) */}
       {isFilterPanelOpen && (
         <div className="p-3.5 border-b border-slate-200/80 bg-linear-to-b from-slate-50/90 via-white to-slate-50/30 space-y-3" id="call-filter-panel">
           <div className="flex items-center justify-between">
@@ -945,99 +1031,308 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
               <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-600" />
               <span>Панель фильтрации звонков</span>
             </div>
-            <div className="text-[11px] text-slate-500">
-              Показано: <span className="font-bold text-slate-800">{filteredCalls.length}</span> из {uniqueCalls.length}
+            <div className="flex items-center gap-3">
+              <span className="text-[11px] text-slate-500">
+                Показано: <span className="font-bold text-slate-800">{filteredCalls.length}</span> из {uniqueCalls.length}
+              </span>
+              {activeFiltersCount > 0 && (
+                <button
+                  type="button"
+                  onClick={resetAllFilters}
+                  className="text-[11px] text-rose-600 hover:text-rose-800 font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+                  title="Сбросить все примененные фильтры"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Сбросить всё</span>
+                </button>
+              )}
             </div>
           </div>
 
-          {/* The 4 Requested Core Filters: Date, Operator Name, AI Score, Conversation Tone */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
-            {/* 1. ФИЛЬТР ПО ДАТЕ */}
-            <div className={`p-2.5 rounded-xl border transition-all ${
-              datePreset !== 'all' ? 'bg-indigo-50/30 border-indigo-200 shadow-3xs' : 'bg-white border-slate-200/80 shadow-3xs'
-            }`}>
-              <div className="flex items-center justify-between mb-1.5">
-                <label htmlFor="filter-date-select" className="text-[10px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1">
-                  <Calendar className="w-3 h-3 text-indigo-600" />
-                  <span>По дате звонка</span>
-                </label>
-                {datePreset !== 'all' && (
-                  <button
-                    type="button"
-                    onClick={() => { setDatePreset('all'); setStartDate(''); setEndDate(''); }}
-                    className="text-[10px] text-indigo-600 hover:text-indigo-800 font-bold cursor-pointer"
-                    title="Сбросить фильтр даты"
-                  >
-                    × Сброс
-                  </button>
-                )}
-              </div>
-              <select
-                id="filter-date-select"
-                value={datePreset}
-                onChange={(e) => setDatePreset(e.target.value)}
-                className={`w-full text-xs rounded-lg p-1.5 focus:outline-hidden focus:border-indigo-500 transition-colors font-medium border ${
-                  datePreset !== 'all' ? 'bg-white border-indigo-300 text-indigo-950 font-semibold' : 'bg-slate-50/60 border-slate-200 text-slate-700'
-                }`}
-              >
-                <option value="all">📅 За всё время</option>
-                <option value="today">Сегодня</option>
-                <option value="yesterday">Вчера</option>
-                <option value="week">Последние 7 дней</option>
-                <option value="month">Последние 30 дней</option>
-                <option value="custom">Указать даты (от и до)...</option>
-              </select>
+          {/* 3 Core Filter Cards: Date Range, 1-5 Star Rating, and Keywords */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+            {/* 1. ДИАПАЗОН ДАТ */}
+            <div className={`p-2.5 rounded-xl border transition-all flex flex-col justify-between ${
+              datePreset !== 'all' || startDate || endDate ? 'bg-indigo-50/30 border-indigo-200 shadow-3xs' : 'bg-white border-slate-200/80 shadow-3xs'
+            }`} id="filter-date-card">
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[10px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1">
+                    <Calendar className="w-3 h-3 text-indigo-600" />
+                    <span>Диапазон дат</span>
+                  </span>
+                  {(datePreset !== 'all' || startDate || endDate) && (
+                    <button
+                      type="button"
+                      onClick={() => handleDatePresetChange('all')}
+                      className="text-[10px] text-indigo-600 hover:text-indigo-800 font-bold cursor-pointer"
+                      title="Сбросить диапазон дат"
+                    >
+                      × Сброс
+                    </button>
+                  )}
+                </div>
 
-              {datePreset === 'custom' && (
-                <div className="flex items-center gap-1.5 pt-1.5">
+                {/* Quick Date Presets */}
+                <div className="flex flex-wrap items-center gap-1 mb-2">
+                  {[
+                    { id: 'all', label: 'Все' },
+                    { id: 'today', label: 'Сегодня' },
+                    { id: 'yesterday', label: 'Вчера' },
+                    { id: 'week', label: '7 дней' },
+                    { id: 'month', label: '30 дней' },
+                  ].map((preset) => {
+                    const isSelected = datePreset === preset.id && !startDate && !endDate;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => handleDatePresetChange(preset.id)}
+                        className={`text-[10px] px-2 py-0.5 rounded-md font-medium transition-all cursor-pointer border ${
+                          isSelected
+                            ? 'bg-indigo-600 text-white border-indigo-600 shadow-3xs font-semibold'
+                            : 'bg-slate-50 text-slate-600 hover:bg-slate-100 border-slate-200'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Date pickers (from - to) */}
+              <div className="pt-1 border-t border-slate-100 flex items-center gap-1.5">
+                <div className="flex-1">
+                  <label htmlFor="filter-start-date" className="block text-[9px] text-slate-400 font-semibold mb-0.5 uppercase">С даты</label>
                   <input
+                    id="filter-start-date"
                     type="date"
                     value={startDate}
-                    onChange={(e) => setStartDate(e.target.value)}
-                    className="w-1/2 text-[11px] p-1 bg-white border border-slate-200 rounded-md text-slate-700 focus:outline-hidden focus:border-indigo-500"
+                    onChange={(e) => {
+                      setStartDate(e.target.value);
+                      setDatePreset('custom');
+                    }}
+                    className="w-full text-[11px] p-1 bg-white border border-slate-200 rounded-md text-slate-700 focus:outline-hidden focus:border-indigo-500"
                     title="Дата начала периода"
                   />
-                  <span className="text-slate-400 text-xs">—</span>
+                </div>
+                <span className="text-slate-400 text-xs mt-3">—</span>
+                <div className="flex-1">
+                  <label htmlFor="filter-end-date" className="block text-[9px] text-slate-400 font-semibold mb-0.5 uppercase">По дату</label>
                   <input
+                    id="filter-end-date"
                     type="date"
                     value={endDate}
-                    onChange={(e) => setEndDate(e.target.value)}
-                    className="w-1/2 text-[11px] p-1 bg-white border border-slate-200 rounded-md text-slate-700 focus:outline-hidden focus:border-indigo-500"
+                    onChange={(e) => {
+                      setEndDate(e.target.value);
+                      setDatePreset('custom');
+                    }}
+                    className="w-full text-[11px] p-1 bg-white border border-slate-200 rounded-md text-slate-700 focus:outline-hidden focus:border-indigo-500"
                     title="Дата конца периода"
                   />
                 </div>
-              )}
+              </div>
             </div>
 
-            {/* 2. ФИЛЬТР ПО ИМЕНИ ОПЕРАТОРА */}
-            <div className={`p-2.5 rounded-xl border transition-all ${
-              operatorFilter !== 'all' ? 'bg-blue-50/30 border-blue-200 shadow-3xs' : 'bg-white border-slate-200/80 shadow-3xs'
-            }`}>
-              <div className="flex items-center justify-between mb-1.5">
-                <label htmlFor="filter-operator-select" className="text-[10px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1">
-                  <User className="w-3 h-3 text-blue-600" />
-                  <span>По имени оператора</span>
-                </label>
-                {operatorFilter !== 'all' && (
-                  <button
-                    type="button"
-                    onClick={() => setOperatorFilter('all')}
-                    className="text-[10px] text-blue-600 hover:text-blue-800 font-bold cursor-pointer"
-                    title="Сбросить фильтр оператора"
-                  >
-                    × Сброс
-                  </button>
-                )}
+            {/* 2. ОЦЕНКА (1-5 ЗВЕЗД) */}
+            <div className={`p-2.5 rounded-xl border transition-all flex flex-col justify-between ${
+              starFilter !== 'all' ? 'bg-amber-50/30 border-amber-200 shadow-3xs' : 'bg-white border-slate-200/80 shadow-3xs'
+            }`} id="filter-stars-card">
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[10px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1">
+                    <Star className="w-3 h-3 text-amber-500 fill-amber-500" />
+                    <span>Оценка (1–5 звезд)</span>
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    {/* Star Mode Toggle: Exact vs Minimum */}
+                    <button
+                      type="button"
+                      onClick={() => setStarFilterMode(starFilterMode === 'exact' ? 'min' : 'exact')}
+                      className={`text-[9px] px-1.5 py-0.5 rounded font-semibold transition-colors cursor-pointer border ${
+                        starFilterMode === 'min'
+                          ? 'bg-amber-100 text-amber-900 border-amber-300'
+                          : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
+                      }`}
+                      title={starFilterMode === 'exact' ? 'Режим: точное совпадение звезд (нажмите для режима «от N звезд»)' : 'Режим: от N звезд и выше (нажмите для точного совпадения)'}
+                    >
+                      {starFilterMode === 'exact' ? '= Точно' : '≥ От N зв.'}
+                    </button>
+                    {starFilter !== 'all' && (
+                      <button
+                        type="button"
+                        onClick={() => setStarFilter('all')}
+                        className="text-[10px] text-amber-600 hover:text-amber-800 font-bold cursor-pointer"
+                        title="Сбросить фильтр оценки"
+                      >
+                        × Сброс
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Star Rating Buttons (1 to 5 stars) */}
+                <div className="grid grid-cols-5 gap-1 mb-1.5">
+                  {[5, 4, 3, 2, 1].map((stars) => {
+                    const isSelected = starFilter === stars;
+                    const count = starDistribution.counts[stars] || 0;
+                    return (
+                      <button
+                        key={stars}
+                        type="button"
+                        onClick={() => setStarFilter(isSelected ? 'all' : stars)}
+                        className={`p-1 rounded-lg text-center border transition-all cursor-pointer flex flex-col items-center justify-center ${
+                          isSelected
+                            ? stars >= 4
+                              ? 'bg-amber-500 text-white border-amber-500 shadow-3xs font-bold'
+                              : stars === 3
+                              ? 'bg-amber-600 text-white border-amber-600 shadow-3xs font-bold'
+                              : 'bg-rose-500 text-white border-rose-500 shadow-3xs font-bold'
+                            : 'bg-slate-50 hover:bg-amber-50 text-slate-700 border-slate-200/80'
+                        }`}
+                        title={`${stars} звезд(ы)${starFilterMode === 'min' ? ' и выше' : ''}: ${count} звонков`}
+                      >
+                        <div className="flex items-center gap-0.5 text-xs leading-none">
+                          <span className="font-bold">{stars}</span>
+                          <Star className={`w-2.5 h-2.5 ${isSelected ? 'fill-current text-white' : 'fill-amber-400 text-amber-500'}`} />
+                        </div>
+                        <span className={`text-[9px] mt-0.5 leading-none ${isSelected ? 'text-white/90' : 'text-slate-400'}`}>
+                          {count}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
+
+              {/* Unrated & All ratings quick links */}
+              <div className="pt-1 border-t border-slate-100 flex items-center justify-between text-[10px]">
+                <button
+                  type="button"
+                  onClick={() => setStarFilter(starFilter === 'none' ? 'all' : 'none')}
+                  className={`px-2 py-0.5 rounded-md border transition-all cursor-pointer flex items-center gap-1 ${
+                    starFilter === 'none'
+                      ? 'bg-slate-800 text-white border-slate-800 font-semibold'
+                      : 'bg-slate-50 text-slate-600 hover:bg-slate-100 border-slate-200'
+                  }`}
+                  title="Звонки без выставленной оценки"
+                >
+                  <span>Без оценки</span>
+                  <span className={`text-[9px] ${starFilter === 'none' ? 'text-slate-300' : 'text-slate-400'}`}>
+                    ({starDistribution.unrated})
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setStarFilter('all')}
+                  className={`px-2 py-0.5 rounded-md border transition-all cursor-pointer ${
+                    starFilter === 'all'
+                      ? 'bg-indigo-50 text-indigo-700 border-indigo-200 font-semibold'
+                      : 'bg-white text-slate-500 hover:text-slate-800 border-slate-200'
+                  }`}
+                >
+                  Все оценки
+                </button>
+              </div>
+            </div>
+
+            {/* 3. КЛЮЧЕВЫЕ СЛОВА */}
+            <div className={`p-2.5 rounded-xl border transition-all flex flex-col justify-between ${
+              keywordFilter || searchTerm ? 'bg-emerald-50/30 border-emerald-200 shadow-3xs' : 'bg-white border-slate-200/80 shadow-3xs'
+            }`} id="filter-keywords-card">
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[10px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1">
+                    <Search className="w-3 h-3 text-emerald-600" />
+                    <span>Ключевые слова</span>
+                  </span>
+                  {(keywordFilter || searchTerm) && (
+                    <button
+                      type="button"
+                      onClick={() => { setKeywordFilter(''); setSearchTerm(''); }}
+                      className="text-[10px] text-emerald-600 hover:text-emerald-800 font-bold cursor-pointer"
+                      title="Сбросить ключевые слова"
+                    >
+                      × Сброс
+                    </button>
+                  )}
+                </div>
+
+                {/* Keyword input */}
+                <div className="relative mb-2">
+                  <input
+                    type="text"
+                    value={keywordFilter}
+                    onChange={(e) => setKeywordFilter(e.target.value)}
+                    placeholder="Услуга, мастер, жалоба, оплата..."
+                    className="w-full text-xs pr-6 pl-2 py-1 bg-white border border-slate-200 rounded-lg text-slate-700 placeholder:text-slate-400 focus:outline-hidden focus:border-emerald-500 transition-colors"
+                  />
+                  {keywordFilter && (
+                    <button
+                      type="button"
+                      onClick={() => setKeywordFilter('')}
+                      className="absolute right-1.5 top-1.5 text-slate-400 hover:text-slate-600 cursor-pointer"
+                      title="Очистить ключевое слово"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Popular Salon Keyword Chips */}
+              <div>
+                <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                  Быстрый выбор:
+                </span>
+                <div className="flex flex-wrap gap-1 max-h-14 overflow-y-auto pr-1">
+                  {POPULAR_KEYWORDS.map((kw) => {
+                    const isSelected = keywordFilter.toLowerCase() === kw.toLowerCase() || searchTerm.toLowerCase() === kw.toLowerCase();
+                    return (
+                      <button
+                        key={kw}
+                        type="button"
+                        onClick={() => {
+                          if (isSelected) {
+                            setKeywordFilter('');
+                            if (searchTerm.toLowerCase() === kw.toLowerCase()) setSearchTerm('');
+                          } else {
+                            setKeywordFilter(kw);
+                          }
+                        }}
+                        className={`text-[10px] px-1.5 py-0.5 rounded-md font-medium border transition-all cursor-pointer ${
+                          isSelected
+                            ? 'bg-emerald-600 text-white border-emerald-600 shadow-3xs font-semibold'
+                            : 'bg-slate-50 text-slate-600 hover:bg-emerald-50 hover:text-emerald-800 border-slate-200'
+                        }`}
+                      >
+                        {kw}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Secondary Filter Row: Operator, Tone, Booking/Call Status, Tag */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-2 border-t border-slate-100">
+            {/* Operator */}
+            <div>
+              <label htmlFor="filter-operator-select" className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">
+                👤 Оператор
+              </label>
               <select
                 id="filter-operator-select"
                 value={operatorFilter}
                 onChange={(e) => setOperatorFilter(e.target.value)}
-                className={`w-full text-xs rounded-lg p-1.5 focus:outline-hidden focus:border-blue-500 transition-colors font-medium border ${
-                  operatorFilter !== 'all' ? 'bg-white border-blue-300 text-blue-950 font-semibold' : 'bg-slate-50/60 border-slate-200 text-slate-700'
+                className={`w-full text-xs rounded-lg p-1.5 focus:outline-hidden transition-colors font-medium border ${
+                  operatorFilter !== 'all' ? 'bg-blue-50 border-blue-300 text-blue-950 font-semibold' : 'bg-white border-slate-200 text-slate-700'
                 }`}
               >
-                <option value="all">👤 Все операторы ({availableOperators.length})</option>
+                <option value="all">Все операторы ({availableOperators.length})</option>
                 {availableOperators.map((op) => (
                   <option key={op.name} value={op.name}>
                     {op.name} ({op.count})
@@ -1046,110 +1341,61 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
               </select>
             </div>
 
-            {/* 3. ФИЛЬТР ПО ОЦЕНКЕ ИИ */}
-            <div className={`p-2.5 rounded-xl border transition-all ${
-              scoreFilter !== 'all' ? 'bg-amber-50/30 border-amber-200 shadow-3xs' : 'bg-white border-slate-200/80 shadow-3xs'
-            }`}>
-              <div className="flex items-center justify-between mb-1.5">
-                <label htmlFor="filter-score-select" className="text-[10px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1">
-                  <Star className="w-3 h-3 text-amber-500" />
-                  <span>По оценке ИИ</span>
-                </label>
-                {scoreFilter !== 'all' && (
-                  <button
-                    type="button"
-                    onClick={() => setScoreFilter('all')}
-                    className="text-[10px] text-amber-600 hover:text-amber-800 font-bold cursor-pointer"
-                    title="Сбросить фильтр оценки"
-                  >
-                    × Сброс
-                  </button>
-                )}
-              </div>
-              <select
-                id="filter-score-select"
-                value={scoreFilter}
-                onChange={(e) => setScoreFilter(e.target.value)}
-                className={`w-full text-xs rounded-lg p-1.5 focus:outline-hidden focus:border-amber-500 transition-colors font-medium border ${
-                  scoreFilter !== 'all' ? 'bg-white border-amber-300 text-amber-950 font-semibold' : 'bg-slate-50/60 border-slate-200 text-slate-700'
-                }`}
-              >
-                <option value="all">⭐ Любая оценка</option>
-                <option value="high">🟢 8–10 (Высокий балл / Топ)</option>
-                <option value="medium">🟡 5–7 (Средний балл)</option>
-                <option value="low">🔴 1–4 (Низкий балл / Проблемный)</option>
-                <option value="none">⚪ Без оценки</option>
-              </select>
-            </div>
-
-            {/* 4. ФИЛЬТР ПО ТОНАЛЬНОСТИ РАЗГОВОРА */}
-            <div className={`p-2.5 rounded-xl border transition-all ${
-              toneFilter !== 'all' ? 'bg-emerald-50/30 border-emerald-200 shadow-3xs' : 'bg-white border-slate-200/80 shadow-3xs'
-            }`}>
-              <div className="flex items-center justify-between mb-1.5">
-                <label htmlFor="filter-tone-select" className="text-[10px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1">
-                  <Smile className="w-3 h-3 text-emerald-600" />
-                  <span>По тональности</span>
-                </label>
-                {toneFilter !== 'all' && (
-                  <button
-                    type="button"
-                    onClick={() => setToneFilter('all')}
-                    className="text-[10px] text-emerald-600 hover:text-emerald-800 font-bold cursor-pointer"
-                    title="Сбросить фильтр тональности"
-                  >
-                    × Сброс
-                  </button>
-                )}
-              </div>
+            {/* Conversation Tone */}
+            <div>
+              <label htmlFor="filter-tone-select" className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">
+                💬 Тональность
+              </label>
               <select
                 id="filter-tone-select"
                 value={toneFilter}
                 onChange={(e) => setToneFilter(e.target.value)}
-                className={`w-full text-xs rounded-lg p-1.5 focus:outline-hidden focus:border-emerald-500 transition-colors font-medium border ${
-                  toneFilter !== 'all' ? 'bg-white border-emerald-300 text-emerald-950 font-semibold' : 'bg-slate-50/60 border-slate-200 text-slate-700'
+                className={`w-full text-xs rounded-lg p-1.5 focus:outline-hidden transition-colors font-medium border ${
+                  toneFilter !== 'all' ? 'bg-emerald-50 border-emerald-300 text-emerald-950 font-semibold' : 'bg-white border-slate-200 text-slate-700'
                 }`}
               >
-                <option value="all">💬 Все тональности</option>
-                <option value="positive">🟢 Позитивная (доброжелательная)</option>
-                <option value="neutral">🟡 Нейтральная / Спокойная</option>
-                <option value="negative">🔴 Негативная / Раздражённая</option>
+                <option value="all">Все тональности</option>
+                <option value="positive">🟢 Позитивная</option>
+                <option value="neutral">🟡 Нейтральная</option>
+                <option value="negative">🔴 Негативная / Жалоба</option>
               </select>
             </div>
-          </div>
 
-          {/* Secondary Filter Row: Status, Category Tag, AI Model */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1 border-t border-slate-100">
+            {/* Status */}
             <div>
-              <label htmlFor="filter-status-select" className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
-                Статус записи / анализа
+              <label htmlFor="filter-status-select" className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">
+                📋 Итог / Статус
               </label>
               <select
                 id="filter-status-select"
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value)}
-                className="w-full text-xs bg-white border border-slate-200 rounded-lg p-1.5 text-slate-700 font-medium focus:outline-hidden focus:border-indigo-500"
+                className={`w-full text-xs rounded-lg p-1.5 focus:outline-hidden transition-colors font-medium border ${
+                  statusFilter !== 'all' ? 'bg-indigo-50 border-indigo-300 text-indigo-950 font-semibold' : 'bg-white border-slate-200 text-slate-700'
+                }`}
               >
                 <option value="all">Все статусы</option>
-                <option value="completed">✓ Обработан успешно</option>
                 <option value="booked">✓ Запись (согласие)</option>
                 <option value="declined">✗ Отказ от записи</option>
                 <option value="consultation">ℹ Консультация</option>
-                <option value="missed">📞 Пропущенный вызов</option>
+                <option value="missed">📞 Пропущенный</option>
+                <option value="completed">✓ Обработан</option>
                 <option value="processing">⏳ В обработке</option>
-                <option value="failed">⚠ Сбой анализа</option>
               </select>
             </div>
 
+            {/* Tags */}
             <div>
-              <label htmlFor="filter-tag-select" className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
-                Тег категории
+              <label htmlFor="filter-tag-select" className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">
+                🏷️ Тег категории
               </label>
               <select
                 id="filter-tag-select"
                 value={tagFilter}
                 onChange={(e) => setTagFilter(e.target.value)}
-                className="w-full text-xs bg-white border border-slate-200 rounded-lg p-1.5 text-slate-700 font-medium focus:outline-hidden focus:border-indigo-500"
+                className={`w-full text-xs rounded-lg p-1.5 focus:outline-hidden transition-colors font-medium border ${
+                  tagFilter !== 'all' ? 'bg-indigo-50 border-indigo-300 text-indigo-950 font-semibold' : 'bg-white border-slate-200 text-slate-700'
+                }`}
               >
                 <option value="all">Все теги ({availableTags.length})</option>
                 {availableTags.map((tag) => (
@@ -1157,51 +1403,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
                 ))}
               </select>
             </div>
-
-            <div>
-              <label htmlFor="filter-model-select" className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
-                ИИ-Модель анализа
-              </label>
-              <select
-                id="filter-model-select"
-                value={modelFilter}
-                onChange={(e) => setModelFilter(e.target.value)}
-                className="w-full text-xs bg-white border border-slate-200 rounded-lg p-1.5 text-slate-700 font-medium focus:outline-hidden focus:border-indigo-500"
-              >
-                <option value="all">Все модели</option>
-                <option value="GigaChat:Lite">GigaChat:Lite</option>
-                <option value="GigaChat:Pro">GigaChat:Pro</option>
-                <option value="GigaChat:Max">GigaChat:Max</option>
-                <option value="GigaChat:Ultra">GigaChat:Ultra</option>
-              </select>
-            </div>
           </div>
-
-          {/* Quick Tag Pills */}
-          {availableTags.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1.5 pt-1">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-0.5">Частые теги:</span>
-              {availableTags.map((tag) => {
-                const isSelected = tagFilter === tag;
-                return (
-                  <button
-                    key={tag}
-                    type="button"
-                    onClick={() => setTagFilter(isSelected ? 'all' : tag)}
-                    className={`text-[10px] px-2 py-0.5 rounded-md font-medium border transition-all flex items-center gap-1 cursor-pointer ${
-                      isSelected
-                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-3xs font-semibold'
-                        : 'bg-white text-slate-600 hover:bg-slate-100 border-slate-200'
-                    }`}
-                  >
-                    <Tag className="w-2.5 h-2.5 opacity-70" />
-                    <span>{tag}</span>
-                    {isSelected && <X className="w-2.5 h-2.5 ml-0.5" />}
-                  </button>
-                );
-              })}
-            </div>
-          )}
 
           {/* 4. Active Criteria Tags & One-Click Dismiss */}
           {activeFiltersCount > 0 && (
@@ -1210,18 +1412,55 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
                 Активно ({activeFiltersCount}):
               </span>
 
-              {datePreset !== 'all' && (
+              {/* Date active tag */}
+              {(datePreset !== 'all' || startDate || endDate) && (
                 <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-indigo-50 text-indigo-800 border border-indigo-200 px-2 py-0.5 rounded-lg shadow-3xs">
                   <Calendar className="w-2.5 h-2.5" />
                   <span>
                     Дата: {datePreset === 'today' ? 'Сегодня' : datePreset === 'yesterday' ? 'Вчера' : datePreset === 'week' ? '7 дней' : datePreset === 'month' ? '30 дней' : `${startDate || '...'} — ${endDate || '...'}`}
                   </span>
-                  <button type="button" onClick={() => { setDatePreset('all'); setStartDate(''); setEndDate(''); }} className="hover:opacity-70 ml-0.5 cursor-pointer">
+                  <button type="button" onClick={() => handleDatePresetChange('all')} className="hover:opacity-70 ml-0.5 cursor-pointer">
                     <X className="w-3 h-3" />
                   </button>
                 </span>
               )}
 
+              {/* Star Rating active tag */}
+              {starFilter !== 'all' && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-amber-50 text-amber-800 border border-amber-200 px-2 py-0.5 rounded-lg shadow-3xs">
+                  <Star className="w-2.5 h-2.5 fill-amber-500 text-amber-500" />
+                  <span>
+                    {starFilter === 'none' ? 'Без оценки' : `Оценка: ${starFilterMode === 'min' ? '≥ ' : ''}${starFilter} ★`}
+                  </span>
+                  <button type="button" onClick={() => setStarFilter('all')} className="hover:opacity-70 ml-0.5 cursor-pointer">
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              )}
+
+              {/* Keyword active tag */}
+              {keywordFilter && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-lg shadow-3xs">
+                  <Search className="w-2.5 h-2.5" />
+                  <span>Ключ: «{keywordFilter}»</span>
+                  <button type="button" onClick={() => setKeywordFilter('')} className="hover:opacity-70 ml-0.5 cursor-pointer">
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              )}
+
+              {/* General Search term active tag */}
+              {searchTerm.trim() && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-slate-100 text-slate-800 border border-slate-300 px-2 py-0.5 rounded-lg shadow-3xs">
+                  <Search className="w-2.5 h-2.5" />
+                  <span>Поиск: «{searchTerm}»</span>
+                  <button type="button" onClick={() => setSearchTerm('')} className="hover:opacity-70 ml-0.5 cursor-pointer">
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              )}
+
+              {/* Operator active tag */}
               {operatorFilter !== 'all' && (
                 <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-blue-50 text-blue-800 border border-blue-200 px-2 py-0.5 rounded-lg shadow-3xs">
                   <User className="w-2.5 h-2.5" />
@@ -1232,18 +1471,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
                 </span>
               )}
 
-              {scoreFilter !== 'all' && (
-                <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-amber-50 text-amber-800 border border-amber-200 px-2 py-0.5 rounded-lg shadow-3xs">
-                  <Star className="w-2.5 h-2.5" />
-                  <span>
-                    Балл: {scoreFilter === 'high' ? '8–10' : scoreFilter === 'medium' ? '5–7' : scoreFilter === 'low' ? '1–4' : 'Без оценки'}
-                  </span>
-                  <button type="button" onClick={() => setScoreFilter('all')} className="hover:opacity-70 ml-0.5 cursor-pointer">
-                    <X className="w-3 h-3" />
-                  </button>
-                </span>
-              )}
-
+              {/* Tone active tag */}
               {toneFilter !== 'all' && (
                 <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-lg shadow-3xs">
                   <Smile className="w-2.5 h-2.5" />
@@ -1256,6 +1484,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
                 </span>
               )}
 
+              {/* Status active tag */}
               {statusFilter !== 'all' && (
                 <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-slate-100 text-slate-800 border border-slate-300 px-2 py-0.5 rounded-lg shadow-3xs">
                   <span>Статус: {statusFilter}</span>
@@ -1265,6 +1494,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
                 </span>
               )}
 
+              {/* Tag active tag */}
               {tagFilter !== 'all' && (
                 <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-indigo-50 text-indigo-800 border border-indigo-200 px-2 py-0.5 rounded-lg shadow-3xs">
                   <Tag className="w-2.5 h-2.5" />
@@ -1275,22 +1505,13 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
                 </span>
               )}
 
-              {searchTerm.trim() && (
-                <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-slate-100 text-slate-800 border border-slate-300 px-2 py-0.5 rounded-lg shadow-3xs">
-                  <Search className="w-2.5 h-2.5" />
-                  <span>Поиск: «{searchTerm}»</span>
-                  <button type="button" onClick={() => setSearchTerm('')} className="hover:opacity-70 ml-0.5 cursor-pointer">
-                    <X className="w-3 h-3" />
-                  </button>
-                </span>
-              )}
-
               <button
                 type="button"
                 onClick={resetAllFilters}
-                className="text-[11px] text-rose-600 hover:text-rose-800 font-bold ml-auto hover:underline cursor-pointer"
+                className="text-[11px] text-rose-600 hover:text-rose-800 font-bold ml-auto hover:underline cursor-pointer flex items-center gap-1"
               >
-                Очистить всё
+                <RotateCcw className="w-3 h-3" />
+                <span>Очистить всё</span>
               </button>
             </div>
           )}

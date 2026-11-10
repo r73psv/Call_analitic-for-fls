@@ -18,6 +18,7 @@ import { invalidateAuthorizedKeyCache, getAuthorizedKeyInfo, getIamToken, testYa
 import { setStoreEncryptionKey, isStoreEncryptionKeyConfigured } from '../store/crypto-store.js';
 import { scanTempFiles, cleanTempFiles, runCleanupNow } from '../store/cleanup.js';
 import { getDefaultSystemPrompt } from '../services/gigachat.js';
+import { archiveCallsToS3, getS3ArchiveStatus, listS3Archives } from '../services/s3-archive.js';
 import { SystemCredentials, GigaChatModel, AutoCleanupSettings, LogEntry } from '../types.js';
 
 export const adminRouter = Router();
@@ -722,7 +723,10 @@ adminRouter.get('/cleanup-settings', async (req: Request, res: Response) => {
       enabled: true,
       logRetentionDays: 30,
       tempFilesRetentionDays: 30,
-      autoRunDaily: true
+      autoRunDaily: true,
+      archiveCallsToS3: true,
+      archiveOlderThanDays: 30,
+      deleteLocalAfterArchive: false
     };
 
     const retentionDays = config.tempFilesRetentionDays || 30;
@@ -736,6 +740,13 @@ adminRouter.get('/cleanup-settings', async (req: Request, res: Response) => {
       : 0;
     const accessLogsTotal = Array.isArray(store.access_log) ? store.access_log.length : 0;
 
+    let archiveStatus = null;
+    try {
+      archiveStatus = await getS3ArchiveStatus();
+    } catch (e: any) {
+      console.warn('[Admin] Failed to get S3 archive status:', e.message);
+    }
+
     res.json({
       settings: config,
       currentStats: {
@@ -747,7 +758,8 @@ adminRouter.get('/cleanup-settings', async (req: Request, res: Response) => {
         tempFilesOlderThanRetention: tempReport.olderThanDaysFiles,
         tempBytesOlderThanRetention: tempReport.olderThanDaysBytes,
         scannedDirs: tempReport.scannedDirs
-      }
+      },
+      archiveStatus
     });
   } catch (err: any) {
     res.status(500).json({ error: `Ошибка получения настроек автоочистки: ${err.message}` });
@@ -767,13 +779,19 @@ adminRouter.post('/cleanup-settings', async (req: Request, res: Response) => {
     const logRetentionDays = Math.max(1, Math.min(365, parseInt(String(body.logRetentionDays || 30), 10) || 30));
     const tempFilesRetentionDays = Math.max(1, Math.min(365, parseInt(String(body.tempFilesRetentionDays || 30), 10) || 30));
     const autoRunDaily = body.autoRunDaily !== false;
+    const archiveCallsToS3 = body.archiveCallsToS3 !== false;
+    const archiveOlderThanDays = Math.max(1, Math.min(365, parseInt(String(body.archiveOlderThanDays || body.logRetentionDays || 30), 10) || 30));
+    const deleteLocalAfterArchive = !!body.deleteLocalAfterArchive;
 
     store.config.autoCleanup = {
       ...(store.config.autoCleanup || {}),
       enabled,
       logRetentionDays,
       tempFilesRetentionDays,
-      autoRunDaily
+      autoRunDaily,
+      archiveCallsToS3,
+      archiveOlderThanDays,
+      deleteLocalAfterArchive
     };
 
     await writeStore(store);
@@ -781,13 +799,13 @@ adminRouter.post('/cleanup-settings', async (req: Request, res: Response) => {
     await logAccess(
       getCurrentUser(req)?.name || 'admin',
       'write',
-      'Обновлены параметры автоочистки 152-ФЗ (логи и временные файлы)',
+      'Обновлены параметры автоочистки и S3-архивации 152-ФЗ',
       req.ip || '127.0.0.1'
     );
 
     res.json({
       success: true,
-      message: 'Настройки автоочистки (152-ФЗ) успешно сохранены',
+      message: 'Настройки автоочистки и S3-архивации (152-ФЗ) успешно сохранены',
       settings: store.config.autoCleanup
     });
   } catch (err: any) {
@@ -805,7 +823,7 @@ adminRouter.post('/cleanup/run', async (req: Request, res: Response) => {
     await logAccess(
       getCurrentUser(req)?.name || 'admin',
       'delete',
-      'Запущена регламентная очистка данных 152-ФЗ (логи и файлы)',
+      'Запущена регламентная очистка данных 152-ФЗ (логи, файлы и S3-архивация)',
       req.ip || '127.0.0.1'
     );
 
@@ -816,6 +834,65 @@ adminRouter.post('/cleanup/run', async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     res.status(500).json({ error: `Ошибка выполнения очистки: ${err.message}` });
+  }
+});
+
+/**
+ * POST /api/admin/archive/run
+ * Ручной запуск архивации звонков старше TTL_LOG_DAYS дней в S3 хранилище (152-ФЗ)
+ */
+adminRouter.post('/archive/run', async (req: Request, res: Response) => {
+  try {
+    const { retentionDays, deleteLocalAfterArchive, forceAllOlder } = req.body || {};
+    const daysNum = retentionDays !== undefined ? parseInt(String(retentionDays), 10) : undefined;
+    const result = await archiveCallsToS3(daysNum, {
+      deleteLocalAfterArchive: !!deleteLocalAfterArchive,
+      forceAllOlder: !!forceAllOlder
+    });
+
+    if (result.success && result.archivedCount > 0) {
+      await logAccess(
+        getCurrentUser(req)?.name || 'admin',
+        'write',
+        `Архивация в S3: выгружено ${result.archivedCount} звонков в ${result.s3Key} (152-ФЗ)`,
+        req.ip || '127.0.0.1'
+      );
+    }
+
+    res.json({
+      success: result.success,
+      result,
+      message: result.message,
+      error: result.error
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: `Ошибка при архивации в S3: ${err.message}` });
+  }
+});
+
+/**
+ * GET /api/admin/archive/status
+ * Статус архивации звонков и проверка подключения к S3
+ */
+adminRouter.get('/archive/status', async (req: Request, res: Response) => {
+  try {
+    const status = await getS3ArchiveStatus();
+    res.json(status);
+  } catch (err: any) {
+    res.status(500).json({ error: `Ошибка получения статуса архивации S3: ${err.message}` });
+  }
+});
+
+/**
+ * GET /api/admin/archive/list
+ * Список архивных батчей звонков в S3
+ */
+adminRouter.get('/archive/list', async (req: Request, res: Response) => {
+  try {
+    const archives = await listS3Archives();
+    res.json({ success: true, archives });
+  } catch (err: any) {
+    res.status(500).json({ error: `Ошибка получения списка архивов S3: ${err.message}` });
   }
 });
 

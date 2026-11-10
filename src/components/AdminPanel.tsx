@@ -84,7 +84,7 @@ export function AdminPanel({
             }`}
             id="admin-tab-cleanup"
           >
-            <Trash2 className="w-4 h-4 text-amber-400" /> Автоочистка 152-ФЗ (Логи & Файлы)
+            <Trash2 className="w-4 h-4 text-amber-400" /> Автоочистка & S3-Архивация (152-ФЗ)
           </button>
 
           <button

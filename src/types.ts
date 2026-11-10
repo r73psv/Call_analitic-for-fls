@@ -143,11 +143,14 @@ export interface CallRecord {
   last_retry_at?: string;
   auto_retry_count?: number;
   
-  // TTL Data
+  // TTL & S3 Archive Data (152-ФЗ)
   audio_deleted?: boolean;
   audio_deleted_at?: string;
   content_deleted?: boolean;
   content_deleted_at?: string;
+  is_archived?: boolean;
+  archived_at?: string;
+  archive_s3_key?: string;
 
   // External integrations status
   sent_to_vk?: boolean;
@@ -247,9 +250,20 @@ export interface YclientsConfig {
 
 export interface AutoCleanupSettings {
   enabled: boolean;
-  logRetentionDays: number; // default: 30 days
-  tempFilesRetentionDays: number; // default: 30 days
+  logRetentionDays: number; // default: 30 days (TTL_LOG_DAYS)
+  tempFilesRetentionDays: number; // default: 30 days (TTL_TEMP_DAYS)
   autoRunDaily: boolean; // default: true
+  // Архивация звонков в S3 хранилище (152-ФЗ)
+  archiveCallsToS3?: boolean; // default: true
+  archiveOlderThanDays?: number; // default: 30 (TTL_LOG_DAYS)
+  deleteLocalAfterArchive?: boolean; // default: false
+  lastArchiveTimestamp?: string;
+  lastArchiveStats?: {
+    archivedCount: number;
+    s3Key?: string;
+    archiveSizeBytes?: number;
+    timestamp: string;
+  };
   lastRunTimestamp?: string;
   lastRunStats?: {
     logsCleaned: number;
@@ -258,8 +272,39 @@ export interface AutoCleanupSettings {
     tempBytesCleaned: number;
     audioCleaned: number;
     contentCleaned: number;
+    callsArchivedToS3?: number;
     timestamp: string;
   };
+}
+
+export interface S3ArchiveBatch {
+  archive_id: string;
+  created_at: string;
+  s3_key: string;
+  calls_count: number;
+  size_bytes: number;
+  retention_days: number;
+  earliest_call?: string;
+  latest_call?: string;
+}
+
+export interface S3ArchiveStatus {
+  totalCalls: number;
+  retentionDays: number;
+  olderThanTtlCalls: number;
+  alreadyArchivedCalls: number;
+  pendingArchiveCalls: number;
+  s3Configured: boolean;
+  s3Bucket: string;
+  s3Endpoint: string;
+  s3Connected?: boolean;
+  lastArchiveStats?: {
+    archivedCount: number;
+    s3Key?: string;
+    archiveSizeBytes?: number;
+    timestamp: string;
+  };
+  recentBatches?: S3ArchiveBatch[];
 }
 
 export interface SystemConfig {
