@@ -294,6 +294,33 @@ export function generateCallAuditPdf(call: CallRecord, userRole: string = 'manag
   }
   doc.moveDown(0.6);
 
+  // 6.1. Оценка звонка по 10 критериям качества обслуживания
+  const evalData = call.evaluation || (call.criteria_scores ? { criteria: call.criteria_scores, overall_score: call.operator_score, applicable_count: call.criteria_scores.filter(c => c.is_applicable !== false).length } : null);
+  if (evalData && evalData.criteria && evalData.criteria.length > 0) {
+    ensureSpace(120);
+    const evalHeaderY = doc.y;
+    doc.rect(margin, evalHeaderY, contentWidth, 18).fill('#f1f5f9');
+    doc.font('AppFontBold').fontSize(8.5).fillColor('#334155').text(
+      `ОЦЕНКА ЗВОНКА ПО 10 КРИТЕРИЯМ (СРЕДНИЙ БАЛЛ: ${evalData.overall_score ?? '—'} / 10, ПРИМЕНИМО: ${evalData.applicable_count ?? '—'} ИЗ 10)`,
+      margin + 10,
+      evalHeaderY + 5
+    );
+    doc.y = evalHeaderY + 24;
+
+    evalData.criteria.forEach((crit, idx) => {
+      ensureSpace(18);
+      const isApplicable = crit.is_applicable !== false && crit.score !== null;
+      const scoreStr = isApplicable ? `${crit.score}/10` : 'Н/П';
+      const scoreColor = !isApplicable ? '#64748b' : ((crit.score ?? 0) >= 8 ? '#047857' : (crit.score ?? 0) >= 5 ? '#b45309' : '#b91c1c');
+
+      doc.font('AppFontBold').fontSize(8).fillColor('#1e1b4b').text(`${idx + 1}. ${crit.name}: `, margin + 10, doc.y, { continued: true });
+      doc.font('AppFontBold').fontSize(8).fillColor(scoreColor).text(`[${scoreStr}] `, { continued: true });
+      doc.font('AppFont').fontSize(7.5).fillColor('#475569').text(crit.explanation, { width: contentWidth - 20, lineGap: 1.5 });
+      doc.moveDown(0.2);
+    });
+    doc.moveDown(0.5);
+  }
+
   // 7. Recommendations (Рекомендации для администратора)
   const recs = Array.isArray(call.recommendations) ? call.recommendations : [call.recommendations].filter(Boolean);
   if (recs.length > 0) {

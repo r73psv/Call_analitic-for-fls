@@ -91,6 +91,12 @@ export function generateCallCsv(call: CallRecord, userRole: string = 'manager', 
     ['6. Состоялась ли запись', call.structured_summary?.booking_status_text || call.key_facts?.is_booked_text || bookingStatus, 'Структурированное резюме'],
     ['7. Причина (если запись не состоялась)', call.structured_summary?.unbooked_reason || call.key_facts?.unbooked_reason || 'Запись состоялась', 'Структурированное резюме'],
     ['8. Дальнейшие действия менеджера', call.structured_summary?.manager_next_steps?.join('; ') || call.key_facts?.manager_next_steps?.join('; ') || '', 'Структурированное резюме'],
+    ['Средний балл по применимым критериям', call.evaluation?.overall_score !== null && call.evaluation?.overall_score !== undefined ? `${call.evaluation.overall_score}/10 (применимо ${call.evaluation.applicable_count} из 10)` : '—', 'Оценка по 10 критериям'],
+    ...((call.evaluation?.criteria || call.criteria_scores || []).map((crit, idx): [string, string, string] => [
+      `Критерий ${idx + 1}. ${crit.name}`,
+      crit.is_applicable !== false && crit.score !== null ? `${crit.score}/10` : 'Не применим (не снижает оценку)',
+      crit.explanation
+    ])),
     ['Услуга', call.key_facts?.service || 'не указана', 'Интересующая услуга/процедура'],
     ['Дата записи', call.key_facts?.date || 'не указана', 'Желаемая/согласованная дата'],
     ['Время записи', call.key_facts?.time || 'не указано', 'Желаемое/согласованное время'],

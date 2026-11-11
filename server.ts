@@ -12,7 +12,7 @@ import dotenv from 'dotenv';
 import { CallRecord, LogEntry, SystemConfig, ModelType, DashboardStats, KeyFacts, VkConfig, YclientsConfig, GigaChatModel, SystemNotification, NotificationType, UserRole, ContextClarification } from './src/types.js';
 import { transcribeWithRetry, fixDuplicatedTranscript, refineTranscriptRoles } from './src/services/speechkit.js';
 import { transcribeAudio } from './src/services/transcriptionService.js';
-import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary } from './src/services/gigachat.js';
+import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation } from './src/services/gigachat.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
 import { readStoreSync, writeStore } from './src/store/store.js';
 import { readConsentStoreSync, writeConsentStore } from './src/store/consent-store.js';
@@ -762,9 +762,15 @@ async function executeSingleModelAttempt(
         transcript: normalizeSalonNames(analysis.formatted_transcript || cleanTranscript, salonName),
         summary: normalizeSalonNames(analysis.transcript_summary, salonName),
         booking_status: analysis.booking_status || analysis.key_facts?.booking_status,
+        structured_summary: analysis.structured_summary,
+        evaluation: analysis.evaluation,
+        criteria_scores: analysis.criteria_scores,
         key_facts: {
           ...analysis.key_facts,
           booking_status: analysis.booking_status || analysis.key_facts?.booking_status,
+          structured_summary: analysis.structured_summary,
+          evaluation: analysis.evaluation,
+          criteria_scores: analysis.criteria_scores,
           promises: []
         },
         trigger_phrases: [],
@@ -949,9 +955,15 @@ async function analyzeCallTextOrAudio(
       transcript: analysis.formatted_transcript || cleanTranscript,
       summary: analysis.transcript_summary,
       booking_status: analysis.booking_status || analysis.key_facts?.booking_status,
+      structured_summary: analysis.structured_summary,
+      evaluation: analysis.evaluation,
+      criteria_scores: analysis.criteria_scores,
       key_facts: {
         ...analysis.key_facts,
         booking_status: analysis.booking_status || analysis.key_facts?.booking_status,
+        structured_summary: analysis.structured_summary,
+        evaluation: analysis.evaluation,
+        criteria_scores: analysis.criteria_scores,
         promises: analysis.key_facts?.promises || []
       },
       trigger_phrases: [],
@@ -3981,6 +3993,13 @@ app.post('/api/calls/webhook', async (req, res) => {
           if (analysis.recommendations) {
             newCall.recommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : [analysis.recommendations];
           }
+          if (analysis.structured_summary) {
+            newCall.structured_summary = analysis.structured_summary;
+          }
+          if (analysis.evaluation) {
+            newCall.evaluation = analysis.evaluation;
+            newCall.criteria_scores = analysis.evaluation.criteria;
+          }
           if (analysis.key_facts) {
             newCall.key_facts = { ...newCall.key_facts, ...analysis.key_facts };
           }
@@ -5265,6 +5284,38 @@ async function startServer() {
           call.key_facts.is_booked_text = struct.booking_status_text;
           call.key_facts.unbooked_reason = struct.unbooked_reason;
           call.key_facts.manager_next_steps = struct.manager_next_steps;
+          fixedCount++;
+        }
+
+        // Авто-миграция: наполнение оценки звонка по 10 критериям (evaluation, criteria_scores)
+        if (!call.evaluation || !call.criteria_scores || call.criteria_scores.length < 10) {
+          const salonName = getEffectiveSalonName(db.config);
+          const evalObj = extractCallEvaluation(
+            call.transcript || '',
+            call.summary || '',
+            call.evaluation || null,
+            call.operator_score,
+            call.operator_mistakes,
+            Array.isArray(call.recommendations) ? call.recommendations : [call.recommendations].filter(Boolean) as string[],
+            salonName
+          );
+          call.evaluation = evalObj;
+          call.criteria_scores = evalObj.criteria;
+          if (!call.key_facts) {
+            call.key_facts = {
+              is_dispute: false,
+              dispute_reason: null,
+              promises: [],
+              tone_client: 'нейтральный',
+              tone_manager: 'нейтральный',
+              call_outcome: 'консультация'
+            };
+          }
+          call.key_facts.evaluation = evalObj;
+          call.key_facts.criteria_scores = evalObj.criteria;
+          if (evalObj.overall_score !== null && (call.operator_score === null || call.operator_score === undefined)) {
+            call.operator_score = Math.round(evalObj.overall_score);
+          }
           fixedCount++;
         }
 

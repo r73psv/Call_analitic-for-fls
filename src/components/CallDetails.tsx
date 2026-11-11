@@ -11,12 +11,14 @@ import {
   ShieldCheck, Lock, Clock, Mic, FileText, FileSpreadsheet, Smartphone, HeartHandshake,
   CheckCircle2, XCircle, HelpCircle, Tag, Tags, Plus, X, Bookmark, Trash2,
   Scissors, Calendar, UserCheck, Sparkles, ListTodo, CheckSquare, Square, Copy, ArrowRight,
-  MessageSquareQuote, Send, Target, Banknote, CalendarClock, ArrowRightCircle
+  MessageSquareQuote, Send, Target, Banknote, CalendarClock, ArrowRightCircle,
+  Award, Gauge, BarChart3, Filter, CheckCheck, MinusCircle, ChevronDown, ChevronUp, Info, Sparkle
 } from 'lucide-react';
-import { CallRecord, NextStepItem, ContextClarification, StructuredCallSummary } from '../types.js';
+import { CallRecord, NextStepItem, ContextClarification, StructuredCallSummary, CallEvaluation, CallEvaluationCriterion } from '../types.js';
 import { ReanalyzeButton } from './ReanalyzeButton.js';
 import { refineTranscriptRoles } from '../services/transcriptUtils.js';
 import { extractStructuredCallSummary } from '../services/summaryUtils.js';
+import { extractCallEvaluation, buildCallEvaluation, EVALUATION_CRITERIA_DEFINITIONS } from '../services/evaluationUtils.js';
 
 interface CallDetailsProps {
   call: CallRecord;
@@ -88,6 +90,48 @@ export function CallDetails({
   const [copiedSteps, setCopiedSteps] = useState(false);
   const [newStepInput, setNewStepInput] = useState('');
   const [isAddingStep, setIsAddingStep] = useState(false);
+
+  // Состояние фильтрации по 10 критериям оценки
+  const [criteriaFilter, setCriteriaFilter] = useState<'all' | 'applicable' | 'not_applicable' | 'low'>('all');
+  const [criteriaSearch, setCriteriaSearch] = useState('');
+  const [expandedCriteriaId, setExpandedCriteriaId] = useState<string | null>(null);
+
+  // Оценка звонка по 10 критериям (гарантирует наличие всех 10 пунктов даже для старых звонков)
+  const callEvaluation = useMemo<CallEvaluation>(() => {
+    if (call.evaluation && Array.isArray(call.evaluation.criteria) && call.evaluation.criteria.length >= 10) {
+      return buildCallEvaluation(call.evaluation.criteria);
+    }
+    if (call.criteria_scores && Array.isArray(call.criteria_scores) && call.criteria_scores.length >= 10) {
+      return buildCallEvaluation(call.criteria_scores);
+    }
+    if (call.key_facts?.evaluation && Array.isArray(call.key_facts.evaluation.criteria) && call.key_facts.evaluation.criteria.length >= 10) {
+      return buildCallEvaluation(call.key_facts.evaluation.criteria);
+    }
+    return extractCallEvaluation(
+      call.transcript || '',
+      call.summary || '',
+      call.evaluation || null,
+      call.operator_score,
+      call.operator_mistakes,
+      Array.isArray(call.recommendations) ? call.recommendations : [call.recommendations].filter(Boolean) as string[]
+    );
+  }, [call]);
+
+  const filteredCriteria = useMemo(() => {
+    let list = callEvaluation.criteria;
+    if (criteriaFilter === 'applicable') {
+      list = list.filter(c => c.is_applicable !== false && c.score !== null);
+    } else if (criteriaFilter === 'not_applicable') {
+      list = list.filter(c => c.is_applicable === false || c.score === null);
+    } else if (criteriaFilter === 'low') {
+      list = list.filter(c => c.is_applicable !== false && c.score !== null && c.score < 7);
+    }
+    if (criteriaSearch.trim()) {
+      const q = criteriaSearch.toLowerCase();
+      list = list.filter(c => c.name.toLowerCase().includes(q) || c.explanation.toLowerCase().includes(q));
+    }
+    return list;
+  }, [callEvaluation, criteriaFilter, criteriaSearch]);
 
   // Извлечение параметров сути обращения (услуга, дата, время, мастер)
   const essence = useMemo(() => {
@@ -1546,6 +1590,271 @@ export function CallDetails({
                 {call.summary || 'Резюме не сформировано'}
               </p>
             )}
+          </div>
+
+          {/* Карточка: Оценка каждого звонка по 10 критериям качества */}
+          <div
+            className="border border-indigo-200/90 rounded-2xl p-4 bg-gradient-to-br from-indigo-50/30 via-white to-purple-50/20 shadow-xs space-y-4"
+            id="call-evaluation-10-criteria-card"
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between gap-3 flex-wrap pb-3 border-b border-indigo-100/90">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-indigo-600 text-white shrink-0 shadow-3xs">
+                  <Award className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
+                      <span>Оценка звонка по 10 критериям</span>
+                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-indigo-100 text-indigo-800 border border-indigo-200 uppercase">
+                        Стандарт сервиса
+                      </span>
+                    </h3>
+                  </div>
+                  <p className="text-[11px] text-slate-500">
+                    Детальная шкала аудита от 0 до 10 баллов по каждому параметру с обоснованием и исключением неприменимых пунктов
+                  </p>
+                </div>
+              </div>
+
+              {/* Overall Score Pill */}
+              <div className="flex items-center gap-2">
+                <div className={`px-3 py-1.5 rounded-xl border flex items-center gap-2 shadow-3xs ${
+                  callEvaluation.overall_score === null
+                    ? 'bg-slate-50 border-slate-200 text-slate-600'
+                    : callEvaluation.overall_score >= 8.5
+                    ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                    : callEvaluation.overall_score >= 7.0
+                    ? 'bg-indigo-50 border-indigo-300 text-indigo-800'
+                    : callEvaluation.overall_score >= 5.0
+                    ? 'bg-amber-50 border-amber-300 text-amber-800'
+                    : 'bg-rose-50 border-rose-300 text-rose-800'
+                }`}>
+                  <Gauge className="w-4 h-4 shrink-0 opacity-80" />
+                  <div className="text-left leading-none">
+                    <span className="block text-[9px] uppercase tracking-wider font-bold opacity-70">
+                      Общий балл
+                    </span>
+                    <span className="text-sm font-black font-mono">
+                      {callEvaluation.overall_score !== null ? `${callEvaluation.overall_score} / 10` : 'Без оценки'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* KPI Summary Strip: применимость критериев */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div className="p-2.5 bg-white/90 rounded-xl border border-slate-200/80 shadow-3xs flex items-center justify-between">
+                <div>
+                  <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Применимо к звонку
+                  </span>
+                  <span className="text-xs font-bold text-slate-800">
+                    {callEvaluation.applicable_count} из 10 критериев
+                  </span>
+                </div>
+                <div className="w-7 h-7 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center font-bold text-xs border border-emerald-200">
+                  {callEvaluation.applicable_count}
+                </div>
+              </div>
+
+              <div className="p-2.5 bg-white/90 rounded-xl border border-slate-200/80 shadow-3xs flex items-center justify-between">
+                <div>
+                  <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Не применимо
+                  </span>
+                  <span className="text-xs font-bold text-slate-800">
+                    {10 - callEvaluation.applicable_count} (не снижают балл)
+                  </span>
+                </div>
+                <div className="w-7 h-7 rounded-lg bg-slate-100 text-slate-600 flex items-center justify-center font-bold text-xs border border-slate-200">
+                  {10 - callEvaluation.applicable_count}
+                </div>
+              </div>
+
+              <div className="p-2.5 bg-white/90 rounded-xl border border-slate-200/80 shadow-3xs flex items-center justify-between">
+                <div>
+                  <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Правило расчета
+                  </span>
+                  <span className="text-xs font-medium text-slate-700 leading-snug">
+                    Строго среднее по применимым
+                  </span>
+                </div>
+                <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-700 flex items-center justify-center font-bold text-xs border border-indigo-200">
+                  %
+                </div>
+              </div>
+            </div>
+
+            {/* Вердикт аудита */}
+            {callEvaluation.summary_verdict && (
+              <div className="p-2.5 bg-indigo-50/60 rounded-xl border border-indigo-200/70 text-xs text-indigo-950 flex items-start gap-2">
+                <Info className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
+                <div className="leading-relaxed">
+                  <strong className="font-semibold">Вердикт аудитора: </strong>
+                  <span>{callEvaluation.summary_verdict}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Фильтры и быстрый поиск по критериям */}
+            <div className="flex items-center justify-between gap-2 flex-wrap pt-1">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {[
+                  { id: 'all', label: `Все (10)` },
+                  { id: 'applicable', label: `Применимые (${callEvaluation.applicable_count})` },
+                  { id: 'not_applicable', label: `Не применимые (${10 - callEvaluation.applicable_count})` },
+                  { id: 'low', label: `Требуют внимания (<7)` }
+                ].map(tab => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setCriteriaFilter(tab.id as any)}
+                    className={`text-xs px-2.5 py-1 rounded-lg border transition-all cursor-pointer font-medium ${
+                      criteriaFilter === tab.id
+                        ? 'bg-slate-900 text-white border-slate-900 shadow-3xs font-semibold'
+                        : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Поиск по критерию */}
+              <div className="relative">
+                <input
+                  type="text"
+                  value={criteriaSearch}
+                  onChange={e => setCriteriaSearch(e.target.value)}
+                  placeholder="Поиск по критерию..."
+                  className="text-xs bg-white border border-slate-200 rounded-lg pl-2.5 pr-6 py-1 text-slate-800 placeholder-slate-400 focus:outline-none focus:border-indigo-500 w-36 sm:w-48"
+                />
+                {criteriaSearch && (
+                  <button
+                    type="button"
+                    onClick={() => setCriteriaSearch('')}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5 cursor-pointer"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Список критериев */}
+            <div className="space-y-2.5 pt-1">
+              {filteredCriteria.length > 0 ? (
+                filteredCriteria.map((crit, idx) => {
+                  const isApplicable = crit.is_applicable !== false && crit.score !== null;
+                  const score = crit.score;
+                  const isExpanded = expandedCriteriaId === crit.id;
+
+                  // Определение цвета оценки
+                  let scoreBadgeClass = 'bg-slate-100 text-slate-600 border-slate-300';
+                  let barColorClass = 'bg-slate-300';
+                  if (isApplicable && score !== null) {
+                    if (score >= 9) {
+                      scoreBadgeClass = 'bg-emerald-100 text-emerald-800 border-emerald-300';
+                      barColorClass = 'bg-emerald-500';
+                    } else if (score >= 7) {
+                      scoreBadgeClass = 'bg-indigo-100 text-indigo-800 border-indigo-300';
+                      barColorClass = 'bg-indigo-500';
+                    } else if (score >= 5) {
+                      scoreBadgeClass = 'bg-amber-100 text-amber-800 border-amber-300';
+                      barColorClass = 'bg-amber-500';
+                    } else {
+                      scoreBadgeClass = 'bg-rose-100 text-rose-800 border-rose-300';
+                      barColorClass = 'bg-rose-500';
+                    }
+                  }
+
+                  return (
+                    <div
+                      key={crit.id}
+                      className={`p-3 rounded-xl border transition-all ${
+                        !isApplicable
+                          ? 'bg-slate-50/70 border-slate-200/80 text-slate-600'
+                          : score !== null && score < 6
+                          ? 'bg-rose-50/30 border-rose-200/80'
+                          : 'bg-white border-slate-200/90 hover:border-indigo-300 hover:shadow-3xs'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-start gap-2.5 min-w-0 flex-1">
+                          {/* Номер критерия */}
+                          <div className={`w-6 h-6 rounded-lg font-bold text-xs flex items-center justify-center shrink-0 mt-0.5 ${
+                            !isApplicable
+                              ? 'bg-slate-200 text-slate-600'
+                              : 'bg-indigo-100 text-indigo-800'
+                          }`}>
+                            {idx + 1}
+                          </div>
+
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h4 className="text-xs font-bold text-slate-900 leading-snug">
+                                {crit.name}
+                              </h4>
+
+                              {/* Бейдж применимости */}
+                              {isApplicable ? (
+                                <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded-md inline-flex items-center gap-0.5">
+                                  <Check className="w-2.5 h-2.5" />
+                                  <span>Применим</span>
+                                </span>
+                              ) : (
+                                <span className="text-[10px] font-semibold text-slate-600 bg-slate-100 border border-slate-300 px-1.5 py-0.2 rounded-md inline-flex items-center gap-0.5">
+                                  <MinusCircle className="w-2.5 h-2.5" />
+                                  <span>Не применим (не снижает оценку)</span>
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Прогресс-бар оценки */}
+                            <div className="mt-2 flex items-center gap-2.5">
+                              <div className="flex-1 bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                                {isApplicable && score !== null ? (
+                                  <div
+                                    className={`${barColorClass} h-1.5 rounded-full transition-all duration-300`}
+                                    style={{ width: `${(score / 10) * 100}%` }}
+                                  />
+                                ) : (
+                                  <div className="w-full h-1.5 bg-slate-200 border-dashed" />
+                                )}
+                              </div>
+                              <span className="text-[10px] font-mono font-semibold text-slate-500 shrink-0">
+                                {isApplicable && score !== null ? `${(score / 10) * 100}%` : 'Исключен'}
+                              </span>
+                            </div>
+
+                            {/* Обоснование оценки */}
+                            <div className="mt-2 p-2 rounded-lg bg-slate-50 border border-slate-100/90 text-[11px] text-slate-700 leading-relaxed">
+                              <span className="font-semibold text-slate-800 mr-1">Обоснование:</span>
+                              <span>{crit.explanation}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Бейдж балла */}
+                        <div className="shrink-0 text-right">
+                          <span className={`text-xs font-black font-mono px-2.5 py-1 rounded-lg border inline-block shadow-3xs ${scoreBadgeClass}`}>
+                            {isApplicable && score !== null ? `${score} / 10` : 'Не применим'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="text-center py-4 bg-white/70 rounded-xl border border-dashed border-slate-200 text-xs text-slate-500">
+                  По выбранному фильтру критерии не найдены.
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Clarify Context with Yandex.GPT Card */}

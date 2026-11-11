@@ -6,7 +6,7 @@
 import axios from 'axios';
 import https from 'https';
 import { getGigaChatToken, isGigaChatConfigured, invalidateGigaChatTokenCache } from './gigachat-auth.js';
-import { GigaChatModel, AnalysisResult, CallRecord, NextStepItem, KeyFacts, TokenUsage, ContextClarification, StructuredCallSummary } from '../types.js';
+import { GigaChatModel, AnalysisResult, CallRecord, NextStepItem, KeyFacts, TokenUsage, ContextClarification, StructuredCallSummary, CallEvaluationCriterion, CallEvaluation } from '../types.js';
 
 const httpsAgent = new https.Agent({
   rejectUnauthorized: false,
@@ -82,44 +82,34 @@ export function getSystemPrompt(customSalonName?: string): string {
 - Ошибки и недочеты: <конкретные ошибки и недочеты, повлиявшие на снижение оценки, либо отметка об их отсутствии при 10/10>.
 - Советы по оптимизации: <прикладные советы по оптимизации работы менеджера на основе выявленных ошибок>.»
 
-Пример: «Суть обращения: услуга — аппаратный маникюр с шеллаком, дата — завтра, время — 18:30, мастер — Кристина.
-Пересказ диалога: Клиентка позвонила с вопросом о записи на вечерний маникюр с покрытием шеллак на завтра. Администратор поприветствовала клиента, уточнила пожелания по мастеру и предложила слоты на 18:30 и 20:00 к Кристине и Анне. Также администратор сориентировала по стоимости процедуры (2100 руб.) и длительности сеанса.
-Вывод: Клиентка согласовала визит на 18:30 к мастеру Кристине; запись успешно оформлена, администратор пообещала направить напоминание в WhatsApp.
-Разбор работы менеджера (оценка 8/10):
-- Ошибки и недочеты: 1) При ответе на звонок сотрудник не назвал собственное имя, ограничившись названием салона. 2) Не озвучены условия заблаговременного снятия старого покрытия и длительность процедуры до момента прямого вопроса клиента.
-- Советы по оптимизации: 1) Приветствовать клиентов по полному корпоративному стандарту: «Салон «${salon}», администратор [Имя], добрый день». 2) Проактивно информировать клиента о подготовке к визиту (нужно ли снятие покрытия) для точного резервирования тайминга мастера.»
-
-Если разговор не состоялся (тишина, гудки, автоответчик, сброс):
-«Разговор не состоялся: диалог отсутствует.»
-
 ШАГ 5. КЛЮЧЕВЫЕ ФАКТЫ (key_facts)
 - is_dispute, dispute_reason;
 - tone_client, tone_manager: "нейтральный|позитивный|негативный";
-- call_outcome — ровно одно значение:
-  * "запись" — запись подтверждена;
-  * "отказ" — клиент отказался от записи;
-  * "консультация" — только информация, без записи;
-  * "перезвон" — договорились созвониться позже;
-  * "отмена" — клиент отменил существующую запись;
-  * "не состоялся" — диалога не было (тишина, гудки, сброс, автоответчик, автоинформатор).
+- call_outcome — ровно одно значение ("запись"|"отказ"|"консультация"|"перезвон"|"отмена"|"не состоялся");
 - booking_status — строго дублирует значение из Шага 3;
 - client_issue — конкретная суть обращения;
-- service — название услуги или null (если не названа);
-- date — дата записи (например "8 ноября в воскресенье", "завтра") или null (если не названа);
-- time — время записи в формате "ЧЧ:ММ" (например "15:00", "13:00") или null (если не названо);
-- master — имя и/или фамилия мастера в именительном падеже с прописной буквы (например "Елена Валиулова", "Валиулова Татьяна", "Егорова Арина", "Кристина") или null (если не назван). Никогда не пиши "Меня Вот", "Записались", "Студио"!
+- service, date, time, master (строго с прописной буквы, без «Меня Вот»).
 
-ШАГ 6. ОЦЕНКА ОПЕРАТОРА, ОШИБКИ И СОВЕТЫ ПО ОПТИМИЗАЦИИ (operator_score, operator_mistakes, recommendations)
-- Оценку (целое от 1 до 10) ставь ТОЛЬКО если разговор состоялся (is_conversation = true).
-- Шкала оценки:
-  * 10/10 — безупречный диалог: приветствие по стандарту (салон + имя), активное ведение разговора, выявление потребностей, предложение альтернатив при занятости слота, четкий расчет цены, подтверждение времени, вежливость;
-  * 7–9/10 — хороший диалог, но есть недочеты (не названо имя, не предложены сопутствующие услуги, не озвучены правила подготовки, не зафиксирован альтернативный контакт);
-  * 4–6/10 — пассивная работа менеджера (сухое информирование, при отказе клиента нет попытки удержания, не предложены соседние даты или другие мастера, упущена запись);
-  * 1–3/10 — грубые нарушения (грубость, перебивание клиента, дезинформация, сброс звонка, отказ помочь клиенту).
-- Если разговор не состоялся — operator_score СТРОГО null (не 0 и не число).
-- operator_mistakes: массив строк с перечислением КОНКРЕТНЫХ ошибок и недочетов, допущенных менеджером, которые повлияли на снижение оценки. При 10/10 — ["Грубых ошибок не допущено: регламент соблюдён полностью"].
-- operator_comment: развернутый профессиональный комментарий аудитора с детальным разбором разговора менеджера и аргументацией оценки.
-- recommendations: массив строк с конкретными советами по оптимизации работы менеджера, сформулированными строго на основе выявленных ошибок.
+ШАГ 6. ОЦЕНКА ЗВОНКА ПО 10 КРИТЕРИЯМ (criteria_scores)
+Каждый звонок оценивается по 10 профессиональным критериям от 0 до 10 баллов с кратким объяснением оценки:
+1. "greeting_intro": «Приветствие и представление» (название салона, имя администратора, приветливый тон).
+2. "needs_identification": «Выявление потребности гостя» (активное слушание, уточнение услуги, пожеланий, специфики и времени).
+3. "service_and_master_presentation": «Презентация услуги и мастера» (экспертное описание специалиста, квалификации, особенностей и длительности).
+4. "price_presentation": «Корректная презентация стоимости» (четкое и уверенное озвучивание цен, условий предоплаты).
+5. "handling_objections": «Работа с возражениями» (отработка сомнений гостя по цене, времени, плотной записи, предложение решений).
+6. "additional_services": «Предложение дополнительных услуг» (допродажа сопутствующих процедур: снятие, уход, дизайн, спа, брови).
+7. "parallel_booking": «Предложение параллельной записи» (предложение услуг в 4 руки, одновременных записей или параллельных слотов).
+8. "alternative_options": «Предложение альтернативных вариантов» (вилка времени из 2+ слотов, другие даты, другие мастера или лист ожидания).
+9. "closing_booking": «Закрытие на запись» (инициатива бронирования, четкая фиксация даты, времени, мастера и подтверждение визита).
+10. "communication_quality_closing": «Качество коммуникации и завершение разговора» (грамотная речь, напоминание о визите, вежливое прощание).
+
+ПРАВИЛО НЕПРИМЕНИМОСТИ (КРИТИЧЕСКИ ВАЖНО):
+Если какой-либо критерий НЕ ПРИМЕНИМ к конкретному звонку (например: возражений со стороны гостя не возникало вообще, параллельная запись не требовалась, или первый предложенный слот сразу подошел и искать альтернативы не было нужды):
+- Установи "is_applicable": false;
+- Установи "score": null;
+- В "explanation" напиши: "Критерий не применим к специфике данного звонка (не снижает общую оценку)".
+НЕПРИМЕНИМЫЕ КРИТЕРИИ НЕ ДОЛЖНЫ СНИЖАТЬ ОБЩУЮ ОЦЕНКУ!
+Итоговый балл оператора (operator_score) рассчитывается строго как среднее арифметическое только по применимым критериям (is_applicable: true).
 
 РЕГЛАМЕНТ САЛОНА
 - Официальное название: «${salon}». Приветствие с этим названием — норма, оценку за него не снижай.
@@ -128,20 +118,32 @@ export function getSystemPrompt(customSalonName?: string): string {
 ФОРМАТ ОТВЕТА (JSON, без пояснений вне JSON):
 {
   "is_conversation": true | false,
-  "transcript_summary": "Суть обращения: услуга — ..., дата — ..., время — ..., мастер — ....\\nПересказ диалога: ... (2-4 предложения).\\nВывод: ...\\nРазбор работы менеджера (оценка 7/10):\\n- Ошибки и недочеты: 1) ... 2) ...\\n- Советы по оптимизации: 1) ... 2) ...",
+  "transcript_summary": "Суть обращения: услуга — ..., дата — ..., время — ..., мастер — ....\\nПересказ диалога: ... (2-4 предложения).\\nВывод: ...\\nРазбор работы менеджера (оценка 8/10):\\n- Ошибки и недочеты: 1) ...\\n- Советы по оптимизации: 1) ...",
   "structured_summary": {
-    "call_purpose": "Цель обращения (например: Запись на маникюр и педикюр к мастеру Егорова Арина / Перенос записи к мастеру Елена Валиулова)",
-    "requested_service": "Какую услугу хотел получить гость (например: маникюр и педикюр с покрытием / не указана)",
-    "offered_master": "ФИО мастера с заглавной буквы (например: Елена Валиулова / Валиулова Татьяна / Егорова Арина / не выбран)",
-    "offered_price": "Озвученная стоимость (например: Макияж — 2 100 ₽, укладка — 1 400 ₽ / не озвучивалась)",
-    "offered_date_time": "Предложенные даты и время (например: 21 ноября в субботу: 09:00 и 10:30 (выбрано 09:00))",
-    "booking_status_text": "Запись состоялась (подтверждена) / Сохранена прежняя бронь / Запись не состоялась",
-    "unbooked_reason": "Причина, если не состоялась (например: У мастера Елены Валиуловой заняты все более ранние слоты / Запись состоялась)",
+    "call_purpose": "Цель обращения...",
+    "requested_service": "Какую услугу хотел получить гость...",
+    "offered_master": "ФИО мастера с заглавной буквы...",
+    "offered_price": "Озвученная стоимость...",
+    "offered_date_time": "Предложенные даты и время...",
+    "booking_status_text": "Запись состоялась / Запись не состоялась...",
+    "unbooked_reason": "Причина, если не состоялась...",
     "manager_next_steps": [
       "Действие 1: зафиксировать бронь в CRM...",
       "Действие 2: направить подтверждение в WhatsApp..."
     ]
   },
+  "criteria_scores": [
+    { "id": "greeting_intro", "name": "Приветствие и представление", "score": 10, "is_applicable": true, "explanation": "Администратор поприветствовал клиента и назвал салон и имя." },
+    { "id": "needs_identification", "name": "Выявление потребности гостя", "score": 9, "is_applicable": true, "explanation": "Заданы вопросы о желаемом времени и мастере." },
+    { "id": "service_and_master_presentation", "name": "Презентация услуги и мастера", "score": 9, "is_applicable": true, "explanation": "Мастер четко представлен." },
+    { "id": "price_presentation", "name": "Корректная презентация стоимости", "score": 10, "is_applicable": true, "explanation": "Стоимость названа уверенно и прозрачно." },
+    { "id": "handling_objections", "name": "Работа с возражениями", "score": null, "is_applicable": false, "explanation": "Возражений со стороны гостя не возникало (не снижает оценку)." },
+    { "id": "additional_services", "name": "Предложение дополнительных услуг", "score": 6, "is_applicable": true, "explanation": "Сопутствующие процедуры не предлагались." },
+    { "id": "parallel_booking", "name": "Предложение параллельной записи", "score": null, "is_applicable": false, "explanation": "Параллельная запись не требовалась в контексте обращения (не снижает оценку)." },
+    { "id": "alternative_options", "name": "Предложение альтернативных вариантов", "score": null, "is_applicable": false, "explanation": "Предложенный слот сразу подошел гостю (не снижает оценку)." },
+    { "id": "closing_booking", "name": "Закрытие на запись", "score": 10, "is_applicable": true, "explanation": "Запись четко зафиксирована с повтором времени." },
+    { "id": "communication_quality_closing", "name": "Качество коммуникации и завершение разговора", "score": 10, "is_applicable": true, "explanation": "Вежливое завершение и обещание напоминания в WhatsApp." }
+  ],
   "booking_status": "согласие|отказ|консультация|не применимо",
   "formatted_transcript": "Менеджер: ...\\nКлиент: ...",
   "key_facts": {
@@ -924,6 +926,13 @@ export {
   extractStructuredCallSummary
 } from './summaryUtils.js';
 
+export {
+  EVALUATION_CRITERIA_DEFINITIONS,
+  calculateOverallScore,
+  buildCallEvaluation,
+  extractCallEvaluation
+} from './evaluationUtils.js';
+
 import {
   EssenceDetails,
   isMasterNameValid,
@@ -931,6 +940,13 @@ import {
   extractEssenceDetails,
   extractStructuredCallSummary
 } from './summaryUtils.js';
+
+import {
+  EVALUATION_CRITERIA_DEFINITIONS,
+  calculateOverallScore,
+  buildCallEvaluation,
+  extractCallEvaluation
+} from './evaluationUtils.js';
 
 /**
  * Нормализует резюме так, чтобы оно ВСЕГДА содержало 4 четких блока:
@@ -1307,10 +1323,13 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
 
   // --- Ветка «разговор не состоялся» ---
   if (!isConversation) {
+    const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
     return {
       transcript_summary: 'Разговор не состоялся: диалог отсутствует (тишина, гудки, сброс, автоответчик или автоинформатор).',
       booking_status: 'не применимо',
       formatted_transcript: formattedTranscript || 'Разговор не состоялся (диалог отсутствует)',
+      evaluation: failedEval,
+      criteria_scores: failedEval.criteria,
       key_facts: {
         is_dispute: false,
         dispute_reason: null,
@@ -1323,6 +1342,8 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
         date: null,
         time: null,
         master: null,
+        evaluation: failedEval,
+        criteria_scores: failedEval.criteria,
       },
       operator_score: null,
       operator_mistakes: [],
@@ -1450,11 +1471,34 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
       : structuredSummary.manager_next_steps,
   };
 
+  // Оценка звонка по 10 критериям
+  const rawCriteria = Array.isArray(parsed.criteria_scores)
+    ? parsed.criteria_scores
+    : (Array.isArray(parsed.evaluation?.criteria) ? parsed.evaluation.criteria : []);
+
+  const parsedEvalObj = rawCriteria.length >= 5 ? buildCallEvaluation(rawCriteria) : null;
+  const evaluation: CallEvaluation = extractCallEvaluation(
+    fullTranscript,
+    formattedSummary,
+    parsedEvalObj,
+    score,
+    finalMistakes,
+    Array.isArray(advice) ? advice : [advice].filter(Boolean),
+    salon
+  );
+
+  // Итоговый балл оператора синхронизируется со средним баллом по применимым критериям
+  if (evaluation.overall_score !== null && !isNaN(evaluation.overall_score)) {
+    score = Math.max(1, Math.min(10, Math.round(evaluation.overall_score)));
+  }
+
   const result: AnalysisResult = {
     transcript_summary: formattedSummary,
     booking_status: bookingStatus,
     formatted_transcript: formattedTranscript,
     structured_summary: finalStructuredSummary,
+    evaluation,
+    criteria_scores: evaluation.criteria,
     key_facts: {
       is_dispute: Boolean(parsed.key_facts?.is_dispute),
       dispute_reason: parsed.key_facts?.dispute_reason || null,
@@ -1476,6 +1520,8 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
       unbooked_reason: finalStructuredSummary.unbooked_reason,
       manager_next_steps: finalStructuredSummary.manager_next_steps,
       structured_summary: finalStructuredSummary,
+      evaluation,
+      criteria_scores: evaluation.criteria,
     },
     operator_score: score,
     operator_mistakes: finalMistakes,
@@ -1505,10 +1551,13 @@ function generateLocalFallbackAnalysis(
 
   // 1. Жёсткий предохранитель: звонки менее 10 секунд
   if (callDurationSeconds !== undefined && callDurationSeconds < 10) {
+    const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
     return {
       transcript_summary: `Разговор не состоялся: длительность вызова ${callDurationSeconds} сек (менее 10 секунд), диалог между оператором и клиентом отсутствует.`,
       booking_status: 'не применимо',
       formatted_transcript: clean || 'Разговор не состоялся (диалог отсутствует)',
+      evaluation: failedEval,
+      criteria_scores: failedEval.criteria,
       key_facts: {
         is_dispute: false,
         dispute_reason: null,
@@ -1521,6 +1570,8 @@ function generateLocalFallbackAnalysis(
         date: null,
         time: null,
         master: null,
+        evaluation: failedEval,
+        criteria_scores: failedEval.criteria,
       },
       operator_score: null,
       operator_mistakes: [],
@@ -1538,10 +1589,13 @@ function generateLocalFallbackAnalysis(
 
   if (isPlaceholderOrEmpty) {
     const durLabel = callDurationSeconds !== undefined ? ` (длительность ${callDurationSeconds} сек.)` : '';
+    const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
     return {
       transcript_summary: `Разговор не состоялся: аудиозапись${durLabel} не содержит разборчивой речи (зафиксированы только гудки/тишина или сброс линии).`,
       booking_status: 'не применимо',
       formatted_transcript: clean || `Аудиозапись${durLabel} не содержит разборчивой речи.`,
+      evaluation: failedEval,
+      criteria_scores: failedEval.criteria,
       key_facts: {
         is_dispute: false,
         dispute_reason: null,
@@ -1554,6 +1608,8 @@ function generateLocalFallbackAnalysis(
         date: null,
         time: null,
         master: null,
+        evaluation: failedEval,
+        criteria_scores: failedEval.criteria,
       },
       operator_score: null,
       operator_mistakes: [],
@@ -1576,10 +1632,13 @@ function generateLocalFallbackAnalysis(
       lower.includes('автоинформатор'));
 
   if (isPureAuto) {
+    const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
     return {
       transcript_summary: 'Разговор не состоялся: сработал автоответчик или голосовая почта. Запись не оформлена.',
       booking_status: 'не применимо',
       formatted_transcript: clean,
+      evaluation: failedEval,
+      criteria_scores: failedEval.criteria,
       key_facts: {
         is_dispute: false,
         dispute_reason: null,
@@ -1592,6 +1651,8 @@ function generateLocalFallbackAnalysis(
         date: null,
         time: null,
         master: null,
+        evaluation: failedEval,
+        criteria_scores: failedEval.criteria,
       },
       operator_score: null,
       operator_mistakes: [],
@@ -1641,7 +1702,7 @@ function generateLocalFallbackAnalysis(
     conclusionText = `Администратор вежливо проконсультировал клиента по регламенту салона «${salon}» («${cleanSnippet}»).`;
   }
 
-  const score = hasDialogue ? (isDispute ? 7 : (isDeclined ? 6 : (isBooking ? 9 : 8))) : 7;
+  let score = hasDialogue ? (isDispute ? 7 : (isDeclined ? 6 : (isBooking ? 9 : 8))) : 7;
 
   // Формируем детальный список ошибок и рекомендаций для снижения оценки
   const mistakes: string[] = [];
@@ -1692,11 +1753,27 @@ function generateLocalFallbackAnalysis(
     comment
   );
 
+  const evaluation: CallEvaluation = extractCallEvaluation(
+    clean,
+    formattedSummary,
+    null,
+    score,
+    mistakes,
+    recommendationsList,
+    salon
+  );
+
+  if (evaluation.overall_score !== null && !isNaN(evaluation.overall_score)) {
+    score = Math.max(1, Math.min(10, Math.round(evaluation.overall_score)));
+  }
+
   return {
     transcript_summary: formattedSummary,
     booking_status: bookingStatus,
     formatted_transcript: transcript,
     structured_summary: structuredSummary,
+    evaluation,
+    criteria_scores: evaluation.criteria,
     key_facts: {
       is_dispute: isDispute,
       dispute_reason: isDispute ? 'Претензия или отмена записи' : null,
@@ -1718,6 +1795,8 @@ function generateLocalFallbackAnalysis(
       unbooked_reason: structuredSummary.unbooked_reason,
       manager_next_steps: structuredSummary.manager_next_steps,
       structured_summary: structuredSummary,
+      evaluation,
+      criteria_scores: evaluation.criteria,
     },
     operator_score: score,
     operator_mistakes: mistakes,

@@ -90,6 +90,23 @@ export interface StructuredCallSummary {
   manager_next_steps: string[]; // 8. Какие дальнейшие действия необходимо выполнить менеджеру
 }
 
+export interface CallEvaluationCriterion {
+  id: string; // e.g. 'greeting_intro', 'needs_identification', ...
+  name: string; // e.g. 'Приветствие и представление'
+  score: number | null; // 0-10 или null если не применим
+  is_applicable: boolean; // применим ли критерий к конкретному звонку
+  explanation: string; // краткое объяснение оценки
+}
+
+export interface CallEvaluation {
+  overall_score: number | null; // Средний балл (0-10) строго по применимым критериям
+  max_score: number; // 10
+  applicable_count: number; // Количество применимых критериев
+  total_criteria_count: number; // 10
+  criteria: CallEvaluationCriterion[];
+  summary_verdict?: string; // Краткий вердикт по итогам оценки
+}
+
 export interface KeyFacts {
   is_dispute: boolean;
   dispute_reason: string | null;
@@ -115,6 +132,10 @@ export interface KeyFacts {
   unbooked_reason?: string; // Если запись не состоялась — по какой причине
   manager_next_steps?: string[]; // Какие дальнейшие действия необходимо выполнить менеджеру
   structured_summary?: StructuredCallSummary;
+
+  // Оценка звонка по 10 критериям
+  evaluation?: CallEvaluation;
+  criteria_scores?: CallEvaluationCriterion[];
 }
 
 export interface TokenUsage {
@@ -139,6 +160,8 @@ export interface CallRecord {
   operator_mistakes?: string[];
   tokens_used?: TokenUsage;
   structured_summary?: StructuredCallSummary;
+  evaluation?: CallEvaluation;
+  criteria_scores?: CallEvaluationCriterion[];
   
   // Custom metadata for rich display
   client_name?: string;
@@ -433,12 +456,16 @@ export interface AnalysisResult {
     unbooked_reason?: string;
     manager_next_steps?: string[];
     structured_summary?: StructuredCallSummary;
+    evaluation?: CallEvaluation;
+    criteria_scores?: CallEvaluationCriterion[];
   };
   operator_score: number | null;
   operator_comment: string;
   operator_mistakes?: string[];
   recommendations: string | string[];
   structured_summary?: StructuredCallSummary;
+  evaluation?: CallEvaluation;
+  criteria_scores?: CallEvaluationCriterion[];
 }
 
 export type NotificationType = 'call_analyzed' | 'dispute_detected' | 'booking_confirmed' | 'call_failed' | 'incoming_call';
