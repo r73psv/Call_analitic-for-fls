@@ -5088,8 +5088,34 @@ app.get('/api/stats', (req, res) => {
 
 // Serve Frontend Vite bundle in production / fallback routing
 async function startServer() {
+  // 1. Mount Vite dev server middleware (in development) or static files (in production) BEFORE listening
+  if (process.env.NODE_ENV === 'production') {
+    app.use(express.static(DIST_PATH));
+    app.get('*', (req, res) => {
+      const indexPath = path.join(DIST_PATH, 'index.html');
+      if (fs.existsSync(indexPath)) {
+        res.sendFile(indexPath);
+      } else {
+        res.status(404).send('Сборка приложения не найдена. Пожалуйста, выполните "npm run build".');
+      }
+    });
+  } else {
+    try {
+      const { createServer: createViteServer } = await import('vite');
+      const viteServer = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa'
+      });
+      app.use(viteServer.middlewares);
+      console.log('[Dev] Vite middleware успешно смонтирован в Express');
+    } catch (err) {
+      console.error('Не удалось запустить Vite dev server:', err);
+    }
+  }
+
+  // 2. Start HTTP server on 0.0.0.0:3000
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`Server running on port ${PORT} (0.0.0.0:${PORT})`);
   });
 
   // Initialize 152-ФЗ automatic data retention cleanup scheduler
@@ -5280,29 +5306,6 @@ async function startServer() {
 
   // Hydrate database from S3 timeweb.cloud if configured
   performS3Hydration().catch(err => console.error('[S3 Boot Sync Error]', err));
-
-  if (process.env.NODE_ENV === 'production') {
-    app.use(express.static(DIST_PATH));
-    app.get('*', (req, res) => {
-      const indexPath = path.join(DIST_PATH, 'index.html');
-      if (fs.existsSync(indexPath)) {
-        res.sendFile(indexPath);
-      } else {
-        res.status(404).send('Сборка приложения не найдена. Пожалуйста, выполните "npm run build".');
-      }
-    });
-  } else {
-    try {
-      const { createServer: createViteServer } = await import('vite');
-      const viteServer = await createViteServer({
-        server: { middlewareMode: true },
-        appType: 'spa'
-      });
-      app.use(viteServer.middlewares);
-    } catch (err) {
-      console.error('Не удалось запустить Vite dev server:', err);
-    }
-  }
 }
 
 startServer();
