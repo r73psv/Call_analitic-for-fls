@@ -11,11 +11,12 @@ import {
   ShieldCheck, Lock, Clock, Mic, FileText, FileSpreadsheet, Smartphone, HeartHandshake,
   CheckCircle2, XCircle, HelpCircle, Tag, Tags, Plus, X, Bookmark, Trash2,
   Scissors, Calendar, UserCheck, Sparkles, ListTodo, CheckSquare, Square, Copy, ArrowRight,
-  MessageSquareQuote, Send
+  MessageSquareQuote, Send, Target, Banknote, CalendarClock, ArrowRightCircle
 } from 'lucide-react';
-import { CallRecord, NextStepItem, ContextClarification } from '../types.js';
+import { CallRecord, NextStepItem, ContextClarification, StructuredCallSummary } from '../types.js';
 import { ReanalyzeButton } from './ReanalyzeButton.js';
 import { refineTranscriptRoles } from '../services/transcriptUtils.js';
+import { extractStructuredCallSummary } from '../services/summaryUtils.js';
 
 interface CallDetailsProps {
   call: CallRecord;
@@ -247,8 +248,19 @@ export function CallDetails({
       advice.length > 0
     );
 
+    const structured: StructuredCallSummary = call.structured_summary ||
+      call.key_facts?.structured_summary ||
+      extractStructuredCallSummary(
+        call.transcript || '',
+        summary,
+        call.key_facts,
+        undefined,
+        call.booking_status
+      );
+
     return {
       essence,
+      structured,
       retelling,
       conclusion,
       managerEvaluation: managerMatch ? managerMatch[1].trim() : '',
@@ -258,7 +270,7 @@ export function CallDetails({
       hasEvaluation,
       raw: summary
     };
-  }, [call.summary, call.operator_score, call.operator_mistakes, call.recommendations]);
+  }, [call.summary, call.transcript, call.key_facts, call.booking_status, call.structured_summary, call.operator_score, call.operator_mistakes, call.recommendations]);
 
   // Categorical Tag Management State
   const [customTagInput, setCustomTagInput] = useState('');
@@ -1252,53 +1264,177 @@ export function CallDetails({
               )}
             </div>
 
-            {/* Параметры сути обращения (услуга, дата, время, мастер) */}
-            <div className="mb-3.5 grid grid-cols-2 sm:grid-cols-4 gap-2">
-              <div className="bg-slate-50/90 border border-slate-200/70 rounded-lg p-2.5 flex items-start gap-2">
-                <div className="p-1 rounded bg-indigo-100/80 text-indigo-700 shrink-0 mt-0.5">
-                  <Scissors className="w-3.5 h-3.5" />
-                </div>
-                <div className="min-w-0">
-                  <span className="block text-[10px] font-semibold text-slate-400 uppercase leading-none mb-1">Услуга</span>
-                  <span className="text-xs font-medium text-slate-800 truncate block" title={essence.service || 'не указана'}>
-                    {essence.service || 'не указана'}
+            {/* 8 обязательных параметров структурированного резюме звонка */}
+            <div className="mb-4 bg-linear-to-br from-slate-50 via-white to-indigo-50/20 border border-slate-200/90 rounded-xl p-3.5 shadow-3xs space-y-3" id="structured-call-summary-8-items">
+              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-indigo-600 animate-pulse"></span>
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-800">
+                    Обязательные параметры резюме звонка (8 пунктов)
                   </span>
                 </div>
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
+                  Регламент качества
+                </span>
               </div>
 
-              <div className="bg-slate-50/90 border border-slate-200/70 rounded-lg p-2.5 flex items-start gap-2">
-                <div className="p-1 rounded bg-blue-100/80 text-blue-700 shrink-0 mt-0.5">
-                  <Calendar className="w-3.5 h-3.5" />
+              {/* Сетка параметров 1 - 5 */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                {/* 1. Цель обращения */}
+                <div className="bg-white/90 border border-slate-200/80 rounded-lg p-2.5 flex items-start gap-2.5 shadow-3xs sm:col-span-2 lg:col-span-3">
+                  <div className="p-1.5 rounded-md bg-purple-100/80 text-purple-700 shrink-0 mt-0.5">
+                    <Target className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">
+                      1. Цель обращения
+                    </span>
+                    <span className="text-xs font-semibold text-slate-900 leading-snug block">
+                      {summaryParts.structured.call_purpose || 'Консультация и запись на услуги салона'}
+                    </span>
+                  </div>
                 </div>
-                <div className="min-w-0">
-                  <span className="block text-[10px] font-semibold text-slate-400 uppercase leading-none mb-1">Дата</span>
-                  <span className="text-xs font-medium text-slate-800 truncate block" title={essence.date || 'не указана'}>
-                    {essence.date || 'не указана'}
-                  </span>
-                </div>
-              </div>
 
-              <div className="bg-slate-50/90 border border-slate-200/70 rounded-lg p-2.5 flex items-start gap-2">
-                <div className="p-1 rounded bg-amber-100/80 text-amber-700 shrink-0 mt-0.5">
-                  <Clock className="w-3.5 h-3.5" />
+                {/* 2. Какую услугу хотел получить гость */}
+                <div className="bg-white/90 border border-slate-200/80 rounded-lg p-2.5 flex items-start gap-2.5 shadow-3xs">
+                  <div className="p-1.5 rounded-md bg-indigo-100/80 text-indigo-700 shrink-0 mt-0.5">
+                    <Scissors className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">
+                      2. Желаемая услуга
+                    </span>
+                    <span className="text-xs font-semibold text-slate-900 block truncate" title={summaryParts.structured.requested_service}>
+                      {summaryParts.structured.requested_service || 'Не указана'}
+                    </span>
+                  </div>
                 </div>
-                <div className="min-w-0">
-                  <span className="block text-[10px] font-semibold text-slate-400 uppercase leading-none mb-1">Время</span>
-                  <span className="text-xs font-medium text-slate-800 truncate block" title={essence.time || 'не указано'}>
-                    {essence.time || 'не указано'}
-                  </span>
-                </div>
-              </div>
 
-              <div className="bg-slate-50/90 border border-slate-200/70 rounded-lg p-2.5 flex items-start gap-2">
-                <div className="p-1 rounded bg-emerald-100/80 text-emerald-700 shrink-0 mt-0.5">
-                  <UserCheck className="w-3.5 h-3.5" />
+                {/* 3. Какого мастера предложил менеджер */}
+                <div className="bg-white/90 border border-slate-200/80 rounded-lg p-2.5 flex items-start gap-2.5 shadow-3xs">
+                  <div className="p-1.5 rounded-md bg-emerald-100/80 text-emerald-700 shrink-0 mt-0.5">
+                    <UserCheck className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">
+                      3. Предложенный мастер
+                    </span>
+                    <span className={`text-xs font-bold block truncate ${
+                      summaryParts.structured.offered_master.includes('Не выбран')
+                        ? 'text-slate-500'
+                        : 'text-emerald-700'
+                    }`} title={summaryParts.structured.offered_master}>
+                      {summaryParts.structured.offered_master || 'Не выбран'}
+                    </span>
+                  </div>
                 </div>
-                <div className="min-w-0">
-                  <span className="block text-[10px] font-semibold text-slate-400 uppercase leading-none mb-1">Мастер</span>
-                  <span className="text-xs font-medium text-slate-800 truncate block" title={essence.master || 'не выбран'}>
-                    {essence.master || 'не выбран'}
-                  </span>
+
+                {/* 4. Какую стоимость озвучили */}
+                <div className="bg-white/90 border border-slate-200/80 rounded-lg p-2.5 flex items-start gap-2.5 shadow-3xs">
+                  <div className="p-1.5 rounded-md bg-amber-100/80 text-amber-700 shrink-0 mt-0.5">
+                    <Banknote className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">
+                      4. Озвученная стоимость
+                    </span>
+                    <span className="text-xs font-semibold text-slate-900 block truncate" title={summaryParts.structured.offered_price}>
+                      {summaryParts.structured.offered_price || 'Не озвучивалась'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 5. Какие даты и время предложили */}
+                <div className="bg-white/90 border border-slate-200/80 rounded-lg p-2.5 flex items-start gap-2.5 shadow-3xs sm:col-span-2 lg:col-span-3">
+                  <div className="p-1.5 rounded-md bg-blue-100/80 text-blue-700 shrink-0 mt-0.5">
+                    <CalendarClock className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">
+                      5. Предложенные дата и время
+                    </span>
+                    <span className="text-xs font-semibold text-slate-900 block" title={summaryParts.structured.offered_date_time}>
+                      {summaryParts.structured.offered_date_time || 'Не предложены'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 6. Состоялась ли запись */}
+                <div className="bg-white/90 border border-slate-200/80 rounded-lg p-2.5 flex items-start gap-2.5 shadow-3xs sm:col-span-1">
+                  <div className={`p-1.5 rounded-md shrink-0 mt-0.5 ${
+                    summaryParts.structured.booking_status_text.toLowerCase().includes('состоялась') && !summaryParts.structured.booking_status_text.toLowerCase().includes('не состоялась')
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : summaryParts.structured.booking_status_text.toLowerCase().includes('сохранена прежняя')
+                      ? 'bg-blue-100 text-blue-700'
+                      : summaryParts.structured.booking_status_text.toLowerCase().includes('не состоялась')
+                      ? 'bg-rose-100 text-rose-700'
+                      : 'bg-slate-100 text-slate-700'
+                  }`}>
+                    {summaryParts.structured.booking_status_text.toLowerCase().includes('состоялась') && !summaryParts.structured.booking_status_text.toLowerCase().includes('не состоялась') ? (
+                      <CheckCircle2 className="w-4 h-4" />
+                    ) : summaryParts.structured.booking_status_text.toLowerCase().includes('не состоялась') ? (
+                      <XCircle className="w-4 h-4" />
+                    ) : (
+                      <HelpCircle className="w-4 h-4" />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">
+                      6. Состоялась ли запись
+                    </span>
+                    <span className={`text-xs font-bold block leading-snug ${
+                      summaryParts.structured.booking_status_text.toLowerCase().includes('состоялась') && !summaryParts.structured.booking_status_text.toLowerCase().includes('не состоялась')
+                        ? 'text-emerald-700'
+                        : summaryParts.structured.booking_status_text.toLowerCase().includes('сохранена')
+                        ? 'text-blue-700'
+                        : summaryParts.structured.booking_status_text.toLowerCase().includes('не состоялась')
+                        ? 'text-rose-700'
+                        : 'text-slate-800'
+                    }`}>
+                      {summaryParts.structured.booking_status_text}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 7. Если запись не состоялась — по какой причине */}
+                <div className="bg-white/90 border border-slate-200/80 rounded-lg p-2.5 flex items-start gap-2.5 shadow-3xs sm:col-span-1 lg:col-span-2">
+                  <div className="p-1.5 rounded-md bg-amber-100/80 text-amber-700 shrink-0 mt-0.5">
+                    <AlertTriangle className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">
+                      7. Причина (если запись не состоялась)
+                    </span>
+                    <span className="text-xs font-medium text-slate-800 block leading-snug">
+                      {summaryParts.structured.unbooked_reason || 'Запись успешно состоялась'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 8. Какие дальнейшие действия необходимо выполнить менеджеру */}
+                <div className="bg-white/90 border border-indigo-200/70 rounded-lg p-2.5 flex items-start gap-2.5 shadow-3xs sm:col-span-2 lg:col-span-3">
+                  <div className="p-1.5 rounded-md bg-indigo-100/80 text-indigo-700 shrink-0 mt-0.5">
+                    <ArrowRightCircle className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="block text-[10px] font-bold text-indigo-900 uppercase tracking-wider">
+                        8. Дальнейшие действия менеджера
+                      </span>
+                      <span className="text-[10px] text-indigo-600 font-semibold">
+                        {summaryParts.structured.manager_next_steps?.length || 0} действия
+                      </span>
+                    </div>
+                    {summaryParts.structured.manager_next_steps && summaryParts.structured.manager_next_steps.length > 0 ? (
+                      <ul className="space-y-1 pl-3.5 list-disc marker:text-indigo-500 text-xs text-slate-800">
+                        {summaryParts.structured.manager_next_steps.map((step, idx) => (
+                          <li key={idx} className="leading-snug">{step}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-xs text-slate-500 italic">Специальных действий не требуется.</p>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>

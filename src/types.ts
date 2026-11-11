@@ -79,6 +79,17 @@ export interface SystemCredentials {
   customSystemPrompt?: string;
 }
 
+export interface StructuredCallSummary {
+  call_purpose: string; // 1. Цель обращения
+  requested_service: string; // 2. Какую услугу хотел получить гость
+  offered_master: string; // 3. Какого мастера предложил менеджер
+  offered_price: string; // 4. Какую стоимость озвучили
+  offered_date_time: string; // 5. Какие даты и время предложили
+  booking_status_text: string; // 6. Состоялась ли запись
+  unbooked_reason: string; // 7. Если запись не состоялась — по какой причине
+  manager_next_steps: string[]; // 8. Какие дальнейшие действия необходимо выполнить менеджеру
+}
+
 export interface KeyFacts {
   is_dispute: boolean;
   dispute_reason: string | null;
@@ -93,6 +104,17 @@ export interface KeyFacts {
   date?: string | null;
   time?: string | null;
   master?: string | null;
+
+  // 8 обязательных параметров резюме звонка (по требованию пользователя):
+  call_purpose?: string; // Цель обращения
+  requested_service?: string; // Какую услугу хотел получить гость
+  offered_master?: string; // Какого мастера предложил менеджер
+  offered_price?: string; // Какую стоимость озвучили
+  offered_date_time?: string; // Какие даты и время предложили
+  is_booked_text?: string; // Состоялась ли запись
+  unbooked_reason?: string; // Если запись не состоялась — по какой причине
+  manager_next_steps?: string[]; // Какие дальнейшие действия необходимо выполнить менеджеру
+  structured_summary?: StructuredCallSummary;
 }
 
 export interface TokenUsage {
@@ -116,6 +138,7 @@ export interface CallRecord {
   operator_comment: string;
   operator_mistakes?: string[];
   tokens_used?: TokenUsage;
+  structured_summary?: StructuredCallSummary;
   
   // Custom metadata for rich display
   client_name?: string;
@@ -400,11 +423,22 @@ export interface AnalysisResult {
     time?: string | null;
     master?: string | null;
     promises?: string[];
+    // 8 обязательных параметров резюме:
+    call_purpose?: string;
+    requested_service?: string;
+    offered_master?: string;
+    offered_price?: string;
+    offered_date_time?: string;
+    is_booked_text?: string;
+    unbooked_reason?: string;
+    manager_next_steps?: string[];
+    structured_summary?: StructuredCallSummary;
   };
   operator_score: number | null;
   operator_comment: string;
   operator_mistakes?: string[];
   recommendations: string | string[];
+  structured_summary?: StructuredCallSummary;
 }
 
 export type NotificationType = 'call_analyzed' | 'dispute_detected' | 'booking_confirmed' | 'call_failed' | 'incoming_call';

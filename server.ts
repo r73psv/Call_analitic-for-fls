@@ -12,7 +12,7 @@ import dotenv from 'dotenv';
 import { CallRecord, LogEntry, SystemConfig, ModelType, DashboardStats, KeyFacts, VkConfig, YclientsConfig, GigaChatModel, SystemNotification, NotificationType, UserRole, ContextClarification } from './src/types.js';
 import { transcribeWithRetry, fixDuplicatedTranscript, refineTranscriptRoles } from './src/services/speechkit.js';
 import { transcribeAudio } from './src/services/transcriptionService.js';
-import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat } from './src/services/gigachat.js';
+import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary } from './src/services/gigachat.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
 import { readStoreSync, writeStore } from './src/store/store.js';
 import { readConsentStoreSync, writeConsentStore } from './src/store/consent-store.js';
@@ -5235,6 +5235,39 @@ async function startServer() {
           call.summary = `${call.summary}\nРазбор работы менеджера (оценка ${call.operator_score}/10):\n- Ошибки и недочеты: ${mistakesText}\n- Советы по оптимизации: ${adviceText}`;
           fixedCount++;
         }
+        // Авто-миграция: наполнение 8 параметров структурированного резюме (structured_summary)
+        if (!call.structured_summary || !call.key_facts?.structured_summary) {
+          const salonName = getEffectiveSalonName(db.config);
+          const struct = extractStructuredCallSummary(
+            call.transcript || '',
+            call.summary || '',
+            call.key_facts || {},
+            salonName,
+            call.booking_status
+          );
+          call.structured_summary = struct;
+          if (!call.key_facts) {
+            call.key_facts = {
+              is_dispute: false,
+              dispute_reason: null,
+              promises: [],
+              tone_client: 'нейтральный',
+              tone_manager: 'нейтральный',
+              call_outcome: 'консультация'
+            };
+          }
+          call.key_facts.structured_summary = struct;
+          call.key_facts.call_purpose = struct.call_purpose;
+          call.key_facts.requested_service = struct.requested_service;
+          call.key_facts.offered_master = struct.offered_master;
+          call.key_facts.offered_price = struct.offered_price;
+          call.key_facts.offered_date_time = struct.offered_date_time;
+          call.key_facts.is_booked_text = struct.booking_status_text;
+          call.key_facts.unbooked_reason = struct.unbooked_reason;
+          call.key_facts.manager_next_steps = struct.manager_next_steps;
+          fixedCount++;
+        }
+
         if (call.call_id === 'megafon-real-84462946' && call.summary && (call.summary.includes('ближайшая доступная запись была на завтра') || call.key_facts?.call_outcome === 'запись')) {
           console.log('[Migration] Обнаружен звонок megafon-real-84462946 с устаревшим резюме. Запуск авто-обновления через GigaChat...');
           const anonymized = anonymizeTranscript(call.transcript);

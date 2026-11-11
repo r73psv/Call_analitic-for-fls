@@ -240,13 +240,34 @@ export function generateCallAuditPdf(call: CallRecord, userRole: string = 'manag
     doc.moveDown(0.6);
   }
 
-  // 6. Dialogue Summary (Краткое содержание диалога)
-  ensureSpace(70);
+  // 6. Dialogue Summary (Краткое содержание диалога и 8 обязательных параметров)
+  ensureSpace(100);
   const summaryHeaderY = doc.y;
   doc.rect(margin, summaryHeaderY, contentWidth, 18).fill('#f1f5f9');
-  doc.font('AppFontBold').fontSize(8.5).fillColor('#334155').text('КРАТКОЕ СОДЕРЖАНИЕ (РЕЗЮМЕ ОБРАЩЕНИЯ)', margin + 10, summaryHeaderY + 5);
+  doc.font('AppFontBold').fontSize(8.5).fillColor('#334155').text('РЕЗЮМЕ ЗВОНКА И 8 СТРУКТУРИРОВАННЫХ ПАРАМЕТРОВ ОБРАЩЕНИЯ', margin + 10, summaryHeaderY + 5);
 
   doc.y = summaryHeaderY + 24;
+  const struct = call.structured_summary || call.key_facts?.structured_summary;
+  if (struct) {
+    const pItems: [string, string][] = [
+      ['1. Цель обращения', struct.call_purpose || 'Консультация и запись'],
+      ['2. Желаемая услуга', struct.requested_service || 'Не указана'],
+      ['3. Предложенный мастер', struct.offered_master || 'Не выбран'],
+      ['4. Озвученная стоимость', struct.offered_price || 'Не озвучивалась'],
+      ['5. Предложенные дата и время', struct.offered_date_time || 'Не предложены'],
+      ['6. Состоялась ли запись', struct.booking_status_text || '—'],
+      ['7. Причина (если не состоялась)', struct.unbooked_reason || 'Запись состоялась'],
+      ['8. Дальнейшие действия менеджера', Array.isArray(struct.manager_next_steps) ? struct.manager_next_steps.join('; ') : '—'],
+    ];
+
+    pItems.forEach(([label, val]) => {
+      ensureSpace(16);
+      doc.font('AppFontBold').fontSize(8).fillColor('#4338ca').text(`${label}: `, margin + 10, doc.y, { continued: true });
+      doc.font('AppFont').fillColor('#1e293b').text(val, { width: contentWidth - 20, lineGap: 2 });
+    });
+    doc.moveDown(0.4);
+  }
+
   const summaryText = call.summary || 'Резюме диалога отсутствует.';
   const summaryMatch = summaryText.match(/суть обращения\s*:\s*([\s\S]*?)(?:(?:пересказ диалога|краткий пересказ(?: разговора)?|пересказ разговора)\s*:\s*([\s\S]*?))?(?:вывод\s*:\s*([\s\S]*))?$/i);
   if (summaryMatch && (summaryMatch[1] || summaryMatch[2] || summaryMatch[3])) {
