@@ -255,9 +255,13 @@ export interface AccessLogEntry {
   id?: string;
   timestamp: string;
   user: string;
+  userId?: string;
+  role?: string;
   action: 'read' | 'write' | 'export' | 'delete' | 'reanalyze' | 'consent_grant' | 'consent_revoke';
+  category?: 'password' | 'settings' | 'delete' | 'user_management' | 'call' | 'consent' | 'system' | string;
   resource: string;
   ip: string;
+  details?: string;
 }
 
 export type MegafonApiVersion = 'json_rpc' | 'rest_wcgp';

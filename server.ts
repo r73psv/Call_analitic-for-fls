@@ -20,7 +20,7 @@ import { ensureAutoConsent, getConsentForPhone, registerConsent, syncConsentsFro
 import { initCleanupScheduler, runCleanupNow } from './src/store/cleanup.js';
 import { consentsRouter } from './src/routes/consents.js';
 import { settingsRouter } from './src/routes/settings.js';
-import { authRouter, adminUsersRouter, getCurrentUserRole, getCurrentUser } from './src/routes/auth.js';
+import { authRouter, adminUsersRouter, getCurrentUserRole, getCurrentUser, logAccess } from './src/routes/auth.js';
 import { adminRouter } from './src/routes/admin.js';
 import { isYandexAuthConfigured } from './src/services/yandex-auth.js';
 import { isGigaChatConfigured } from './src/services/gigachat-auth.js';
@@ -3703,6 +3703,19 @@ app.delete('/api/calls/:id', (req, res) => {
 
   writeDb(db);
   appendLog('info', 'system', `Удалена запись звонка ${req.params.id} пользователем с ролью ${userRole}`);
+  const actingUser = getCurrentUser(req);
+  logAccess(
+    actingUser?.name || 'Администратор',
+    'delete',
+    `Удалена запись звонка ${req.params.id}`,
+    req.ip || '127.0.0.1',
+    {
+      category: 'delete',
+      details: `Удалена аудиозапись и транскрипт звонка ${req.params.id}`,
+      role: actingUser?.role || userRole || 'admin',
+      userId: actingUser?.id,
+    }
+  ).catch(() => {});
   res.json({ success: true, call_id: req.params.id });
 });
 

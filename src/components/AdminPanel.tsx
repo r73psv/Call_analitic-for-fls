@@ -6,12 +6,14 @@
 import React, { useState } from 'react';
 import { 
   Key, Users, Lock, ShieldCheck, ShieldAlert, 
-  Terminal, Sparkles, AlertCircle, RefreshCw, Trash2, Headphones
+  Terminal, Sparkles, AlertCircle, RefreshCw, Trash2, Headphones, UserCheck
 } from 'lucide-react';
 import { CredentialsSettings } from './admin/CredentialsSettings.js';
 import { UsersManagement } from './admin/UsersManagement.js';
+import { StaffPerformanceTab } from './admin/StaffPerformanceTab.js';
 import { AdminPasswordChange } from './admin/AdminPasswordChange.js';
 import { AutoCleanupSettingsCard } from './admin/AutoCleanupSettingsCard.js';
+import { ActionAuditTab } from './admin/ActionAuditTab.js';
 import { LogsViewer } from './LogsViewer.js';
 import { LogEntry } from '../types.js';
 
@@ -21,6 +23,7 @@ interface AdminPanelProps {
   adminUsername?: string;
   logs?: LogEntry[];
   onClearLogs?: () => Promise<void>;
+  onSelectCall?: (callId: string) => void;
 }
 
 export function AdminPanel({
@@ -29,8 +32,9 @@ export function AdminPanel({
   adminUsername = 'admin',
   logs = [],
   onClearLogs,
+  onSelectCall,
 }: AdminPanelProps) {
-  const [adminTab, setAdminTab] = useState<'credentials' | 'cleanup' | 'users' | 'password' | 'logs'>('credentials');
+  const [adminTab, setAdminTab] = useState<'credentials' | 'cleanup' | 'staff' | 'users' | 'audit' | 'password' | 'logs'>('credentials');
 
   return (
     <div className="space-y-6" id="admin-panel-root">
@@ -87,6 +91,20 @@ export function AdminPanel({
             <Trash2 className="w-4 h-4 text-amber-400" /> Автоочистка & S3-Архивация (152-ФЗ)
           </button>
 
+          {/* NEW TAB: Персонал (Оценки & Звонки ресепшена) */}
+          <button
+            type="button"
+            onClick={() => setAdminTab('staff')}
+            className={`px-4 py-2 rounded-xl font-bold transition-all flex items-center gap-2 ${
+              adminTab === 'staff'
+                ? 'bg-teal-600 text-white shadow-xs'
+                : 'bg-white/10 text-slate-200 hover:bg-white/20'
+            }`}
+            id="admin-tab-staff"
+          >
+            <UserCheck className="w-4 h-4 text-teal-300" /> Персонал
+          </button>
+
           <button
             type="button"
             onClick={() => setAdminTab('users')}
@@ -98,6 +116,20 @@ export function AdminPanel({
             id="admin-tab-users"
           >
             <Headphones className="w-4 h-4 text-purple-200" /> Администраторы ресепшена & Пользователи
+          </button>
+
+          {/* NEW SUB-TAB: Аудит действий */}
+          <button
+            type="button"
+            onClick={() => setAdminTab('audit')}
+            className={`px-4 py-2 rounded-xl font-bold transition-all flex items-center gap-2 ${
+              adminTab === 'audit'
+                ? 'bg-amber-600 text-white shadow-xs'
+                : 'bg-white/10 text-slate-200 hover:bg-white/20'
+            }`}
+            id="admin-tab-audit"
+          >
+            <ShieldCheck className="w-4 h-4 text-amber-300" /> Аудит действий
           </button>
 
           <button
@@ -123,7 +155,7 @@ export function AdminPanel({
             }`}
             id="admin-tab-logs"
           >
-            <Terminal className="w-4 h-4 text-emerald-300" /> Журнал аудита ({logs.length})
+            <Terminal className="w-4 h-4 text-emerald-300" /> Системные логи ({logs.length})
           </button>
         </div>
       </div>
@@ -138,8 +170,18 @@ export function AdminPanel({
           <AutoCleanupSettingsCard authToken={authToken} />
         )}
 
+        {/* NEW TAB PANEL: Персонал */}
+        {adminTab === 'staff' && (
+          <StaffPerformanceTab authToken={authToken} onSelectCall={onSelectCall} />
+        )}
+
         {adminTab === 'users' && (
           <UsersManagement authToken={authToken} currentUserId={currentUserId} />
+        )}
+
+        {/* NEW TAB PANEL: Аудит действий */}
+        {adminTab === 'audit' && (
+          <ActionAuditTab authToken={authToken} />
         )}
 
         {adminTab === 'password' && (

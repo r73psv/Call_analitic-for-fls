@@ -5,8 +5,9 @@
 
 import { Router, Request, Response } from 'express';
 import { readStore, writeStore } from '../store/store.js';
-import { requireRole } from './auth.js';
+import { requireRole, getCurrentUser, logAccess } from './auth.js';
 import { GigaChatModel } from '../types.js';
+import { getDefaultSystemPrompt } from '../services/gigachat.js';
 
 export const settingsRouter = Router();
 
@@ -16,12 +17,14 @@ settingsRouter.get('/', async (req: Request, res: Response) => {
     const store = await readStore();
     const defaultModel = store.config.default_gigachat_model || (process.env.GIGACHAT_DEFAULT_MODEL as GigaChatModel) || 'GigaChat:Lite';
     const salonName = store.config.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
+    const defaultPrompt = getDefaultSystemPrompt(salonName);
     res.json({
       salonName,
       default_gigachat_model: defaultModel,
       activeModel: defaultModel,
       encryption_active: true,
-      customSystemPrompt: store.config.customSystemPrompt || '',
+      customSystemPrompt: store.config.customSystemPrompt || store.config.credentials?.customSystemPrompt || '',
+      defaultSystemPrompt: defaultPrompt,
       yandex_speechkit_configured: !!process.env.YC_SERVICE_ACCOUNT_KEY_FILE,
       gigachat_configured: !!process.env.GIGACHAT_AUTH_KEY,
     });
@@ -30,12 +33,124 @@ settingsRouter.get('/', async (req: Request, res: Response) => {
   }
 });
 
-// PUT /api/settings
-settingsRouter.put('/', requireRole(['admin']), async (req: Request, res: Response) => {
+// GET /api/settings/system-prompt (Admin & Manager)
+settingsRouter.get('/system-prompt', requireRole(['admin', 'manager']), async (req: Request, res: Response) => {
+  try {
+    const store = await readStore();
+    const salonName = store.config.salonName || store.config.credentials?.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
+    const defaultPrompt = getDefaultSystemPrompt(salonName);
+    const customPrompt = store.config.customSystemPrompt || store.config.credentials?.customSystemPrompt || '';
+    res.json({
+      success: true,
+      salonName,
+      customSystemPrompt: customPrompt,
+      defaultSystemPrompt: defaultPrompt,
+      isCustomActive: customPrompt.trim().length > 0,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/settings/system-prompt (Admin & Manager)
+settingsRouter.post('/system-prompt', requireRole(['admin', 'manager']), async (req: Request, res: Response) => {
+  try {
+    const { customSystemPrompt } = req.body || {};
+    const store = await readStore();
+    const cleanPrompt = customSystemPrompt !== undefined ? String(customSystemPrompt).trim() : '';
+
+    store.config.customSystemPrompt = cleanPrompt;
+    if (!store.config.credentials) store.config.credentials = {};
+    store.config.credentials.customSystemPrompt = cleanPrompt;
+
+    await writeStore(store);
+
+    const currentUser = getCurrentUser(req);
+    const actorName = currentUser?.name || (currentUser?.role === 'manager' ? 'Управляющий' : 'Администратор');
+    const roleTitle = currentUser?.role === 'manager' ? 'управляющим' : 'администратором';
+
+    await logAccess(
+      actorName,
+      'write',
+      `Системный промпт ИИ (GigaChat) обновлен ${roleTitle}`,
+      req.ip || '127.0.0.1',
+      {
+        category: 'settings',
+        details: cleanPrompt ? `Пользовательский промпт сохранен (${cleanPrompt.length} симв.)` : 'Установлен пустой промпт (активирован эталонный промпт)',
+        role: currentUser?.role || 'manager',
+        userId: currentUser?.id,
+      }
+    );
+
+    const salonName = store.config.salonName || store.config.credentials?.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
+    const defaultPrompt = getDefaultSystemPrompt(salonName);
+
+    res.json({
+      success: true,
+      message: 'Системный промпт ИИ успешно сохранён и применён для анализа звонков',
+      customSystemPrompt: store.config.customSystemPrompt,
+      defaultSystemPrompt: defaultPrompt,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/settings/system-prompt/reset (Admin & Manager)
+settingsRouter.post('/system-prompt/reset', requireRole(['admin', 'manager']), async (req: Request, res: Response) => {
+  try {
+    const store = await readStore();
+    store.config.customSystemPrompt = '';
+    if (store.config.credentials) {
+      store.config.credentials.customSystemPrompt = '';
+    }
+    await writeStore(store);
+
+    const currentUser = getCurrentUser(req);
+    const actorName = currentUser?.name || (currentUser?.role === 'manager' ? 'Управляющий' : 'Администратор');
+    const roleTitle = currentUser?.role === 'manager' ? 'управляющим' : 'администратором';
+
+    await logAccess(
+      actorName,
+      'write',
+      `Системный промпт ИИ (GigaChat) сброшен к эталону по умолчанию ${roleTitle}`,
+      req.ip || '127.0.0.1',
+      {
+        category: 'settings',
+        details: 'Системный промпт сброшен к заводскому эталону',
+        role: currentUser?.role || 'manager',
+        userId: currentUser?.id,
+      }
+    );
+
+    const salonName = store.config.salonName || store.config.credentials?.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
+    const defaultPrompt = getDefaultSystemPrompt(salonName);
+
+    res.json({
+      success: true,
+      message: 'Системный промпт успешно сброшен к эталонному значению',
+      defaultSystemPrompt: defaultPrompt,
+      customSystemPrompt: '',
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/settings (Admin & Manager for prompt and salonName; only admin for default_gigachat_model)
+settingsRouter.put('/', requireRole(['admin', 'manager']), async (req: Request, res: Response) => {
   try {
     const { default_gigachat_model, salonName, customSystemPrompt } = req.body;
     if (!default_gigachat_model && salonName === undefined && customSystemPrompt === undefined) {
       return res.status(400).json({ error: 'Необходимо указать default_gigachat_model, salonName или customSystemPrompt' });
+    }
+
+    const currentUser = getCurrentUser(req);
+    const userRole = currentUser?.role || 'operator';
+
+    // Model change is restricted to admin
+    if (default_gigachat_model && userRole !== 'admin') {
+      return res.status(403).json({ error: 'Изменение модели нейросети разрешено только администратору' });
     }
 
     const store = await readStore();
@@ -65,6 +180,20 @@ settingsRouter.put('/', requireRole(['admin']), async (req: Request, res: Respon
       store.config.customSystemPrompt = cleanPrompt;
       if (!store.config.credentials) store.config.credentials = {};
       store.config.credentials.customSystemPrompt = cleanPrompt;
+
+      const actorName = currentUser?.name || (userRole === 'manager' ? 'Управляющий' : 'Администратор');
+      await logAccess(
+        actorName,
+        'write',
+        `Системный промпт ИИ изменен пользователем ${actorName} (роль: ${userRole})`,
+        req.ip || '127.0.0.1',
+        {
+          category: 'settings',
+          details: cleanPrompt ? `Обновлен текст системного промпта (${cleanPrompt.length} симв.)` : 'Сброшен к пустому значению',
+          role: userRole,
+          userId: currentUser?.id,
+        }
+      );
     }
 
     await writeStore(store);

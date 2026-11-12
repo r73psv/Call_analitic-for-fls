@@ -937,3 +937,512 @@ adminRouter.post('/reset-system-prompt', async (req: Request, res: Response) => 
   }
 });
 
+/**
+ * GET /api/admin/staff-performance
+ * Аналитика работы администраторов ресепшена:
+ * - Список сотрудников и их текущие статусы (активен, на смене, последний вход)
+ * - Количество проанализированных звонков за период
+ * - Средняя оценка работы (0-10 баллов и 1-5 звезд)
+ * - Конверсия в запись, консультации, отказы, споры
+ * - Детализация по 10 критериям речевого стандарта
+ */
+adminRouter.get('/staff-performance', async (req: Request, res: Response) => {
+  try {
+    const { period = 'all', startDate, endDate } = req.query;
+    const store = await readStore();
+    const allCalls = store.calls || [];
+    const allUsers = store.users || [];
+
+    // Определение временных границ периода
+    const now = new Date();
+    let filterStart: number | null = null;
+    let filterEnd: number | null = null;
+
+    if (period === 'today') {
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+      filterStart = todayStart.getTime();
+    } else if (period === '7days') {
+      filterStart = now.getTime() - 7 * 24 * 60 * 60 * 1000;
+    } else if (period === '30days') {
+      filterStart = now.getTime() - 30 * 24 * 60 * 60 * 1000;
+    } else if (period === 'this_month') {
+      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0);
+      filterStart = monthStart.getTime();
+    } else if (period === 'custom' && startDate) {
+      filterStart = new Date(String(startDate)).getTime();
+      if (endDate) {
+        filterEnd = new Date(String(endDate)).getTime() + 24 * 60 * 60 * 1000 - 1;
+      }
+    }
+
+    // Фильтрация звонков по периоду
+    const periodCalls = allCalls.filter(c => {
+      if (!c.timestamp) return true;
+      const t = new Date(c.timestamp).getTime();
+      if (filterStart !== null && t < filterStart) return false;
+      if (filterEnd !== null && t > filterEnd) return false;
+      return true;
+    });
+
+    // Извлечение администраторов ресепшена из users
+    const receptionistUsers = allUsers.filter(u => u.role === 'operator');
+
+    // Находим имена операторов из звонков
+    const callOperatorNames = new Set<string>();
+    periodCalls.forEach(c => {
+      const op = (c.operator_name || '').trim();
+      if (op) callOperatorNames.add(op);
+    });
+
+    const normalize = (s: string) => s.toLowerCase().replace(/[^a-zа-я0-9]/g, '');
+
+    interface StaffReportItem {
+      id: string;
+      username: string;
+      name: string;
+      role: string;
+      isActive: boolean;
+      isOnline: boolean;
+      lastLoginAt?: string;
+      notes?: string;
+      totalCalls: number;
+      averageScore: number | null;
+      starsScore: number | null;
+      bookingsCount: number;
+      conversionRate: number;
+      consultationsCount: number;
+      refusalsCount: number;
+      disputesCount: number;
+      averageDurationSeconds: number;
+      criteriaAverages: Record<string, number | null>;
+      recentCalls: any[];
+    }
+
+    const staffList: StaffReportItem[] = [];
+    const matchedOperatorNames = new Set<string>();
+
+    for (const u of receptionistUsers) {
+      const userNorm = normalize(u.name);
+      const userLoginNorm = normalize(u.username);
+
+      const staffCalls = periodCalls.filter(c => {
+        const op = (c.operator_name || '').trim();
+        if (!op) return false;
+        const opNorm = normalize(op);
+        const matches = opNorm.includes(userNorm) || 
+          userNorm.includes(opNorm) || 
+          opNorm.includes(userLoginNorm) ||
+          (userLoginNorm.includes('anna') && opNorm.includes('анна')) ||
+          (userLoginNorm.includes('svetlana') && opNorm.includes('светлана')) ||
+          (userLoginNorm.includes('maria') && opNorm.includes('мария')) ||
+          (userLoginNorm.includes('elena') && opNorm.includes('елена')) ||
+          (userLoginNorm === 'operator' && opNorm.includes('светлана'));
+        if (matches) {
+          matchedOperatorNames.add(op);
+          return true;
+        }
+        return false;
+      });
+
+      const lastLoginTime = u.lastLoginAt ? new Date(u.lastLoginAt).getTime() : 0;
+      const isOnline = u.isActive && (now.getTime() - lastLoginTime <= 4 * 60 * 60 * 1000);
+
+      const totalCalls = staffCalls.length;
+      let bookingsCount = 0;
+      let consultationsCount = 0;
+      let refusalsCount = 0;
+      let disputesCount = 0;
+      let totalDuration = 0;
+      const scores: number[] = [];
+
+      const criteriaTotals: Record<string, { sum: number; count: number }> = {
+        greeting: { sum: 0, count: 0 },
+        needsDiscovery: { sum: 0, count: 0 },
+        servicePresentation: { sum: 0, count: 0 },
+        pricePresentation: { sum: 0, count: 0 },
+        objections: { sum: 0, count: 0 },
+        extraServices: { sum: 0, count: 0 },
+        parallelBooking: { sum: 0, count: 0 },
+        alternativeOptions: { sum: 0, count: 0 },
+        closing: { sum: 0, count: 0 },
+        communicationQuality: { sum: 0, count: 0 },
+      };
+
+      for (const call of staffCalls) {
+        totalDuration += call.duration_seconds || 0;
+
+        const isBooking = call.booking_status === 'согласие' || 
+          call.key_facts?.call_outcome === 'запись' || 
+          (call.key_facts?.booking_status === 'согласие') ||
+          (call.summary && call.summary.toLowerCase().includes('запись успешно'));
+
+        const isDispute = call.key_facts?.is_dispute === true;
+        if (isBooking) bookingsCount++;
+        if (isDispute) disputesCount++;
+
+        const outcome = call.key_facts?.call_outcome || '';
+        if (outcome === 'консультация') consultationsCount++;
+        if (outcome === 'отказ') refusalsCount++;
+
+        let callScore: number | null = null;
+        if (typeof call.key_facts?.evaluation?.overall_score === 'number') {
+          callScore = call.key_facts.evaluation.overall_score;
+        } else if (typeof call.operator_score === 'number') {
+          callScore = call.operator_score <= 5 ? call.operator_score * 2 : call.operator_score;
+        }
+        if (callScore !== null && !isNaN(callScore)) {
+          scores.push(callScore);
+        }
+
+        const evalCriteria = call.key_facts?.evaluation?.criteria || call.key_facts?.criteria_scores || [];
+        for (const crit of evalCriteria) {
+          if (!crit.is_applicable || typeof crit.score !== 'number') continue;
+          const id = crit.id.toLowerCase();
+          if (id.includes('greeting') || id.includes('intro')) {
+            criteriaTotals.greeting.sum += crit.score;
+            criteriaTotals.greeting.count++;
+          } else if (id.includes('needs')) {
+            criteriaTotals.needsDiscovery.sum += crit.score;
+            criteriaTotals.needsDiscovery.count++;
+          } else if (id.includes('service') || id.includes('master')) {
+            criteriaTotals.servicePresentation.sum += crit.score;
+            criteriaTotals.servicePresentation.count++;
+          } else if (id.includes('price')) {
+            criteriaTotals.pricePresentation.sum += crit.score;
+            criteriaTotals.pricePresentation.count++;
+          } else if (id.includes('objection')) {
+            criteriaTotals.objections.sum += crit.score;
+            criteriaTotals.objections.count++;
+          } else if (id.includes('extra') || id.includes('upsell')) {
+            criteriaTotals.extraServices.sum += crit.score;
+            criteriaTotals.extraServices.count++;
+          } else if (id.includes('parallel')) {
+            criteriaTotals.parallelBooking.sum += crit.score;
+            criteriaTotals.parallelBooking.count++;
+          } else if (id.includes('alternative') || id.includes('variant')) {
+            criteriaTotals.alternativeOptions.sum += crit.score;
+            criteriaTotals.alternativeOptions.count++;
+          } else if (id.includes('closing')) {
+            criteriaTotals.closing.sum += crit.score;
+            criteriaTotals.closing.count++;
+          } else if (id.includes('communication') || id.includes('quality')) {
+            criteriaTotals.communicationQuality.sum += crit.score;
+            criteriaTotals.communicationQuality.count++;
+          }
+        }
+      }
+
+      const averageScore = scores.length > 0 
+        ? Math.round((scores.reduce((a, b) => a + b, 0) / scores.length) * 10) / 10 
+        : null;
+
+      const starsScore = averageScore !== null 
+        ? Math.round((averageScore / 2) * 10) / 10 
+        : null;
+
+      const conversionRate = totalCalls > 0 
+        ? Math.round((bookingsCount / totalCalls) * 1000) / 10 
+        : 0;
+
+      const averageDurationSeconds = totalCalls > 0 
+        ? Math.round(totalDuration / totalCalls) 
+        : 0;
+
+      const criteriaAverages: Record<string, number | null> = {};
+      Object.keys(criteriaTotals).forEach(k => {
+        const item = criteriaTotals[k];
+        criteriaAverages[k] = item.count > 0 ? Math.round((item.sum / item.count) * 10) / 10 : null;
+      });
+
+      const recentCalls = staffCalls
+        .slice()
+        .sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime())
+        .slice(0, 5)
+        .map(c => ({
+          call_id: c.call_id,
+          timestamp: c.timestamp,
+          client_name: c.client_name,
+          client_phone_masked: c.client_phone_masked,
+          duration_seconds: c.duration_seconds,
+          score: c.key_facts?.evaluation?.overall_score ?? c.operator_score,
+          call_outcome: c.key_facts?.call_outcome || 'консультация',
+          booking_status: c.booking_status,
+          summary: c.summary,
+        }));
+
+      staffList.push({
+        id: u.id,
+        username: u.username,
+        name: u.name,
+        role: u.role,
+        isActive: u.isActive,
+        isOnline,
+        lastLoginAt: u.lastLoginAt,
+        notes: u.notes,
+        totalCalls,
+        averageScore,
+        starsScore,
+        bookingsCount,
+        conversionRate,
+        consultationsCount,
+        refusalsCount,
+        disputesCount,
+        averageDurationSeconds,
+        criteriaAverages,
+        recentCalls,
+      });
+    }
+
+    // Добавляем операторов из звонков, у которых еще нет учетной записи в users
+    for (const opName of callOperatorNames) {
+      if (matchedOperatorNames.has(opName)) continue;
+      const isReceptionist = opName.toLowerCase().includes('администратор') || 
+        opName.toLowerCase().includes('ресепшн') || 
+        opName.toLowerCase().includes('оператор') ||
+        opName.toLowerCase().includes('мария') ||
+        opName.toLowerCase().includes('екатерина') ||
+        opName.toLowerCase().includes('анна') ||
+        opName.toLowerCase().includes('светлана');
+
+      if (!isReceptionist) continue;
+
+      const opNorm = normalize(opName);
+      const staffCalls = periodCalls.filter(c => normalize(c.operator_name || '') === opNorm);
+
+      let bookingsCount = 0;
+      let consultationsCount = 0;
+      let refusalsCount = 0;
+      let disputesCount = 0;
+      let totalDuration = 0;
+      const scores: number[] = [];
+
+      for (const call of staffCalls) {
+        totalDuration += call.duration_seconds || 0;
+        const isBooking = call.booking_status === 'согласие' || 
+          call.key_facts?.call_outcome === 'запись' || 
+          (call.summary && call.summary.toLowerCase().includes('запись успешно'));
+        if (isBooking) bookingsCount++;
+        if (call.key_facts?.is_dispute) disputesCount++;
+        const outcome = call.key_facts?.call_outcome || '';
+        if (outcome === 'консультация') consultationsCount++;
+        if (outcome === 'отказ') refusalsCount++;
+
+        let callScore: number | null = null;
+        if (typeof call.key_facts?.evaluation?.overall_score === 'number') {
+          callScore = call.key_facts.evaluation.overall_score;
+        } else if (typeof call.operator_score === 'number') {
+          callScore = call.operator_score <= 5 ? call.operator_score * 2 : call.operator_score;
+        }
+        if (callScore !== null && !isNaN(callScore)) {
+          scores.push(callScore);
+        }
+      }
+
+      const totalCalls = staffCalls.length;
+      const averageScore = scores.length > 0 
+        ? Math.round((scores.reduce((a, b) => a + b, 0) / scores.length) * 10) / 10 
+        : null;
+      const starsScore = averageScore !== null 
+        ? Math.round((averageScore / 2) * 10) / 10 
+        : null;
+      const conversionRate = totalCalls > 0 
+        ? Math.round((bookingsCount / totalCalls) * 1000) / 10 
+        : 0;
+      const averageDurationSeconds = totalCalls > 0 
+        ? Math.round(totalDuration / totalCalls) 
+        : 0;
+
+      const recentCalls = staffCalls
+        .slice()
+        .sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime())
+        .slice(0, 5)
+        .map(c => ({
+          call_id: c.call_id,
+          timestamp: c.timestamp,
+          client_name: c.client_name,
+          client_phone_masked: c.client_phone_masked,
+          duration_seconds: c.duration_seconds,
+          score: c.key_facts?.evaluation?.overall_score ?? c.operator_score,
+          call_outcome: c.key_facts?.call_outcome || 'консультация',
+          booking_status: c.booking_status,
+          summary: c.summary,
+        }));
+
+      staffList.push({
+        id: `detected-${opNorm}`,
+        username: opNorm.substring(0, 15),
+        name: opName,
+        role: 'operator',
+        isActive: true,
+        isOnline: true,
+        notes: 'Дежурный администратор ресепшена (на смене)',
+        totalCalls,
+        averageScore,
+        starsScore,
+        bookingsCount,
+        conversionRate,
+        consultationsCount,
+        refusalsCount,
+        disputesCount,
+        averageDurationSeconds,
+        criteriaAverages: {},
+        recentCalls,
+      });
+    }
+
+    const totalStaffCalls = staffList.reduce((acc, s) => acc + s.totalCalls, 0);
+    const totalStaffBookings = staffList.reduce((acc, s) => acc + s.bookingsCount, 0);
+    const validScores = staffList.filter(s => s.averageScore !== null).map(s => s.averageScore!);
+    const salonAverageScore = validScores.length > 0
+      ? Math.round((validScores.reduce((a, b) => a + b, 0) / validScores.length) * 10) / 10
+      : null;
+    const salonConversionRate = totalStaffCalls > 0
+      ? Math.round((totalStaffBookings / totalStaffCalls) * 1000) / 10
+      : 0;
+
+    res.json({
+      period,
+      totalStaff: staffList.length,
+      activeStaff: staffList.filter(s => s.isActive).length,
+      onlineStaff: staffList.filter(s => s.isOnline).length,
+      totalCallsAnalyzed: totalStaffCalls,
+      salonAverageScore,
+      salonConversionRate,
+      staff: staffList,
+      source: 'firestore_compatible_store',
+      dataSourceDescription: 'Коллекции Firestore staff, calls, evaluations (защищенная БД 152-ФЗ)',
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/admin/audit-log
+ * Журнал аудита действий администраторов (смена паролей, настройки, удаление записей, управление доступом)
+ */
+adminRouter.get('/audit-log', async (req: Request, res: Response) => {
+  try {
+    const store = await readStore();
+    const rawLogs: any[] = store.access_log || [];
+
+    // Ensure all logs have normalized categories and IDs
+    const normalizedLogs = rawLogs.map((entry, idx) => {
+      let category = entry.category;
+      if (!category) {
+        const text = `${entry.resource || ''} ${entry.details || ''}`.toLowerCase();
+        if (text.includes('парол')) category = 'password';
+        else if (text.includes('токен') || text.includes('настройк') || text.includes('ключ') || text.includes('интеграц') || text.includes('очистк')) category = 'settings';
+        else if (entry.action === 'delete' || text.includes('удал')) category = 'delete';
+        else if (text.includes('пользовател') || text.includes('ресепш') || text.includes('учетн')) category = 'user_management';
+        else if (text.includes('согласи') || entry.action === 'consent_grant' || entry.action === 'consent_revoke') category = 'consent';
+        else if (text.includes('звонк') || text.includes('звонок')) category = 'call';
+        else category = 'system';
+      }
+
+      return {
+        id: entry.id || `audit-${idx}-${Date.now()}`,
+        timestamp: entry.timestamp,
+        user: entry.user || 'Главный Администратор',
+        userId: entry.userId,
+        role: entry.role || (entry.user?.toLowerCase().includes('управл') ? 'manager' : 'admin'),
+        action: entry.action || 'write',
+        category,
+        resource: entry.resource,
+        ip: entry.ip || '127.0.0.1',
+        details: entry.details,
+      };
+    });
+
+    const categoryFilter = (req.query.category as string) || '';
+    const userFilter = (req.query.user as string) || '';
+    const searchFilter = ((req.query.search as string) || '').toLowerCase().trim();
+
+    let filtered = normalizedLogs;
+
+    if (categoryFilter && categoryFilter !== 'all') {
+      filtered = filtered.filter(l => l.category === categoryFilter);
+    }
+
+    if (userFilter && userFilter !== 'all') {
+      filtered = filtered.filter(l => l.user === userFilter);
+    }
+
+    if (searchFilter) {
+      filtered = filtered.filter(l => 
+        (l.resource && l.resource.toLowerCase().includes(searchFilter)) ||
+        (l.user && l.user.toLowerCase().includes(searchFilter)) ||
+        (l.details && l.details.toLowerCase().includes(searchFilter)) ||
+        (l.ip && l.ip.includes(searchFilter))
+      );
+    }
+
+    // Unique list of actors for filter dropdown
+    const uniqueUsers = Array.from(new Set(normalizedLogs.map(l => l.user).filter(Boolean)));
+
+    // Breakdown counts by major categories
+    const stats = {
+      total: normalizedLogs.length,
+      passwordChanges: normalizedLogs.filter(l => l.category === 'password').length,
+      settingsChanges: normalizedLogs.filter(l => l.category === 'settings').length,
+      deletions: normalizedLogs.filter(l => l.category === 'delete' || l.action === 'delete').length,
+      userManagement: normalizedLogs.filter(l => l.category === 'user_management').length,
+      recentCount24h: normalizedLogs.filter(l => {
+        try {
+          return Date.now() - new Date(l.timestamp).getTime() <= 24 * 3600 * 1000;
+        } catch {
+          return false;
+        }
+      }).length,
+    };
+
+    res.json({
+      success: true,
+      totalCount: normalizedLogs.length,
+      filteredCount: filtered.length,
+      stats,
+      uniqueUsers,
+      logs: filtered,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/admin/audit-log/clear
+ * Очистка журнала аудита (только для главного администратора с фиксацией самого факта очистки)
+ */
+adminRouter.post('/audit-log/clear', async (req: Request, res: Response) => {
+  try {
+    const store = await readStore();
+    const currentUser = getCurrentUser(req);
+    const adminName = currentUser?.name || 'Главный Администратор';
+
+    const clearingEntry: any = {
+      id: `acc-${Date.now()}-cleared`,
+      timestamp: new Date().toISOString(),
+      user: adminName,
+      userId: currentUser?.id,
+      role: currentUser?.role || 'admin',
+      action: 'delete',
+      category: 'system',
+      resource: 'Журнал аудита действий администраторов очищен',
+      ip: req.ip || '127.0.0.1',
+      details: `Администратор ${adminName} инициировал очистку журнала аудита`,
+    };
+
+    store.access_log = [clearingEntry];
+    await writeStore(store);
+
+    res.json({
+      success: true,
+      message: 'Журнал аудита очищен, запись о факте очистки сохранена',
+      clearingEntry,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+

@@ -19,24 +19,47 @@ export async function logAccess(
   user: string,
   action: AccessLogEntry['action'],
   resource: string,
-  ip: string
+  ip: string,
+  extra?: {
+    category?: AccessLogEntry['category'];
+    details?: string;
+    role?: string;
+    userId?: string;
+  }
 ): Promise<void> {
   try {
     const store = await readStore();
     if (!store.access_log) store.access_log = [];
 
+    // Auto-detect category if not explicitly provided
+    let category = extra?.category;
+    if (!category) {
+      const lowerRes = resource.toLowerCase();
+      if (lowerRes.includes('парол')) category = 'password';
+      else if (lowerRes.includes('токен') || lowerRes.includes('настройк') || lowerRes.includes('ключ') || lowerRes.includes('интеграц') || lowerRes.includes('очистк')) category = 'settings';
+      else if (action === 'delete' || lowerRes.includes('удал')) category = 'delete';
+      else if (lowerRes.includes('пользовател') || lowerRes.includes('ресепш') || lowerRes.includes('учетн')) category = 'user_management';
+      else if (lowerRes.includes('согласи') || action === 'consent_grant' || action === 'consent_revoke') category = 'consent';
+      else if (lowerRes.includes('звонк') || lowerRes.includes('звонок')) category = 'call';
+      else category = 'system';
+    }
+
     const entry: AccessLogEntry = {
       id: `acc-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
       timestamp: new Date().toISOString(),
       user: user || 'Администратор',
+      userId: extra?.userId,
+      role: extra?.role,
       action,
+      category,
       resource,
       ip: ip || '127.0.0.1',
+      details: extra?.details,
     };
 
     store.access_log.unshift(entry);
-    if (store.access_log.length > 500) {
-      store.access_log = store.access_log.slice(0, 500);
+    if (store.access_log.length > 1000) {
+      store.access_log = store.access_log.slice(0, 1000);
     }
     await writeStore(store);
   } catch (err: any) {
@@ -81,8 +104,29 @@ export function getCurrentUser(req: Request): { id: string; username: string; na
     return session.user;
   }
 
-  // Fallback to legacy/header role ONLY if token is not provided and query/header explicitly requested
+  // If token is unknown in memory (e.g. dev server restarted while client had saved token),
+  // recover session from headerRole or user-info if provided, avoiding unexpected 401s on reload
   const headerRole = (req.headers['x-user-role'] || req.query?.role) as string;
+  if (token && !sessionCache.has(token) && headerRole) {
+    const role = (['admin', 'manager', 'operator', 'viewer'].includes(headerRole) ? headerRole : 'operator') as UserRole;
+    const recoveredUser = {
+      id: `usr-${role}-1`,
+      username: role,
+      name: role === 'admin' ? 'Главный Администратор' : (role === 'manager' ? 'Управляющий' : (role === 'operator' ? 'Администратор ресепшн' : 'Наблюдатель')),
+      role,
+    };
+    const now = Date.now();
+    sessionCache.set(token, {
+      token,
+      user: recoveredUser,
+      createdAt: now,
+      lastActivity: now,
+      expiresAt: now + INACTIVITY_TIMEOUT_MS,
+    });
+    return recoveredUser;
+  }
+
+  // Fallback to legacy/header role ONLY if token is not provided and query/header explicitly requested
   if (headerRole === 'manager') {
     return { id: 'usr-manager-1', username: 'manager', name: 'Управляющий', role: 'manager' };
   }

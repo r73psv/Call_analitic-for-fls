@@ -28,6 +28,7 @@ import { EditSalonNameModal } from './components/EditSalonNameModal.js';
 import { UserGuide } from './components/UserGuide.js';
 import { PendingTasksList } from './components/PendingTasksList.js';
 import { NextStepsReminderToast } from './components/NextStepsReminderToast.js';
+import { SystemPromptEditor } from './components/SystemPromptEditor.js';
 
 import { CallRecord, DashboardStats, SystemConfig, LogEntry, GigaChatModel, UserRole } from './types.js';
 import { deduplicateCalls } from './services/callUtils.js';
@@ -44,7 +45,7 @@ async function safeFetchJson<T = any>(
   options?: RequestInit, 
   authToken?: string | null,
   userRole?: UserRole,
-  retries = 3, 
+  retries = 6, 
   delay = 1000
 ): Promise<T> {
   const headers: Record<string, string> = {
@@ -77,7 +78,8 @@ async function safeFetchJson<T = any>(
           throw new Error(errorData.error || 'Требуется авторизация в системе (401)');
         }
         if (response.status >= 500 && attempt < retries) {
-          await new Promise(resolve => setTimeout(resolve, delay));
+          const waitTime = Math.min(delay * attempt, 3500);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
           continue;
         }
         const errorData = await response.json().catch(() => ({}));
@@ -86,7 +88,8 @@ async function safeFetchJson<T = any>(
       const text = await response.text();
       if (text.trim().startsWith('<')) {
         if (attempt < retries) {
-          await new Promise(resolve => setTimeout(resolve, delay));
+          const waitTime = Math.min(delay * attempt, 3500);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
           continue;
         }
         throw new Error('Сервер вернул HTML вместо JSON. Идет перезапуск.');
@@ -94,7 +97,9 @@ async function safeFetchJson<T = any>(
       return JSON.parse(text) as T;
     } catch (err: any) {
       if (attempt < retries) {
-        await new Promise(resolve => setTimeout(resolve, delay));
+        // Wait with backoff before next attempt (especially on TypeError: Failed to fetch during boot)
+        const waitTime = Math.min(delay * attempt, 3500);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
         continue;
       }
       throw err;
@@ -121,7 +126,7 @@ export default function App() {
   const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'list' | 'details' | 'tasks' | 'stats' | 'consents' | 'admin' | 'guide'>('list');
+  const [activeTab, setActiveTab] = useState<'list' | 'details' | 'tasks' | 'stats' | 'consents' | 'prompt' | 'admin' | 'guide'>('list');
 
   // Count of calls with uncompleted next steps
   const pendingNextStepsCount = React.useMemo(() => {
@@ -230,7 +235,10 @@ export default function App() {
       setError(null);
     } catch (err: any) {
       console.error('Data loading error:', err);
-      setError(err.message || 'Ошибка подключения к серверу');
+      // Only set visible error if we don't have calls loaded yet, or during explicit (non-silent) manual fetch
+      if (!silent || calls.length === 0) {
+        setError(err.message || 'Ошибка подключения к серверу');
+      }
     } finally {
       setLoading(false);
     }
@@ -784,6 +792,22 @@ export default function App() {
               <ShieldCheck className="w-4 h-4" /> Реестр согласий (152-ФЗ)
             </button>
 
+            {/* Системный промпт ИИ (доступно управляющему и администратору) */}
+            {(userRole === 'admin' || userRole === 'manager') && (
+              <button
+                id="tab-btn-prompt"
+                onClick={() => setActiveTab('prompt')}
+                className={`px-5 py-3.5 text-xs font-bold border-b-2 transition-all flex items-center gap-2 ${
+                  activeTab === 'prompt'
+                    ? 'border-indigo-600 text-indigo-700 bg-white'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <Sparkles className="w-4 h-4 text-indigo-600" />
+                <span>Системный промпт ИИ</span>
+              </button>
+            )}
+
             <button
               id="tab-btn-guide"
               onClick={() => setActiveTab('guide')}
@@ -934,6 +958,32 @@ export default function App() {
                 </motion.div>
               )}
 
+              {/* System Prompt Editor for Managers and Admins */}
+              {activeTab === 'prompt' && (userRole === 'admin' || userRole === 'manager') && (
+                <motion.div
+                  key="tab-workspace-prompt"
+                  initial={{ opacity: 0, y: 5 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -5 }}
+                  transition={{ duration: 0.12 }}
+                  className="min-h-[500px]"
+                >
+                  <SystemPromptEditor
+                    authToken={authToken}
+                    userRole={userRole}
+                    salonName={currentSalonName}
+                    onPromptSaved={(newPrompt) => {
+                      if (config) {
+                        setConfig({
+                          ...config,
+                          customSystemPrompt: newPrompt,
+                        });
+                      }
+                    }}
+                  />
+                </motion.div>
+              )}
+
               {activeTab === 'guide' && (
                 <motion.div
                   key="tab-workspace-guide"
@@ -962,6 +1012,10 @@ export default function App() {
                     adminUsername={currentUser?.username}
                     logs={logs}
                     onClearLogs={handleClearLogs}
+                    onSelectCall={(callId) => {
+                      setSelectedCallId(callId);
+                      setActiveTab('details');
+                    }}
                   />
                 </motion.div>
               )}
