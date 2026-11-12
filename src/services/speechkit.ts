@@ -1,12 +1,6 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
- *
- * Версия с патчами по ТЗ п. 3.1–3.4 (критический приоритет):
- *  3.1 — динамическое определение audioEncoding в асинхронном запросе;
- *  3.2 — склейка текстов чанков через '\n' (сохранение ролевой разметки);
- *  3.3 — увеличенный таймаут поллинга операции (≈10 минут) + лог operationId;
- *  3.4 — различение ошибки API и пустого результата в синхронном методе.
  */
 
 import axios from 'axios';
@@ -19,14 +13,16 @@ import {
   calculateTextSimilarity,
   splitConjoinedLines,
   refineTranscriptRoles,
-  fixDuplicatedTranscript
+  fixDuplicatedTranscript,
+  shouldMergeDuplicate
 } from './transcriptUtils.js';
 
 export {
   calculateTextSimilarity,
   splitConjoinedLines,
   refineTranscriptRoles,
-  fixDuplicatedTranscript
+  fixDuplicatedTranscript,
+  shouldMergeDuplicate
 };
 
 interface TranscriptSegment {
@@ -37,35 +33,40 @@ interface TranscriptSegment {
 }
 
 /**
- * ПАТЧ 3.1. Соответствие формата аудио (по magic bytes) и параметров кодека
- * для асинхронного API SpeechKit v2.
- * sampleRateHertz указывается ТОЛЬКО для LPCM — для MP3/OGG параметр не задаётся
- * по официальной документации Yandex Cloud.
+ * П. 3.3 ТЗ: параметры поллинга операции асинхронного распознавания.
+ * 60 итераций по 3 с (3 мин) было недостаточно для записей 15-30 минут:
+ * операция оставалась активной, клиент отваливался по таймауту.
+ * 200 итераций x 3 с = ~10 минут.
  */
-const ASYNC_ENCODING_MAP: Record<
-  'mp3' | 'oggopus' | 'lpcm',
-  { audioEncoding: string; sampleRateHertz?: number }
-> = {
-  mp3: { audioEncoding: 'MP3' },
-  oggopus: { audioEncoding: 'OGG_OPUS' },
-  lpcm: { audioEncoding: 'LPCM', sampleRateHertz: 8000 },
+const POLL_INTERVAL_MS = 3000;
+const MAX_POLL_ITERATIONS = 200;
+
+/**
+ * П. 3.4 ТЗ: частота дискретизации для LPCM (телефония 8 кГц).
+ * Вынесена в константу для возможности переопределения.
+ */
+const LPCM_SAMPLE_RATE_HERTZ = 8000;
+
+/**
+ * П. 3.9 ТЗ: соответствие канала и роли в стерео-записи.
+ * Зависит от настроек АТС: у некоторых конфигураций первый канал — клиент.
+ * Для инверсии достаточно поменять значения местами.
+ */
+const CHANNEL_ROLE_MAP: Record<number, 'manager' | 'client'> = {
+  1: 'manager',
+  2: 'client',
 };
 
 /**
- * Частота дискретизации для LPCM (телефония АТС — 8 кГц).
- * Переопределяется переменной окружения LPCM_SAMPLE_RATE_HERTZ, если записи
- * поступают с иной частотой.
+ * П. 3.6 ТЗ: параметры нарезки по паузам.
+ * Граница 24-секундного окна смещается к ближайшей паузе в диапазоне
+ * [-CUT_POINT_BACK_TOLERANCE, +CUT_POINT_FORWARD_TOLERANCE] секунд.
  */
-const LPCM_SAMPLE_RATE = Number(process.env.LPCM_SAMPLE_RATE_HERTZ) || 8000;
-
-/**
- * ПАТЧ 3.3. Параметры поллинга операции асинхронного распознавания.
- * 60 итераций (3 мин) не хватало для записей 15–30 минут — операция оставалась
- * активной, а клиент отваливался по таймауту. Теперь лимит ≈ 10 минут,
- * а при таймауте в лог печатается operationId для ручной проверки операции.
- */
-const POLL_INTERVAL_MS = 3000;
-const MAX_POLL_ITERATIONS = 200; // 200 × 3 с ≈ 10 минут
+const SEGMENT_SECONDS = 24;
+const CUT_POINT_BACK_TOLERANCE = 4;
+const CUT_POINT_FORWARD_TOLERANCE = 3;
+const SILENCE_NOISE_DB = '-30dB';
+const SILENCE_MIN_DURATION = '0.6';
 
 /**
  * Определение формата аудио по первым сигнатурным байтам (magic numbers)
@@ -80,18 +81,6 @@ export function detectAudioFormat(buffer: Buffer): 'mp3' | 'oggopus' | 'lpcm' {
   // WAV: RIFF
   if (buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46) return 'lpcm';
   return 'mp3';
-}
-
-/**
- * Расширение файла в Object Storage по фактическому формату аудио (ПАТЧ 3.1:
- * ранее объект всегда сохранялся с расширением .mp3 независимо от содержимого)
- */
-function getExtensionForFormat(format: 'mp3' | 'oggopus' | 'lpcm'): string {
-  switch (format) {
-    case 'oggopus': return 'ogg';
-    case 'lpcm': return 'wav';
-    default: return 'mp3';
-  }
 }
 
 /**
@@ -138,24 +127,114 @@ export function convertToOggOpus(buffer: Buffer): Buffer | null {
 }
 
 /**
- * Разбиение аудиозаписи на 24-секундные сегменты в формате Ogg Opus.
- * Синхронный метод Yandex SpeechKit имеет строгое ограничение (длительность аудио строго менее 30 секунд).
+ * П. 3.6 ТЗ: детекция пауз в аудио через ffmpeg silencedetect.
+ * Возвращает список времён (в секундах) середин обнаруженных пауз.
  */
-export function splitAudioIntoOpusChunks(buffer: Buffer, chunkSeconds: number = 24): Buffer[] {
-  const chunks: Buffer[] = [];
+export function detectSilenceMidpoints(buffer: Buffer): number[] {
   try {
-    const tempDir = path.join(process.cwd(), 'temp', `chunks-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const tempDir = path.join(process.cwd(), 'temp');
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+    const inPath = path.join(tempDir, `sil-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`);
+    fs.writeFileSync(inPath, buffer);
+    const out = execSync(
+      `ffmpeg -i "${inPath}" -af silencedetect=noise=${SILENCE_NOISE_DB}:d=${SILENCE_MIN_DURATION} -f null - 2>&1`,
+      { timeout: 30000 }
+    );
+    try { fs.unlinkSync(inPath); } catch {}
+
+    const text = out.toString();
+    const starts: number[] = [];
+    const ends: number[] = [];
+    const startRe = /silence_start:\s*([0-9.]+)/g;
+    const endRe = /silence_end:\s*([0-9.]+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = startRe.exec(text)) !== null) starts.push(parseFloat(m[1]));
+    while ((m = endRe.exec(text)) !== null) ends.push(parseFloat(m[1]));
+
+    const midpoints: number[] = [];
+    for (let i = 0; i < starts.length; i++) {
+      // Если silence_end не найден (тишина до конца файла) — берём начало паузы
+      const end = ends[i] !== undefined ? ends[i] : starts[i];
+      midpoints.push((starts[i] + end) / 2);
+    }
+    return midpoints;
+  } catch (err: any) {
+    console.warn('[SpeechKit] Ошибка детекции пауз (silencedetect):', err.message);
+    return [];
+  }
+}
+
+/**
+ * П. 3.6 ТЗ: вычисление точек резки по паузам.
+ * Для каждой границы кратной SEGMENT_SECONDS ищет ближайшую паузу
+ * в допустимом диапазоне смещения. Если пауз нет — граница остаётся
+ * на таймерной позиции (fallback на прежнее поведение).
+ */
+export function computeSilenceCutPoints(midpoints: number[], totalDuration: number): number[] {
+  const cutPoints: number[] = [];
+  let boundary = SEGMENT_SECONDS;
+  while (boundary < totalDuration - SEGMENT_SECONDS * 0.5) {
+    const lo = boundary - CUT_POINT_BACK_TOLERANCE;
+    const hi = boundary + CUT_POINT_FORWARD_TOLERANCE;
+    const candidates = midpoints.filter(mp => mp >= lo && mp <= hi);
+    if (candidates.length > 0) {
+      const nearest = candidates.reduce((best, cur) =>
+        Math.abs(cur - boundary) < Math.abs(best - boundary) ? cur : best
+      );
+      cutPoints.push(nearest);
+    } else {
+      cutPoints.push(boundary); // Fallback: резать по таймеру
+    }
+    boundary += SEGMENT_SECONDS;
+  }
+  return cutPoints;
+}
+
+/**
+ * Разбиение аудиозаписи на сегменты в формате Ogg Opus.
+ * П. 3.6 ТЗ: резка выполняется по паузам (ближайшая тишина к границе
+ * 24-секундного окна), чтобы не обрывать слова на стыках сегментов.
+ * Fallback: если детекция пауз недоступна или пауз не найдено —
+ * прежняя нарезка строго по таймеру (-segment_time).
+ */
+export function splitAudioIntoOpusChunks(buffer: Buffer, chunkSeconds: number = SEGMENT_SECONDS): Buffer[] {
+  const chunks: Buffer[] = [];
+  let tempDir = '';
+  try {
+    tempDir = path.join(process.cwd(), 'temp', `chunks-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     fs.mkdirSync(tempDir, { recursive: true });
     const inPath = path.join(tempDir, 'source.tmp');
     fs.writeFileSync(inPath, buffer);
-    execSync(`ffmpeg -y -i "${inPath}" -vn -c:a libopus -b:a 24k -ar 16000 -ac 1 -f segment -segment_time ${chunkSeconds} "${path.join(tempDir, 'chunk_%03d.ogg')}" 2>/dev/null`, { timeout: 60000 });
+
+    const duration = getAudioDuration(buffer);
+    const midpoints = duration > 0 ? detectSilenceMidpoints(buffer) : [];
+    const cutPoints = midpoints.length > 0 ? computeSilenceCutPoints(midpoints, duration) : [];
+    const timesArg = cutPoints.length > 0 ? cutPoints.join(',') : null;
+
+    if (timesArg) {
+      console.log(`[SpeechKit] Нарезка по паузам: ${cutPoints.length} границ (${timesArg})`);
+      execSync(
+        `ffmpeg -y -i "${inPath}" -vn -c:a libopus -b:a 24k -ar 16000 -ac 1 -f segment -segment_times ${timesArg} "${path.join(tempDir, 'chunk_%03d.ogg')}" 2>/dev/null`,
+        { timeout: 60000 }
+      );
+    } else {
+      console.log('[SpeechKit] Нарезка по таймеру (паузы не найдены или детекция недоступна)');
+      execSync(
+        `ffmpeg -y -i "${inPath}" -vn -c:a libopus -b:a 24k -ar 16000 -ac 1 -f segment -segment_time ${chunkSeconds} "${path.join(tempDir, 'chunk_%03d.ogg')}" 2>/dev/null`,
+        { timeout: 60000 }
+      );
+    }
+
     const files = fs.readdirSync(tempDir).filter(f => f.startsWith('chunk_') && f.endsWith('.ogg')).sort();
     for (const f of files) {
       chunks.push(fs.readFileSync(path.join(tempDir, f)));
     }
-    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
   } catch (err: any) {
     console.warn('[SpeechKit] Ошибка ffmpeg разбиения аудио на Opus-сегменты:', err.message);
+  } finally {
+    if (tempDir) {
+      try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+    }
   }
   return chunks;
 }
@@ -192,6 +271,8 @@ export function isDualMonoChunks(chunks: any[]): boolean {
 
 /**
  * Интеллектуальное разделение ролей (Менеджер / Клиент) для моно-диалога
+ * П. 3.5 ТЗ: дедупликация через shouldMergeDuplicate — короткие фразы
+ * (менее 3 слов) не считаются дубликатами и никогда не удаляются.
  */
 export function diarizeMonoUtterances(
   utterances: { text: string; startTime?: number; endTime?: number }[]
@@ -206,7 +287,8 @@ export function diarizeMonoUtterances(
 
     if (cleanList.length > 0) {
       const prev = cleanList[cleanList.length - 1];
-      if (calculateTextSimilarity(rawText, prev) > 0.65) {
+      // П. 3.5 ТЗ: короткие повторы ("Да", "Да") сохраняются
+      if (shouldMergeDuplicate(rawText, prev)) {
         // Оставляем более полную фразу
         if (rawText.length > prev.length) {
           cleanList[cleanList.length - 1] = rawText;
@@ -282,11 +364,14 @@ export function buildTranscript(chunks: any[]): string {
     return diarizeMonoUtterances(monoChunks);
   }
 
-  // Истинный стерео-режим (2 независимых аудиоканала: 1 = менеджер, 2 = клиент)
+  // Истинный стерео-режим (2 независимых аудиоканала)
+  // П. 3.9 ТЗ: соответствие канала и роли берётся из CHANNEL_ROLE_MAP,
+  // а не зашивается в код — у разных настроек АТС первый канал может
+  // принадлежать клиенту.
   const segments: TranscriptSegment[] = chunks
     .map(chunk => {
       const channel = Number(chunk.channelTag);
-      const speaker: 'manager' | 'client' = channel === 1 ? 'manager' : 'client';
+      const speaker: 'manager' | 'client' = CHANNEL_ROLE_MAP[channel] || 'client';
       const text = chunk.alternatives?.[0]?.text || '';
       const times = getChunkTimes(chunk);
       return { speaker, text: text.trim(), startTime: times.startTime, endTime: times.endTime };
@@ -337,6 +422,23 @@ export async function transcribeWithRetry(audioBuffer: Buffer): Promise<string> 
   );
 }
 
+/**
+ * П. 3.1 ТЗ: карта соответствия формата аудио и спецификации асинхронного запроса.
+ * sampleRateHertz задаётся только для LPCM (по документации SpeechKit для MP3/OGG
+ * параметр не указывается).
+ */
+const ASYNC_ENCODING_MAP = {
+  mp3: { audioEncoding: 'MP3' } as Record<string, unknown>,
+  oggopus: { audioEncoding: 'OGG_OPUS' } as Record<string, unknown>,
+  lpcm: { audioEncoding: 'LPCM', sampleRateHertz: LPCM_SAMPLE_RATE_HERTZ } as Record<string, unknown>,
+};
+
+const AUDIO_FORMAT_EXTENSIONS = {
+  mp3: '.mp3',
+  oggopus: '.ogg',
+  lpcm: '.wav',
+} as const;
+
 export async function transcribeWithSpeechKit(audioBuffer: Buffer): Promise<string> {
   if (!isYandexAuthConfigured()) {
     throw new Error('Yandex Cloud SpeechKit не настроен: укажите API-ключ (YC_API_KEY) или загрузите authorized_key.json в разделе настроек системы');
@@ -344,21 +446,21 @@ export async function transcribeWithSpeechKit(audioBuffer: Buffer): Promise<stri
 
   const authHeader = await getYandexAuthHeader();
   const bucket = getYandexStorageBucket();
+  const audioFormat = detectAudioFormat(audioBuffer);
   const duration = getAudioDuration(audioBuffer);
-  console.log(`[SpeechKit] Подготовка аудиозаписи (${Math.round(audioBuffer.length / 1024)} КБ, ${duration.toFixed(1)} сек.)`);
+  console.log(`[SpeechKit] Подготовка аудиозаписи (${Math.round(audioBuffer.length / 1024)} КБ, ${duration.toFixed(1)} сек., формат: ${audioFormat})`);
 
   // 1. Если настроен Yandex Object Storage и запись длиннее 25 секунд, используем асинхронное двухканальное распознавание
   if (bucket && duration >= 25) {
-    // ПАТЧ 3.1: формат определяется по magic bytes, а не зашит константой
-    const detected = detectAudioFormat(audioBuffer);
     try {
-      const objectKey = `audio/${Date.now()}-${Math.random().toString(36).slice(2)}.${getExtensionForFormat(detected)}`;
+      // П. 3.1 ТЗ: расширение объекта соответствует фактическому формату,
+      // а не всегда .mp3
+      const objectKey = `audio/${Date.now()}-${Math.random().toString(36).slice(2)}${AUDIO_FORMAT_EXTENSIONS[audioFormat]}`;
       await uploadToObjectStorage(audioBuffer, objectKey);
       const audioUri = `https://storage.yandexcloud.net/${bucket}/${objectKey}`;
 
       try {
-        // ПАТЧ 3.1: передаём буфер в асинхронный запрос для определения кодека
-        return await requestAndPollLongRunning(audioUri, authHeader, audioBuffer);
+        return await requestAndPollLongRunning(audioUri, authHeader, audioFormat);
       } finally {
         await deleteFromObjectStorage(objectKey).catch(err =>
           console.error('[Object Storage] Ошибка удаления временного аудиофайла:', err.message)
@@ -387,9 +489,10 @@ export async function transcribeWithSpeechKit(audioBuffer: Buffer): Promise<stri
   }
 
   // 3. Для длинных разговоров (или если прямое распознавание не сработало):
-  // Разделение на 24-секундные Opus-сегменты (гарантирует отсутствие ошибки 400 "audio duration should be less than 30s")
-  console.log(`[SpeechKit] Разделение аудио (${duration.toFixed(1)} сек.) на 24-секундные Opus-сегменты для пошагового распознавания...`);
-  const chunks = splitAudioIntoOpusChunks(audioBuffer, 24);
+  // Разделение на сегменты (п. 3.6 ТЗ: по паузам, с fallback на таймер),
+  // гарантирует отсутствие ошибки 400 "audio duration should be less than 30s"
+  console.log(`[SpeechKit] Разделение аудио (${duration.toFixed(1)} сек.) на сегменты для пошагового распознавания...`);
+  const chunks = splitAudioIntoOpusChunks(audioBuffer);
   if (chunks.length > 0) {
     const chunkTexts: string[] = [];
     for (let i = 0; i < chunks.length; i++) {
@@ -403,9 +506,9 @@ export async function transcribeWithSpeechKit(audioBuffer: Buffer): Promise<stri
       }
     }
     if (chunkTexts.length > 0) {
-      // ПАТЧ 3.2: разделитель — перевод строки. refineTranscriptRoles работает
-      // построчно (split('\n')), склейка пробелом превращала весь текст в одну
-      // строку и обнуляла ролевую разметку на длинных записях.
+      // П. 3.2 ТЗ: склейка ТОЛЬКО через '\n'. Прежний join(' ') давал одну
+      // гигантскую строку без переносов, из-за чего refineTranscriptRoles
+      // (работающий построчно) назначал весь текст одной роли.
       const fullText = chunkTexts.join('\n');
       console.log(`[SpeechKit] Успешно расшифровано ${chunkTexts.length} сегментов (${fullText.length} симв.)`);
       return refineTranscriptRoles(fullText);
@@ -418,33 +521,26 @@ export async function transcribeWithSpeechKit(audioBuffer: Buffer): Promise<stri
 async function requestAndPollLongRunning(
   audioUri: string,
   authHeader: string,
-  audioBuffer: Buffer
+  audioFormat: 'mp3' | 'oggopus' | 'lpcm' = 'mp3'
 ): Promise<string> {
   const folderId = getYandexFolderId();
   // Важно: в API v2 параметр folderId передается внутри JSON тела config.folderId, а не в query string!
   const url = 'https://transcribe.api.cloud.yandex.net/speech/stt/v2/longRunningRecognize';
 
-  // ПАТЧ 3.1: кодек и частота дискретизации выбираются по фактическому формату записи.
-  // Ранее audioEncoding был жёстко задан 'MP3', из-за чего не-MP3 записи (WAV/OGG)
-  // приводили к ошибке 400 или некорректному распознаванию.
-  const detected = detectAudioFormat(audioBuffer);
-  const codec = ASYNC_ENCODING_MAP[detected];
+  console.log(`[SpeechKit] Отправка запроса на асинхронное распознавание: ${audioUri} (формат: ${audioFormat})`);
 
+  // П. 3.1 ТЗ: кодек определяется по фактическому формату (magic bytes),
+  // а не зашивается константой 'MP3'. Для LPCM обязателен sampleRateHertz.
   const specification: Record<string, unknown> = {
     languageCode: 'ru-RU',
     model: 'general',
-    audioEncoding: codec.audioEncoding,
     profanityFilter: false,
     literatureText: true,
     rawResults: false,
+    ...(ASYNC_ENCODING_MAP[audioFormat] || ASYNC_ENCODING_MAP.mp3),
   };
-  // sampleRateHertz обязателен и указывается только для LPCM
-  if (codec.sampleRateHertz) {
-    specification.sampleRateHertz = LPCM_SAMPLE_RATE;
-  }
 
-  console.log(`[SpeechKit] Отправка запроса на асинхронное распознавание: ${audioUri} (формат: ${detected}, кодек: ${codec.audioEncoding})`);
-
+  // Для формата MP3 параметр sampleRateHertz не указывается по официальной документации Yandex Cloud
   const startRes = await axios.post(
     url,
     {
@@ -472,8 +568,8 @@ async function requestAndPollLongRunning(
 
   console.log(`[SpeechKit] Запущена операция распознавания: ${operationId}. Ожидание результатов...`);
 
-  // ПАТЧ 3.3: увеличенный лимит поллинга (≈10 минут вместо 3) — длинные записи
-  // обрабатываются дольше, а прерывание поллинга не отменяет операцию и не возвращает деньги.
+  // П. 3.3 ТЗ: поллинг до MAX_POLL_ITERATIONS (~10 минут) — записи
+  // длительностью 15-30 минут SpeechKit обрабатывает дольше 3 минут.
   for (let i = 0; i < MAX_POLL_ITERATIONS; i++) {
     await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
     const poll = await axios.get(
@@ -492,10 +588,13 @@ async function requestAndPollLongRunning(
     }
   }
 
-  // ПАТЧ 3.3: при таймауте сохраняем operationId в логе — операция может быть
-  // ещё активна, и её можно допросить вручную.
-  console.error(`[SpeechKit] Таймаут поллинга операции ${operationId}. Операция может быть ещё активна — проверьте её статус вручную: https://operation.api.cloud.yandex.net/operations/${operationId}`);
-  throw new Error(`SpeechKit: таймаут поллинга операции ${operationId} (10 минут)`);
+  // П. 3.3 ТЗ: при таймауте печатаем operationId, чтобы операцию можно
+  // было допросить вручную (деньги за обработку не пропадают).
+  console.error(
+    `[SpeechKit] Таймаут поллинга операции (${(MAX_POLL_ITERATIONS * POLL_INTERVAL_MS / 1000 / 60).toFixed(0)} мин). ` +
+    `Операция ${operationId} может быть ещё активна: https://operation.api.cloud.yandex.net/operations/${operationId}`
+  );
+  throw new Error(`SpeechKit: таймаут поллинга операции распознавания (${MAX_POLL_ITERATIONS * POLL_INTERVAL_MS / 1000} секунд). operationId: ${operationId}`);
 }
 
 async function transcribeSynchronous(
@@ -526,20 +625,22 @@ async function transcribeSynchronous(
     }
   );
 
-  // ПАТЧ 3.4: различаем три исхода. Ранее отсутствие result молча возвращало
-  // пустую строку, и верхний уровень интерпретировал любую ошибку API как «тишину»,
-  // из-за чего реальные сбои не попадали в логи.
+  // П. 3.4 ТЗ: различаем три исхода.
+  // 1. Ошибка API в теле 200-ответа — НЕ маскируется под "тишину",
+  //    логируется и пробрасывается как ошибка.
+  // 2. Пустой результат без ошибки — возвращается пустая строка с
+  //    предупреждением в лог (возможна тишина в записи).
+  // 3. Валидный текст — возвращается как есть.
   if (syncRes.data?.error) {
-    const errDetail = JSON.stringify(syncRes.data.error);
-    console.error(`[SpeechKit] Ошибка API в ответе синхронного распознавания: ${errDetail}`);
-    throw new Error(`SpeechKit API вернул ошибку: ${errDetail}`);
+    const apiError = `SpeechKit вернул ошибку в ответе синхронного распознавания: ${JSON.stringify(syncRes.data.error)}`;
+    console.error(`[SpeechKit] ${apiError}`);
+    throw new Error(apiError);
   }
 
   if (syncRes.data?.result) {
     return syncRes.data.result;
   }
 
-  // Нет ни result, ни error — только такой случай считаем неразборчивой речью/тишиной
-  console.warn('[SpeechKit] Синхронное распознавание: в ответе нет результата и нет ошибки (вероятно, тишина или неразборчивая речь)');
+  console.warn('[SpeechKit] Синхронное распознавание вернуло пустой результат (без ошибки в ответе). Возможна тишина в записи.');
   return '';
 }
