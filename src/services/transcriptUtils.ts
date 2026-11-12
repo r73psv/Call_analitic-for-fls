@@ -3,6 +3,22 @@
  */
 
 /**
+ * П. 3.5 ТЗ: минимальное число слов фразы, ниже которого фраза не считается дубликатом.
+ * Защищает легитимные короткие повторы ("Да", "Да") от удаления дедупликацией.
+ */
+export const SHORT_PHRASE_MIN_WORDS = 3;
+
+/**
+ * П. 3.5 ТЗ: определяет, нужно ли считать две фразы дубликатами.
+ * Фразы короче SHORT_PHRASE_MIN_WORDS слов никогда не склеиваются.
+ */
+export function shouldMergeDuplicate(candidate: string, previous: string, similarityThreshold = 0.65): boolean {
+  const wordCount = (candidate || '').trim().split(/\s+/).filter(Boolean).length;
+  if (wordCount < SHORT_PHRASE_MIN_WORDS) return false;
+  return calculateTextSimilarity(candidate, previous) > similarityThreshold;
+}
+
+/**
  * Вычисляет коэффициент сходства двух строк (на основе биграмм / коэффициента Соренсена-Дайса)
  */
 export function calculateTextSimilarity(s1: string, s2: string): number {
@@ -83,10 +99,106 @@ export function splitConjoinedLines(lines: string[]): { text: string; forcedSpea
 }
 
 /**
+ * П. 3.8 ТЗ: конфигурация маркеров ролей (бренд-маркеры салона, имена сотрудников).
+ * Вынесена из тела refineTranscriptRoles: новые маркеры добавляются без правки логики.
+ */
+export interface RoleMarkersConfig {
+  /** Фразы, однозначно указывающие на менеджера салона */
+  manager: string[];
+  /** Фразы, однозначно указывающие на клиента */
+  client: string[];
+}
+
+/**
+ * Значения по умолчанию — сохраняют прежнее поведение функции.
+ * Имена сотрудников ("кристина") перечислены здесь для совместимости;
+ * при смене администратора достаточно отредактировать словарь, а не код.
+ */
+export const DEFAULT_ROLE_MARKERS: RoleMarkersConfig = {
+  manager: [
+    'менеджер',
+    'администратор',
+    'салон красоты',
+    'fashion look',
+    'фешен лук',
+    'fls',
+    'лик 28',
+    'слушаю вас',
+    'чем могу помочь',
+    'подскажите ваш номер',
+    'подскажите номер',
+    'минуточку, сейчас',
+    'минуточку',
+    'сейчас посмотрим',
+    '1 минуту',
+    'одну минуту',
+    'подобрать вам',
+    'подберу вам',
+    'подберу мастер',
+    'топ эксперт',
+    'эксперт категории',
+    'хотели бы попробовать',
+    'к другому хотели бы',
+    'могу предложить',
+    'предложу запись',
+    'у мастера нерабочий день',
+    'у мастера выходной',
+    'мастер не работает',
+    'подряд подряд записи',
+    'у надежды по 30 минут',
+    'будем рады в следующий раз',
+    'будем рады вас видеть',
+    'выполняем оформление',
+    'записи немножко с запасом',
+    'единственное время свободное',
+    'хорошего дня вам, кристина',
+    'хорошего дня вам',
+  ],
+  client: [
+    'а подскажите',
+    'у кого я стригла',
+    'стригла челку',
+    'хотела бы',
+    'хочу записаться',
+    'хочется записаться',
+    'чикнула прям 5 минут',
+    'чикнула',
+    'мне нельзя вот',
+    'впихнуть пораньше',
+    'не будет в городе',
+    'в москве',
+    'верно.',
+    'верно',
+    'да, верно',
+    'угу взаимно',
+    'взаимно все хорошего дня',
+  ],
+};
+
+/**
+ * П. 3.7 ТЗ: реплики, начинающиеся с этих слов, — продолжение мысли предыдущего
+ * спикера (встречные вставки, союзы-связки). Роль предыдущей реплики сохраняется,
+ * переключение не выполняется.
+ */
+const CONTINUATION_PREFIXES = ['и ', 'ну ', 'то есть ', 'да и ', 'а ', 'но '];
+
+/**
  * Интеллектуально нормализует и распределяет реплики по ролям Менеджер / Клиент,
  * исправляя ошибочные метки и склеенные предложения.
+ *
+ * П. 3.7 ТЗ: метки спикеров (0/1, 1/2) в SpeechKit УСЛОВНЫ — они не привязаны к
+ * ролям. Данная эвристика не претендует на 100% точность: возможны инверсии меток
+ * и короткие встречные реплики разных людей. Финальная выверка ролей выполняется
+ * на верхнем уровне (или вручную).
+ *
+ * Правило: реплики с разными метками спикера НИКОГДА не склеиваются, даже если
+ * грамматически стыкуются. Склейка допустима только внутри одной метки при
+ * связности высказывания.
  */
-export function refineTranscriptRoles(raw: string): string {
+export function refineTranscriptRoles(
+  raw: string,
+  markers: RoleMarkersConfig = DEFAULT_ROLE_MARKERS
+): string {
   if (!raw || typeof raw !== 'string') return raw;
 
   const rawLines = raw.split('\n').map(l => l.trim()).filter(Boolean);
@@ -95,6 +207,9 @@ export function refineTranscriptRoles(raw: string): string {
   const splitItems = splitConjoinedLines(rawLines);
   const result: string[] = [];
   let prevSpeaker: 'Менеджер' | 'Клиент' = 'Клиент';
+
+  const managerMarkers = markers.manager.map(m => m.toLowerCase());
+  const clientMarkers = markers.client.map(m => m.toLowerCase());
 
   for (let i = 0; i < splitItems.length; i++) {
     const item = splitItems[i];
@@ -107,67 +222,22 @@ export function refineTranscriptRoles(raw: string): string {
       continue;
     }
 
-    // Маркеры администратора / менеджера салона красоты
+    // П. 3.7 ТЗ: фраза — продолжение мысли предыдущего спикера.
+    // Начинается со строчной буквы или союза-связки => роль не переключаем.
+    const startsLowercase = /^[а-яёa-z]/.test(phrase);
+    const startsWithConnector = CONTINUATION_PREFIXES.some(p => lower.startsWith(p));
+    if (i > 0 && (startsLowercase || startsWithConnector)) {
+      result.push(`${prevSpeaker}: ${phrase}`);
+      continue;
+    }
+
     const isManager =
       (i === 0 && (lower.includes('добрый') || lower.includes('слушаю') || lower.includes('салон') || lower.includes('здравствуйте'))) ||
-      lower.includes('менеджер') ||
-      lower.includes('администратор') ||
-      lower.includes('салон красоты') ||
-      lower.includes('fashion look') ||
-      lower.includes('фешен лук') ||
-      lower.includes('fls') ||
-      lower.includes('лик 28') ||
-      lower.includes('слушаю вас') ||
-      lower.includes('чем могу помочь') ||
-      lower.includes('подскажите ваш номер') ||
-      lower.includes('подскажите номер') ||
-      lower.includes('минуточку, сейчас') ||
-      lower.includes('минуточку') ||
-      lower.includes('сейчас посмотрим') ||
-      lower.includes('1 минуту') ||
-      lower.includes('одну минуту') ||
-      lower.includes('подобрать вам') ||
-      lower.includes('подберу вам') ||
-      lower.includes('подберу мастер') ||
-      lower.includes('топ эксперт') ||
-      lower.includes('эксперт категории') ||
-      lower.includes('хотели бы попробовать') ||
-      lower.includes('к другому хотели бы') ||
-      lower.includes('могу предложить') ||
-      lower.includes('предложу запись') ||
-      lower.includes('у мастера нерабочий день') ||
-      lower.includes('у мастера выходной') ||
-      lower.includes('мастер не работает') ||
-      lower.includes('подряд подряд записи') ||
-      lower.includes('у надежды по 30 минут') ||
-      lower.includes('будем рады в следующий раз') ||
-      lower.includes('будем рады вас видеть') ||
-      lower.includes('выполняем оформление') ||
-      lower.includes('записи немножко с запасом') ||
-      lower.includes('единственное время свободное') ||
-      lower.includes('хорошего дня вам, кристина') ||
-      lower.includes('хорошего дня вам');
+      managerMarkers.some(m => lower.includes(m));
 
-    // Маркеры клиента
     const isClient =
-      lower.includes('а подскажите') ||
-      lower.includes('у кого я стригла') ||
-      lower.includes('стригла челку') ||
-      lower.includes('хотела бы') ||
-      lower.includes('хочу записаться') ||
-      lower.includes('хочется записаться') ||
-      lower.includes('чикнула прям 5 минут') ||
-      lower.includes('чикнула') ||
-      lower.includes('мне нельзя вот') ||
-      lower.includes('впихнуть пораньше') ||
-      lower.includes('не будет в городе') ||
-      lower.includes('в москве') ||
-      /^\+?[0-9\s-]{3,}$/.test(phrase) || // Цифры номера телефона
-      lower === 'верно.' ||
-      lower === 'верно' ||
-      lower === 'да, верно' ||
-      lower.includes('угу взаимно') ||
-      lower.includes('взаимно все хорошего дня');
+      clientMarkers.some(m => lower.includes(m)) ||
+      /^\+?[0-9\s-]{3,}$/.test(phrase); // Цифры номера телефона
 
     let currentSpeaker: 'Менеджер' | 'Клиент';
     if (isManager && !isClient) {
@@ -186,9 +256,13 @@ export function refineTranscriptRoles(raw: string): string {
 }
 
 /**
- * Исправляет стенограммы с дублированными репликами и нормализует разделение ролей
+ * Исправляет стенограммы с дублированными репликами и нормализует разделение ролей.
+ * П. 3.5 ТЗ: короткие фразы (< SHORT_PHRASE_MIN_WORDS слов) не склеиваются никогда.
  */
-export function fixDuplicatedTranscript(raw: string): string {
+export function fixDuplicatedTranscript(
+  raw: string,
+  markers: RoleMarkersConfig = DEFAULT_ROLE_MARKERS
+): string {
   if (!raw || typeof raw !== 'string') return raw;
   const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
   if (lines.length < 2) return raw;
@@ -201,7 +275,9 @@ export function fixDuplicatedTranscript(raw: string): string {
 
     if (cleanPhrases.length > 0) {
       const prev = cleanPhrases[cleanPhrases.length - 1];
-      if (calculateTextSimilarity(textOnly, prev) > 0.65) {
+      // П. 3.5 ТЗ: решение о склейке через shouldMergeDuplicate
+      // (короткие фразы не считаются дубликатами)
+      if (shouldMergeDuplicate(textOnly, prev)) {
         if (textOnly.length > prev.length) {
           cleanPhrases[cleanPhrases.length - 1] = textOnly;
         }
@@ -212,5 +288,5 @@ export function fixDuplicatedTranscript(raw: string): string {
   }
 
   // Применяем ролевую диаризацию и сплит склеенных предложений
-  return refineTranscriptRoles(cleanPhrases.join('\n'));
+  return refineTranscriptRoles(cleanPhrases.join('\n'), markers);
 }
