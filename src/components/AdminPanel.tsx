@@ -6,7 +6,7 @@
 import React, { useState } from 'react';
 import { 
   Key, Users, Lock, ShieldCheck, ShieldAlert, 
-  Terminal, Sparkles, AlertCircle, RefreshCw, Trash2
+  Terminal, Sparkles, AlertCircle, RefreshCw, Trash2, Headphones
 } from 'lucide-react';
 import { CredentialsSettings } from './admin/CredentialsSettings.js';
 import { UsersManagement } from './admin/UsersManagement.js';
@@ -92,12 +92,12 @@ export function AdminPanel({
             onClick={() => setAdminTab('users')}
             className={`px-4 py-2 rounded-xl font-bold transition-all flex items-center gap-2 ${
               adminTab === 'users'
-                ? 'bg-emerald-600 text-white shadow-xs'
+                ? 'bg-purple-600 text-white shadow-xs'
                 : 'bg-white/10 text-slate-200 hover:bg-white/20'
             }`}
             id="admin-tab-users"
           >
-            <Users className="w-4 h-4" /> Управление доступом и пользователями
+            <Headphones className="w-4 h-4 text-purple-200" /> Администраторы ресепшена & Пользователи
           </button>
 
           <button

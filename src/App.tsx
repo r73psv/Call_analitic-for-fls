@@ -67,6 +67,15 @@ async function safeFetchJson<T = any>(
     try {
       const response = await fetch(url, reqOptions);
       if (!response.ok) {
+        if (response.status === 401) {
+          const errorData = await response.json().catch(() => ({}));
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('callqa-session-expired', {
+              detail: errorData.error || 'Сессия завершена из-за отсутствия активности более 4 часов (152-ФЗ)'
+            }));
+          }
+          throw new Error(errorData.error || 'Требуется авторизация в системе (401)');
+        }
         if (response.status >= 500 && attempt < retries) {
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
@@ -127,26 +136,49 @@ export default function App() {
     }).length;
   }, [calls]);
 
+  // 4 hours inactivity threshold (152-ФЗ)
+  const INACTIVITY_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+
+  // Session expired notice (shown on login screen)
+  const [sessionExpiredNotice, setSessionExpiredNotice] = useState<string | null>(() => {
+    const token = localStorage.getItem('callqa_auth_token');
+    const lastActive = localStorage.getItem('callqa_last_activity');
+    if (token && lastActive) {
+      if (Date.now() - Number(lastActive) >= 4 * 60 * 60 * 1000) {
+        localStorage.removeItem('callqa_auth_token');
+        localStorage.removeItem('callqa_user_info');
+        localStorage.removeItem('callqa_user_role');
+        return 'Сессия завершена из-за отсутствия активности в течение 4 часов (152-ФЗ). Пожалуйста, выполните вход.';
+      }
+    }
+    return null;
+  });
+
   // Auth & Session state
   const [authToken, setAuthToken] = useState<string | null>(() => {
+    const lastActive = localStorage.getItem('callqa_last_activity');
+    if (lastActive && Date.now() - Number(lastActive) >= 4 * 60 * 60 * 1000) {
+      return null;
+    }
     return localStorage.getItem('callqa_auth_token') || null;
   });
 
   const [currentUser, setCurrentUser] = useState<CurrentUserInfo | null>(() => {
     try {
+      const lastActive = localStorage.getItem('callqa_last_activity');
+      if (lastActive && Date.now() - Number(lastActive) >= 4 * 60 * 60 * 1000) {
+        return null;
+      }
+      const token = localStorage.getItem('callqa_auth_token');
+      if (!token) return null;
       const saved = localStorage.getItem('callqa_user_info');
       if (saved) return JSON.parse(saved);
     } catch {}
-    // Default fallback to admin for first launch
-    return {
-      id: 'usr-admin-1',
-      username: 'admin',
-      name: 'Главный Администратор',
-      role: 'admin',
-    };
+    // Mandatory authentication: never default to admin without an authenticated session
+    return null;
   });
 
-  const userRole: UserRole = currentUser?.role || 'admin';
+  const userRole: UserRole = currentUser?.role || 'operator';
 
   // Admin gate protection
   const [isAdminUnlocked, setIsAdminUnlocked] = useState(false);
@@ -176,6 +208,7 @@ export default function App() {
 
   // Synchronize state with backend APIs
   const loadData = async (silent = false) => {
+    if (!authToken || !currentUser) return;
     if (!silent) setLoading(true);
     try {
       const [callsData, statsData, configData, logsData] = await Promise.all([
@@ -204,26 +237,15 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (!authToken || !currentUser) return;
     loadData();
     const timer = setInterval(() => {
       loadData(true);
     }, 10000);
     return () => clearInterval(timer);
-  }, [selectedCallId, userRole, authToken]);
+  }, [selectedCallId, userRole, authToken, currentUser]);
 
-  const handleLoginSuccess = (user: CurrentUserInfo, token: string) => {
-    setCurrentUser(user);
-    setAuthToken(token);
-    setIsLoginModalOpen(false);
-    // Reset admin lock on user change
-    setIsAdminUnlocked(false);
-    if (user.role !== 'admin' && activeTab === 'admin') {
-      setActiveTab('list');
-    }
-    loadData();
-  };
-
-  const handleLogout = async () => {
+  const handleLogout = async (reason?: string) => {
     try {
       if (authToken) {
         await fetch('/api/auth/logout', {
@@ -235,11 +257,101 @@ export default function App() {
     localStorage.removeItem('callqa_auth_token');
     localStorage.removeItem('callqa_user_info');
     localStorage.removeItem('callqa_user_role');
+    localStorage.removeItem('callqa_last_activity');
     setAuthToken(null);
     setCurrentUser(null);
     setIsAdminUnlocked(false);
     setIsLoginModalOpen(true);
+    if (reason && typeof reason === 'string') {
+      setSessionExpiredNotice(reason);
+    }
   };
+
+  const handleLoginSuccess = (user: CurrentUserInfo, token: string) => {
+    setCurrentUser(user);
+    setAuthToken(token);
+    setIsLoginModalOpen(false);
+    setSessionExpiredNotice(null);
+    localStorage.setItem('callqa_last_activity', String(Date.now()));
+    // Reset admin lock on user change
+    setIsAdminUnlocked(false);
+    if (user.role !== 'admin' && activeTab === 'admin') {
+      setActiveTab('list');
+    }
+    loadData();
+  };
+
+  // 4-Hour Inactivity Tracker (152-ФЗ)
+  useEffect(() => {
+    if (!authToken || !currentUser) return;
+
+    if (!localStorage.getItem('callqa_last_activity')) {
+      localStorage.setItem('callqa_last_activity', String(Date.now()));
+    }
+
+    let lastRecorded = Date.now();
+
+    const handleUserActivity = () => {
+      const now = Date.now();
+      // Throttle localStorage updates to at most once per 10 seconds
+      if (now - lastRecorded > 10000) {
+        lastRecorded = now;
+        localStorage.setItem('callqa_last_activity', String(now));
+      }
+    };
+
+    const activityEvents = ['mousedown', 'mousemove', 'keydown', 'scroll', 'touchstart', 'click'];
+    activityEvents.forEach(evt => window.addEventListener(evt, handleUserActivity, { passive: true }));
+
+    // Periodic check every 30 seconds for 4 hours inactivity timeout
+    const interval = setInterval(() => {
+      const stored = localStorage.getItem('callqa_last_activity');
+      const lastActive = stored ? Number(stored) : lastRecorded;
+      const elapsed = Date.now() - lastActive;
+
+      if (elapsed >= INACTIVITY_TIMEOUT_MS) {
+        handleLogout('Сессия завершена автоматически из-за отсутствия активности в течение 4 часов (152-ФЗ). Пожалуйста, выполните вход снова.');
+      }
+    }, 30000);
+
+    return () => {
+      activityEvents.forEach(evt => window.removeEventListener(evt, handleUserActivity));
+      clearInterval(interval);
+    };
+  }, [authToken, currentUser]);
+
+  // Session verification on mount & listener for 401 events
+  useEffect(() => {
+    const handleExpiredEvent = (e: any) => {
+      handleLogout(e.detail || 'Сессия завершена из-за отсутствия активности (4 часа)');
+    };
+    window.addEventListener('callqa-session-expired', handleExpiredEvent);
+
+    if (authToken) {
+      fetch('/api/auth/me', {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      })
+      .then(res => {
+        if (!res.ok) throw new Error('Unauthorized');
+        return res.json();
+      })
+      .then(data => {
+        if (!data.authenticated || !data.user) {
+          handleLogout('Сессия завершена или истек срок действия. Пожалуйста, выполните вход.');
+        } else {
+          setCurrentUser(data.user);
+          localStorage.setItem('callqa_last_activity', String(Date.now()));
+        }
+      })
+      .catch(() => {
+        // network issue or server restart
+      });
+    }
+
+    return () => {
+      window.removeEventListener('callqa-session-expired', handleExpiredEvent);
+    };
+  }, []);
 
   const handleOpenAdminTab = () => {
     if (userRole !== 'admin') {
@@ -401,17 +513,40 @@ export default function App() {
   const getRoleLabel = (role: UserRole) => {
     switch (role) {
       case 'admin':
-        return '👑 Администратор';
+        return '👑 Администратор салона';
       case 'manager':
         return '👔 Управляющий';
       case 'operator':
-        return '🎧 Оператор';
+        return '🎧 Администратор ресепшена';
       case 'viewer':
         return '👁️ Наблюдатель';
     }
   };
 
   const currentSalonName = config?.salonName?.trim() || 'Fashion Look Studio';
+
+  // Strict Authentication Gate on Launch & 4-Hour Inactivity Timeout (152-ФЗ)
+  if (!currentUser || !authToken) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex flex-col justify-center items-center p-4" id="applet-auth-gate">
+        <LoginModal
+          isOpen={true}
+          onLoginSuccess={handleLoginSuccess}
+          onOpenChangePassword={() => setIsChangePasswordModalOpen(true)}
+          salonName={currentSalonName}
+          sessionExpiredNotice={sessionExpiredNotice}
+        />
+        {isChangePasswordModalOpen && (
+          <UserPasswordChangeModal
+            isOpen={isChangePasswordModalOpen}
+            onClose={() => setIsChangePasswordModalOpen(false)}
+            currentUser={currentUser}
+            authToken={authToken}
+          />
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50/70 flex flex-col text-slate-800" id="applet-viewport">
@@ -843,6 +978,7 @@ export default function App() {
         onLoginSuccess={handleLoginSuccess}
         onOpenChangePassword={() => setIsChangePasswordModalOpen(true)}
         salonName={currentSalonName}
+        sessionExpiredNotice={sessionExpiredNotice}
       />
 
       {/* User Self-Service Password Change Modal */}

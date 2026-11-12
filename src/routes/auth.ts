@@ -12,6 +12,9 @@ import { hashPassword, verifyPassword } from '../store/user-store.js';
 // In-memory active sessions store: token -> AuthSession
 const sessionCache = new Map<string, AuthSession>();
 
+// 4 часа отсутствия активности до принудительного разлогирования (152-ФЗ)
+export const INACTIVITY_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+
 export async function logAccess(
   user: string,
   action: AccessLogEntry['action'],
@@ -57,40 +60,51 @@ export function extractAuthToken(req: Request): string | null {
 }
 
 /**
- * Получает текущего аутентифицированного пользователя
+ * Получает текущего аутентифицированного пользователя с проверкой тайм-аута неактивности (4 часа)
  */
 export function getCurrentUser(req: Request): { id: string; username: string; name: string; role: UserRole } | null {
   const token = extractAuthToken(req);
   if (token && sessionCache.has(token)) {
     const session = sessionCache.get(token)!;
-    if (session.expiresAt > Date.now()) {
-      return session.user;
-    } else {
+    const now = Date.now();
+    const lastActive = session.lastActivity || session.createdAt;
+
+    // Проверяем превышение 4 часов неактивности
+    if (now - lastActive > INACTIVITY_TIMEOUT_MS || (session.expiresAt && session.expiresAt <= now)) {
       sessionCache.delete(token);
+      return null;
     }
+
+    // Сессия активна: обновляем метку последней активности и продлеваем скользящее окно
+    session.lastActivity = now;
+    session.expiresAt = now + INACTIVITY_TIMEOUT_MS;
+    return session.user;
   }
 
-  // Fallback to legacy/header role or query param if token is missing
+  // Fallback to legacy/header role ONLY if token is not provided and query/header explicitly requested
   const headerRole = (req.headers['x-user-role'] || req.query?.role) as string;
   if (headerRole === 'manager') {
     return { id: 'usr-manager-1', username: 'manager', name: 'Управляющий', role: 'manager' };
   }
   if (headerRole === 'operator') {
-    return { id: 'usr-operator-1', username: 'operator', name: 'Оператор', role: 'operator' };
+    return { id: 'usr-operator-1', username: 'operator', name: 'Администратор ресепшн', role: 'operator' };
   }
   if (headerRole === 'viewer') {
     return { id: 'usr-viewer-1', username: 'viewer', name: 'Наблюдатель', role: 'viewer' };
   }
+  if (headerRole === 'admin') {
+    return { id: 'usr-admin-1', username: 'admin', name: 'Главный Администратор', role: 'admin' };
+  }
 
-  return { id: 'usr-admin-1', username: 'admin', name: 'Главный Администратор', role: 'admin' };
+  return null;
 }
 
 /**
  * Возвращает роль текущего пользователя
  */
-export function getCurrentUserRole(req: Request): UserRole {
+export function getCurrentUserRole(req: Request): UserRole | null {
   const user = getCurrentUser(req);
-  return user ? user.role : 'admin';
+  return user ? user.role : null;
 }
 
 /**
@@ -98,10 +112,15 @@ export function getCurrentUserRole(req: Request): UserRole {
  */
 export function requireRole(allowedRoles: UserRole[]) {
   return (req: Request, res: Response, next: NextFunction) => {
-    const role = getCurrentUserRole(req);
-    if (!allowedRoles.includes(role)) {
+    const user = getCurrentUser(req);
+    if (!user) {
+      return res.status(401).json({
+        error: 'Требуется авторизация в системе. Сессия не найдена или завершена из-за отсутствия активности (4 часа).',
+      });
+    }
+    if (!allowedRoles.includes(user.role)) {
       return res.status(403).json({
-        error: `Доступ запрещён для роли "${role}". Требуется одна из ролей: ${allowedRoles.join(', ')}`,
+        error: `Доступ запрещён для роли "${user.role}". Требуется одна из ролей: ${allowedRoles.join(', ')}`,
       });
     }
     next();
@@ -141,7 +160,8 @@ authRouter.post('/login', async (req: Request, res: Response) => {
       return res.status(401).json({ error: 'Неверное имя пользователя или пароль' });
     }
 
-    // Generate session token (valid 24h)
+    // Generate session token (valid 4 hours sliding inactivity TTL)
+    const now = Date.now();
     const token = crypto.randomBytes(32).toString('hex');
     const session: AuthSession = {
       token,
@@ -151,8 +171,9 @@ authRouter.post('/login', async (req: Request, res: Response) => {
         name: user.name,
         role: user.role,
       },
-      createdAt: Date.now(),
-      expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+      createdAt: now,
+      lastActivity: now,
+      expiresAt: now + INACTIVITY_TIMEOUT_MS,
     };
 
     sessionCache.set(token, session);
@@ -172,6 +193,7 @@ authRouter.post('/login', async (req: Request, res: Response) => {
       success: true,
       token,
       user: session.user,
+      expiresAt: session.expiresAt,
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -196,13 +218,40 @@ authRouter.post('/logout', async (req: Request, res: Response) => {
 
 /**
  * GET /api/auth/me
- * Данные текущего пользователя
+ * Данные текущего пользователя с проверкой тайм-аута неактивности
  */
 authRouter.get('/me', (req: Request, res: Response) => {
-  const user = getCurrentUser(req);
+  const token = extractAuthToken(req);
+  if (!token) {
+    return res.status(401).json({ authenticated: false, user: null, error: 'Требуется авторизация в системе' });
+  }
+
+  const session = sessionCache.get(token);
+  if (!session) {
+    return res.status(401).json({ authenticated: false, user: null, error: 'Сессия не найдена или завершена' });
+  }
+
+  const now = Date.now();
+  const lastActive = session.lastActivity || session.createdAt;
+
+  if (now - lastActive > INACTIVITY_TIMEOUT_MS || (session.expiresAt && session.expiresAt <= now)) {
+    sessionCache.delete(token);
+    return res.status(401).json({
+      authenticated: false,
+      user: null,
+      error: 'Сессия завершена из-за отсутствия активности более 4 часов (152-ФЗ)'
+    });
+  }
+
+  // Обновляем метку активности
+  session.lastActivity = now;
+  session.expiresAt = now + INACTIVITY_TIMEOUT_MS;
+
   res.json({
-    authenticated: !!user,
-    user: user || null,
+    authenticated: true,
+    user: session.user,
+    lastActivity: session.lastActivity,
+    expiresAt: session.expiresAt,
   });
 });
 
@@ -421,7 +470,7 @@ adminUsersRouter.post('/', async (req: Request, res: Response) => {
 adminUsersRouter.put('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { name, role, password, isActive, notes } = req.body || {};
+    const { username, name, role, password, isActive, notes } = req.body || {};
 
     const store = await readStore();
     const user = (store.users || []).find(u => u.id === id);
@@ -444,6 +493,21 @@ adminUsersRouter.put('/:id', async (req: Request, res: Response) => {
       const activeAdminCount = (store.users || []).filter(u => u.role === 'admin' && u.isActive && u.id !== user.id).length;
       if (activeAdminCount === 0) {
         return res.status(400).json({ error: 'Нельзя заблокировать последнего администратора' });
+      }
+    }
+
+    // Update username / login if specified
+    if (username && typeof username === 'string') {
+      const normalizedUsername = username.trim().toLowerCase();
+      if (normalizedUsername !== user.username) {
+        if (normalizedUsername.length < 3) {
+          return res.status(400).json({ error: 'Логин должен содержать не менее 3 символов' });
+        }
+        const exists = (store.users || []).some(u => u.id !== user.id && u.username.toLowerCase() === normalizedUsername);
+        if (exists) {
+          return res.status(400).json({ error: `Логин «${normalizedUsername}» уже занят другим сотрудником` });
+        }
+        user.username = normalizedUsername;
       }
     }
 
@@ -481,6 +545,74 @@ adminUsersRouter.put('/:id', async (req: Request, res: Response) => {
       lastLoginAt: user.lastLoginAt,
       isActive: user.isActive,
       notes: user.notes,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/admin/users/:id/set-credentials
+ * Прямое назначение логина и пароля администратора ресепшена салона
+ */
+adminUsersRouter.post('/:id/set-credentials', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { username, password, name, notes, isActive } = req.body || {};
+
+    const store = await readStore();
+    const user = (store.users || []).find(u => u.id === id);
+    if (!user) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+
+    if (username) {
+      const normUsername = String(username).trim().toLowerCase();
+      if (normUsername.length < 3) {
+        return res.status(400).json({ error: 'Логин должен содержать не менее 3 символов' });
+      }
+      const exists = (store.users || []).some(u => u.id !== user.id && u.username.toLowerCase() === normUsername);
+      if (exists) {
+        return res.status(400).json({ error: `Логин «${normUsername}» уже занят другим сотрудником` });
+      }
+      user.username = normUsername;
+    }
+
+    if (password) {
+      if (String(password).trim().length < 6) {
+        return res.status(400).json({ error: 'Пароль должен содержать не менее 6 символов' });
+      }
+      const { hash, salt } = hashPassword(String(password).trim());
+      user.passwordHash = hash;
+      user.salt = salt;
+    }
+
+    if (name) user.name = String(name).trim();
+    if (typeof isActive === 'boolean') user.isActive = isActive;
+    if (notes !== undefined) user.notes = String(notes).trim();
+
+    user.updatedAt = new Date().toISOString();
+    await writeStore(store);
+
+    await logAccess(
+      getCurrentUser(req)?.name || 'Администратор',
+      'write',
+      `Администратор салона установил логин/пароль для администратора ресепшена ${user.name} (@${user.username})`,
+      req.ip || '127.0.0.1'
+    );
+
+    res.json({
+      success: true,
+      message: `Учетные данные для администратора ресепшена «${user.name}» (@${user.username}) успешно сохранены`,
+      user: {
+        id: user.id,
+        username: user.username,
+        name: user.name,
+        role: user.role,
+        isActive: user.isActive,
+        updatedAt: user.updatedAt,
+        notes: user.notes,
+      }
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

@@ -4,7 +4,7 @@
  */
 
 import React, { useState } from 'react';
-import { Lock, User, KeyRound, ShieldCheck, AlertCircle, Sparkles, LogIn } from 'lucide-react';
+import { Lock, User, KeyRound, ShieldCheck, AlertCircle, Sparkles, LogIn, Eye, EyeOff, Clock } from 'lucide-react';
 import { UserRole } from '../types.js';
 
 interface LoginModalProps {
@@ -12,12 +12,14 @@ interface LoginModalProps {
   isOpen: boolean;
   onOpenChangePassword?: () => void;
   salonName?: string;
+  sessionExpiredNotice?: string | null;
 }
 
-export function LoginModal({ onLoginSuccess, isOpen, onOpenChangePassword, salonName }: LoginModalProps) {
+export function LoginModal({ onLoginSuccess, isOpen, onOpenChangePassword, salonName, sessionExpiredNotice }: LoginModalProps) {
   const effectiveSalonName = salonName?.trim() || 'Fashion Look Studio';
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('admin123');
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -43,6 +45,7 @@ export function LoginModal({ onLoginSuccess, isOpen, onOpenChangePassword, salon
       localStorage.setItem('callqa_auth_token', data.token);
       localStorage.setItem('callqa_user_role', data.user.role);
       localStorage.setItem('callqa_user_info', JSON.stringify(data.user));
+      localStorage.setItem('callqa_last_activity', String(Date.now()));
 
       onLoginSuccess(data.user, data.token);
     } catch (err: any) {
@@ -78,6 +81,16 @@ export function LoginModal({ onLoginSuccess, isOpen, onOpenChangePassword, salon
 
         {/* Form Body */}
         <form onSubmit={handleSubmit} className="p-6 space-y-4" id="login-form">
+          {sessionExpiredNotice && (
+            <div className="bg-amber-50 border border-amber-300 rounded-xl p-3 flex items-start gap-2.5 text-xs text-amber-900 shadow-2xs" id="session-expired-alert">
+              <Clock className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <div className="font-bold">Автоматический выход (4 часа неактивности)</div>
+                <div className="text-[11px] text-amber-800 mt-0.5 leading-snug">{sessionExpiredNotice}</div>
+              </div>
+            </div>
+          )}
+
           {error && (
             <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 flex items-start gap-2.5 text-xs text-rose-800" id="login-error-alert">
               <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
@@ -97,7 +110,7 @@ export function LoginModal({ onLoginSuccess, isOpen, onOpenChangePassword, salon
                 onChange={(e) => setUsername(e.target.value)}
                 required
                 className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-500 focus:bg-white focus:outline-hidden transition-all"
-                placeholder="admin / manager / operator / viewer"
+                placeholder="admin / operator / manager / viewer"
                 id="login-username-input"
               />
             </div>
@@ -110,14 +123,22 @@ export function LoginModal({ onLoginSuccess, isOpen, onOpenChangePassword, salon
             <div className="relative">
               <KeyRound className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
               <input
-                type="password"
+                type={showPassword ? 'text' : 'password'}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
-                className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-500 focus:bg-white focus:outline-hidden transition-all"
+                className="w-full pl-9 pr-10 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-500 focus:bg-white focus:outline-hidden transition-all"
                 placeholder="Введите ваш пароль"
                 id="login-password-input"
               />
+              <button
+                type="button"
+                onClick={() => setShowPassword(p => !p)}
+                className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600 p-0.5"
+                title={showPassword ? 'Скрыть пароль' : 'Показать пароль'}
+              >
+                {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
             </div>
             {onOpenChangePassword && (
               <div className="flex items-center justify-end mt-1.5">
@@ -153,6 +174,15 @@ export function LoginModal({ onLoginSuccess, isOpen, onOpenChangePassword, salon
           </button>
         </form>
 
+        {/* Security Rules Info */}
+        <div className="px-6 py-2 bg-slate-100/60 border-t border-slate-200/80 text-[11px] text-slate-500 flex items-center justify-between">
+          <span className="flex items-center gap-1">
+            <Clock className="w-3 h-3 text-emerald-600" />
+            Автовыход через 4 часа неактивности
+          </span>
+          <span className="font-mono text-[10px] text-slate-400">152-ФЗ Security</span>
+        </div>
+
         {/* Quick Demo Credentials Preset */}
         <div className="bg-slate-50 border-t border-slate-200/80 p-4 text-xs text-slate-600">
           <div className="flex items-center gap-1.5 font-bold text-slate-700 mb-2">
@@ -165,9 +195,19 @@ export function LoginModal({ onLoginSuccess, isOpen, onOpenChangePassword, salon
               onClick={() => handleQuickFill('admin', 'admin123')}
               className="p-2 bg-white hover:bg-emerald-50 hover:border-emerald-300 border border-slate-200 rounded-lg text-left transition-colors"
             >
-              <div className="font-bold text-slate-800">👑 Администратор</div>
+              <div className="font-bold text-slate-800">👑 Администратор салона</div>
               <div className="text-slate-500">admin / admin123</div>
               <div className="text-[10px] text-emerald-700">Полный доступ + Админка</div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleQuickFill('operator', 'operator123')}
+              className="p-2 bg-white hover:bg-purple-50 hover:border-purple-300 border border-slate-200 rounded-lg text-left transition-colors"
+            >
+              <div className="font-bold text-slate-800">🎧 Администратор ресепшена</div>
+              <div className="text-slate-500">operator / operator123</div>
+              <div className="text-[10px] text-purple-700">Звонки, запись и клиенты</div>
             </button>
 
             <button
@@ -178,16 +218,6 @@ export function LoginModal({ onLoginSuccess, isOpen, onOpenChangePassword, salon
               <div className="font-bold text-slate-800">👔 Управляющий</div>
               <div className="text-slate-500">manager / manager123</div>
               <div className="text-[10px] text-blue-700">Контроль качества & ПДн</div>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleQuickFill('operator', 'operator123')}
-              className="p-2 bg-white hover:bg-purple-50 hover:border-purple-300 border border-slate-200 rounded-lg text-left transition-colors"
-            >
-              <div className="font-bold text-slate-800">🎧 Администратор ресепшн</div>
-              <div className="text-slate-500">operator / operator123</div>
-              <div className="text-[10px] text-purple-700">Звонки и стандарты речи</div>
             </button>
 
             <button

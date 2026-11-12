@@ -33,6 +33,7 @@ export interface AuthSession {
   };
   createdAt: number;
   expiresAt: number;
+  lastActivity?: number;
 }
 
 export interface SystemCredentials {
