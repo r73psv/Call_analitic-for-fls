@@ -1,6 +1,12 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * Версия с патчами по ТЗ п. 3.1–3.4 (критический приоритет):
+ *  3.1 — динамическое определение audioEncoding в асинхронном запросе;
+ *  3.2 — склейка текстов чанков через '\n' (сохранение ролевой разметки);
+ *  3.3 — увеличенный таймаут поллинга операции (≈10 минут) + лог operationId;
+ *  3.4 — различение ошибки API и пустого результата в синхронном методе.
  */
 
 import axios from 'axios';
@@ -31,6 +37,37 @@ interface TranscriptSegment {
 }
 
 /**
+ * ПАТЧ 3.1. Соответствие формата аудио (по magic bytes) и параметров кодека
+ * для асинхронного API SpeechKit v2.
+ * sampleRateHertz указывается ТОЛЬКО для LPCM — для MP3/OGG параметр не задаётся
+ * по официальной документации Yandex Cloud.
+ */
+const ASYNC_ENCODING_MAP: Record<
+  'mp3' | 'oggopus' | 'lpcm',
+  { audioEncoding: string; sampleRateHertz?: number }
+> = {
+  mp3: { audioEncoding: 'MP3' },
+  oggopus: { audioEncoding: 'OGG_OPUS' },
+  lpcm: { audioEncoding: 'LPCM', sampleRateHertz: 8000 },
+};
+
+/**
+ * Частота дискретизации для LPCM (телефония АТС — 8 кГц).
+ * Переопределяется переменной окружения LPCM_SAMPLE_RATE_HERTZ, если записи
+ * поступают с иной частотой.
+ */
+const LPCM_SAMPLE_RATE = Number(process.env.LPCM_SAMPLE_RATE_HERTZ) || 8000;
+
+/**
+ * ПАТЧ 3.3. Параметры поллинга операции асинхронного распознавания.
+ * 60 итераций (3 мин) не хватало для записей 15–30 минут — операция оставалась
+ * активной, а клиент отваливался по таймауту. Теперь лимит ≈ 10 минут,
+ * а при таймауте в лог печатается operationId для ручной проверки операции.
+ */
+const POLL_INTERVAL_MS = 3000;
+const MAX_POLL_ITERATIONS = 200; // 200 × 3 с ≈ 10 минут
+
+/**
  * Определение формата аудио по первым сигнатурным байтам (magic numbers)
  */
 export function detectAudioFormat(buffer: Buffer): 'mp3' | 'oggopus' | 'lpcm' {
@@ -43,6 +80,18 @@ export function detectAudioFormat(buffer: Buffer): 'mp3' | 'oggopus' | 'lpcm' {
   // WAV: RIFF
   if (buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46) return 'lpcm';
   return 'mp3';
+}
+
+/**
+ * Расширение файла в Object Storage по фактическому формату аудио (ПАТЧ 3.1:
+ * ранее объект всегда сохранялся с расширением .mp3 независимо от содержимого)
+ */
+function getExtensionForFormat(format: 'mp3' | 'oggopus' | 'lpcm'): string {
+  switch (format) {
+    case 'oggopus': return 'ogg';
+    case 'lpcm': return 'wav';
+    default: return 'mp3';
+  }
 }
 
 /**
@@ -300,13 +349,16 @@ export async function transcribeWithSpeechKit(audioBuffer: Buffer): Promise<stri
 
   // 1. Если настроен Yandex Object Storage и запись длиннее 25 секунд, используем асинхронное двухканальное распознавание
   if (bucket && duration >= 25) {
+    // ПАТЧ 3.1: формат определяется по magic bytes, а не зашит константой
+    const detected = detectAudioFormat(audioBuffer);
     try {
-      const objectKey = `audio/${Date.now()}-${Math.random().toString(36).slice(2)}.mp3`;
+      const objectKey = `audio/${Date.now()}-${Math.random().toString(36).slice(2)}.${getExtensionForFormat(detected)}`;
       await uploadToObjectStorage(audioBuffer, objectKey);
       const audioUri = `https://storage.yandexcloud.net/${bucket}/${objectKey}`;
 
       try {
-        return await requestAndPollLongRunning(audioUri, authHeader);
+        // ПАТЧ 3.1: передаём буфер в асинхронный запрос для определения кодека
+        return await requestAndPollLongRunning(audioUri, authHeader, audioBuffer);
       } finally {
         await deleteFromObjectStorage(objectKey).catch(err =>
           console.error('[Object Storage] Ошибка удаления временного аудиофайла:', err.message)
@@ -351,7 +403,10 @@ export async function transcribeWithSpeechKit(audioBuffer: Buffer): Promise<stri
       }
     }
     if (chunkTexts.length > 0) {
-      const fullText = chunkTexts.join(' ');
+      // ПАТЧ 3.2: разделитель — перевод строки. refineTranscriptRoles работает
+      // построчно (split('\n')), склейка пробелом превращала весь текст в одну
+      // строку и обнуляла ролевую разметку на длинных записях.
+      const fullText = chunkTexts.join('\n');
       console.log(`[SpeechKit] Успешно расшифровано ${chunkTexts.length} сегментов (${fullText.length} симв.)`);
       return refineTranscriptRoles(fullText);
     }
@@ -362,27 +417,39 @@ export async function transcribeWithSpeechKit(audioBuffer: Buffer): Promise<stri
 
 async function requestAndPollLongRunning(
   audioUri: string,
-  authHeader: string
+  authHeader: string,
+  audioBuffer: Buffer
 ): Promise<string> {
   const folderId = getYandexFolderId();
   // Важно: в API v2 параметр folderId передается внутри JSON тела config.folderId, а не в query string!
   const url = 'https://transcribe.api.cloud.yandex.net/speech/stt/v2/longRunningRecognize';
 
-  console.log(`[SpeechKit] Отправка запроса на асинхронное распознавание: ${audioUri}`);
+  // ПАТЧ 3.1: кодек и частота дискретизации выбираются по фактическому формату записи.
+  // Ранее audioEncoding был жёстко задан 'MP3', из-за чего не-MP3 записи (WAV/OGG)
+  // приводили к ошибке 400 или некорректному распознаванию.
+  const detected = detectAudioFormat(audioBuffer);
+  const codec = ASYNC_ENCODING_MAP[detected];
 
-  // Для формата MP3 параметр sampleRateHertz не указывается по официальной документации Yandex Cloud
+  const specification: Record<string, unknown> = {
+    languageCode: 'ru-RU',
+    model: 'general',
+    audioEncoding: codec.audioEncoding,
+    profanityFilter: false,
+    literatureText: true,
+    rawResults: false,
+  };
+  // sampleRateHertz обязателен и указывается только для LPCM
+  if (codec.sampleRateHertz) {
+    specification.sampleRateHertz = LPCM_SAMPLE_RATE;
+  }
+
+  console.log(`[SpeechKit] Отправка запроса на асинхронное распознавание: ${audioUri} (формат: ${detected}, кодек: ${codec.audioEncoding})`);
+
   const startRes = await axios.post(
     url,
     {
       config: {
-        specification: {
-          languageCode: 'ru-RU',
-          model: 'general',
-          audioEncoding: 'MP3',
-          profanityFilter: false,
-          literatureText: true,
-          rawResults: false,
-        },
+        specification,
         folderId: folderId || undefined,
       },
       audio: {
@@ -405,9 +472,10 @@ async function requestAndPollLongRunning(
 
   console.log(`[SpeechKit] Запущена операция распознавания: ${operationId}. Ожидание результатов...`);
 
-  // Poll for up to 60 iterations * 3s = 180s (3 minutes)
-  for (let i = 0; i < 60; i++) {
-    await new Promise(r => setTimeout(r, 3000));
+  // ПАТЧ 3.3: увеличенный лимит поллинга (≈10 минут вместо 3) — длинные записи
+  // обрабатываются дольше, а прерывание поллинга не отменяет операцию и не возвращает деньги.
+  for (let i = 0; i < MAX_POLL_ITERATIONS; i++) {
+    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
     const poll = await axios.get(
       `https://operation.api.cloud.yandex.net/operations/${operationId}`,
       { headers: { Authorization: authHeader }, timeout: 15000 }
@@ -424,7 +492,10 @@ async function requestAndPollLongRunning(
     }
   }
 
-  throw new Error('SpeechKit: таймаут поллинга операции распознавания (3 минуты)');
+  // ПАТЧ 3.3: при таймауте сохраняем operationId в логе — операция может быть
+  // ещё активна, и её можно допросить вручную.
+  console.error(`[SpeechKit] Таймаут поллинга операции ${operationId}. Операция может быть ещё активна — проверьте её статус вручную: https://operation.api.cloud.yandex.net/operations/${operationId}`);
+  throw new Error(`SpeechKit: таймаут поллинга операции ${operationId} (10 минут)`);
 }
 
 async function transcribeSynchronous(
@@ -455,9 +526,20 @@ async function transcribeSynchronous(
     }
   );
 
+  // ПАТЧ 3.4: различаем три исхода. Ранее отсутствие result молча возвращало
+  // пустую строку, и верхний уровень интерпретировал любую ошибку API как «тишину»,
+  // из-за чего реальные сбои не попадали в логи.
+  if (syncRes.data?.error) {
+    const errDetail = JSON.stringify(syncRes.data.error);
+    console.error(`[SpeechKit] Ошибка API в ответе синхронного распознавания: ${errDetail}`);
+    throw new Error(`SpeechKit API вернул ошибку: ${errDetail}`);
+  }
+
   if (syncRes.data?.result) {
     return syncRes.data.result;
   }
 
+  // Нет ни result, ни error — только такой случай считаем неразборчивой речью/тишиной
+  console.warn('[SpeechKit] Синхронное распознавание: в ответе нет результата и нет ошибки (вероятно, тишина или неразборчивая речь)');
   return '';
 }
