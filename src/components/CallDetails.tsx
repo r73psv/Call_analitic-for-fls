@@ -18,7 +18,7 @@ import { CallRecord, NextStepItem, ContextClarification, StructuredCallSummary, 
 import { ReanalyzeButton } from './ReanalyzeButton.js';
 import { refineTranscriptRoles } from '../services/transcriptUtils.js';
 import { extractStructuredCallSummary } from '../services/summaryUtils.js';
-import { extractCallEvaluation, buildCallEvaluation, EVALUATION_CRITERIA_DEFINITIONS } from '../services/evaluationUtils.js';
+import { extractCallEvaluation, buildCallEvaluation, EVALUATION_CRITERIA_DEFINITIONS, harmonizeMistakesAndEvaluation } from '../services/evaluationUtils.js';
 
 interface CallDetailsProps {
   call: CallRecord;
@@ -228,28 +228,6 @@ export function CallDetails({
       }
     }
 
-    // Если список ошибок всё ещё пуст, но оценка < 10 (есть причины для снижения)
-    if (mistakes.length === 0 && score !== null && score < 10) {
-      if (call.operator_comment && /ошибк|недочет|упущен|поздн|пассивн|не предлож|не уточн/i.test(call.operator_comment)) {
-        mistakes = [call.operator_comment.trim()];
-      } else if (call.key_facts?.is_dispute) {
-        mistakes = [
-          'Недостаточно оперативное переключение в режим активного слушания при претензии',
-          'Не зафиксированы четкие сроки разрешения проблемы клиента'
-        ];
-      } else if (call.booking_status === 'отказ' || call.key_facts?.call_outcome === 'отказ') {
-        mistakes = [
-          'Администратор предложил только один временной слот без альтернативных вариантов',
-          'При отказе клиента не предложены другие свободные дни или лист ожидания салона'
-        ];
-      } else {
-        mistakes = [
-          'Не предложены сопутствующие процедуры (дизайн, спа-уход, снятие покрытия)',
-          'Не оговорён регламент предварительного напоминания о визите накануне'
-        ];
-      }
-    }
-
     // Извлечение советов по оптимизации
     let advice: string[] = [];
     const rawRecs: unknown = call.recommendations;
@@ -271,19 +249,10 @@ export function CallDetails({
       }
     }
 
-    if (advice.length === 0) {
-      if (call.booking_status === 'отказ' || call.key_facts?.call_outcome === 'отказ') {
-        advice = [
-          'Всегда предлагать вилку времени минимум из двух слотов',
-          'При отказе предлагать альтернативные даты или лист ожидания'
-        ];
-      } else {
-        advice = [
-          'Предлагать клиентам дополнительные услуги салона',
-          'Напоминать о подтверждении записи за 24 часа до визита'
-        ];
-      }
-    }
+    // Синхронизация ошибок и советов с оценкой по 10 критериям
+    const harmonized = harmonizeMistakesAndEvaluation(mistakes, advice, callEvaluation, call.transcript);
+    mistakes = harmonized.mistakes;
+    advice = harmonized.advice;
 
     const hasEvaluation = Boolean(
       managerMatch ||
@@ -314,7 +283,7 @@ export function CallDetails({
       hasEvaluation,
       raw: summary
     };
-  }, [call.summary, call.transcript, call.key_facts, call.booking_status, call.structured_summary, call.operator_score, call.operator_mistakes, call.recommendations]);
+  }, [call, callEvaluation]);
 
   // Categorical Tag Management State
   const [customTagInput, setCustomTagInput] = useState('');
@@ -2412,17 +2381,14 @@ export function CallDetails({
             )}
 
             {/* Ошибки, повлиявшие на снижение оценки */}
-            {((call.operator_mistakes && call.operator_mistakes.length > 0) || summaryParts.mistakes.length > 0) && (
+            {summaryParts.mistakes.length > 0 && (
               <div className="p-3 bg-rose-50/90 rounded-lg border border-rose-200/80 text-xs text-rose-950">
                 <div className="flex items-center gap-1.5 font-bold text-rose-900 mb-1.5">
                   <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
                   <span>Причины снижения оценки (ошибки менеджера):</span>
                 </div>
                 <ul className="space-y-1 pl-4 list-disc marker:text-rose-500">
-                  {((call.operator_mistakes && call.operator_mistakes.length > 0)
-                    ? call.operator_mistakes
-                    : summaryParts.mistakes
-                  ).map((m, idx) => (
+                  {summaryParts.mistakes.map((m, idx) => (
                     <li key={idx} className="leading-snug">{m}</li>
                   ))}
                 </ul>
@@ -2430,17 +2396,14 @@ export function CallDetails({
             )}
 
             {/* Советы по оптимизации */}
-            {((call.recommendations && call.recommendations.length > 0) || summaryParts.advice.length > 0) && (
+            {summaryParts.advice.length > 0 && (
               <div className="p-3 bg-emerald-50/90 rounded-lg border border-emerald-200/80 text-xs text-emerald-950">
                 <div className="flex items-center gap-1.5 font-bold text-emerald-900 mb-1.5">
                   <Sparkles className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                   <span>Советы по оптимизации работы менеджера:</span>
                 </div>
                 <ul className="space-y-1 pl-4 list-disc marker:text-emerald-500">
-                  {((call.recommendations && call.recommendations.length > 0)
-                    ? (Array.isArray(call.recommendations) ? call.recommendations : [call.recommendations])
-                    : summaryParts.advice
-                  ).map((r, idx) => (
+                  {summaryParts.advice.map((r, idx) => (
                     <li key={idx} className="leading-snug">{r}</li>
                   ))}
                 </ul>

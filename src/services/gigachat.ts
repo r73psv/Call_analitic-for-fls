@@ -103,13 +103,18 @@ export function getSystemPrompt(customSalonName?: string): string {
 9. "closing_booking": «Закрытие на запись» (инициатива бронирования, четкая фиксация даты, времени, мастера и подтверждение визита).
 10. "communication_quality_closing": «Качество коммуникации и завершение разговора» (грамотная речь, напоминание о визите, вежливое прощание).
 
-ПРАВИЛО НЕПРИМЕНИМОСТИ (КРИТИЧЕСКИ ВАЖНО):
-Если какой-либо критерий НЕ ПРИМЕНИМ к конкретному звонку (например: возражений со стороны гостя не возникало вообще, параллельная запись не требовалась, или первый предложенный слот сразу подошел и искать альтернативы не было нужды):
-- Установи "is_applicable": false;
-- Установи "score": null;
-- В "explanation" напиши: "Критерий не применим к специфике данного звонка (не снижает общую оценку)".
-НЕПРИМЕНИМЫЕ КРИТЕРИИ НЕ ДОЛЖНЫ СНИЖАТЬ ОБЩУЮ ОЦЕНКУ!
-Итоговый балл оператора (operator_score) рассчитывается строго как среднее арифметическое только по применимым критериям (is_applicable: true).
+ПРАВИЛО НЕПРИМЕНИМОСТИ И ПОЛНОЙ СОГЛАСОВАННОСТИ (КАТЕГОРИЧЕСКИ ВАЖНО):
+1. Все выводы должны делаться ИСКЛЮЧИТЕЛЬНО на основе фактического содержания стенограммы. Ничего не придумывать, не выдумывать и не домысливать!
+2. Если какой-либо критерий НЕ ПРИМЕНИМ к конкретному звонку (например: возражений со стороны гостя не возникало вообще, параллельная запись не требовалась, звонок касается отмены/переноса/претензии или первый предложенный слот сразу подошел):
+   - Установи "is_applicable": false;
+   - Установи "score": null;
+   - В "explanation" напиши обоснование неприменимости (например: "Критерий не применим к специфике данного звонка (не снижает общую оценку)").
+   НЕПРИМЕНИМЫЕ КРИТЕРИИ НЕ ДОЛЖНЫ СНИЖАТЬ ОБЩУЮ ОЦЕНКУ!
+3. ЕДИНСТВО РАЗДЕЛОВ «Разбор работы менеджера» И «Оценка звонка по 10 критериям» (ОТСУТСТВИЕ ПРОТИВОРЕЧИЙ):
+   - Если администратор предложил сопутствующие процедуры (снятие, дизайн, уход) ИЛИ если звонок не требовал допродаж (перенос/уточнение существующей записи, конфликт/претензия) — в блоке «Ошибки и недочеты» КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать «Не предложены сопутствующие услуги / процедуры».
+   - Запрещено приписывать администратору инициативу допродажи, если клиент сам запросил комплекс процедур (например, сам попросил «макияж и укладка» или «маникюр и педикюр»).
+   - Ошибки и недочеты в резюме должны СТРОГО соответствовать тем применимым критериям, по которым снижены баллы.
+   - Итоговый балл оператора (operator_score) рассчитывается строго как среднее арифметическое только по применимым критериям (is_applicable: true).
 
 РЕГЛАМЕНТ САЛОНА
 - Официальное название: «${salon}». Приветствие с этим названием — норма, оценку за него не снижай.
@@ -930,7 +935,9 @@ export {
   EVALUATION_CRITERIA_DEFINITIONS,
   calculateOverallScore,
   buildCallEvaluation,
-  extractCallEvaluation
+  extractCallEvaluation,
+  harmonizeMistakesAndEvaluation,
+  splitSpeakerLines
 } from './evaluationUtils.js';
 
 import {
@@ -945,7 +952,9 @@ import {
   EVALUATION_CRITERIA_DEFINITIONS,
   calculateOverallScore,
   buildCallEvaluation,
-  extractCallEvaluation
+  extractCallEvaluation,
+  harmonizeMistakesAndEvaluation,
+  splitSpeakerLines
 } from './evaluationUtils.js';
 
 /**
@@ -964,7 +973,8 @@ export function formatSummaryWithEssence(
   operatorScore?: number | null,
   operatorMistakes?: string[] | string | null,
   recommendations?: string[] | string | null,
-  operatorComment?: string | null
+  operatorComment?: string | null,
+  callEvaluation?: CallEvaluation | null
 ): {
   formattedSummary: string;
   essence: EssenceDetails;
@@ -1168,34 +1178,6 @@ export function formatSummaryWithEssence(
     }
   }
 
-  // Если список ошибок всё ещё пуст
-  if (mistakesList.length === 0) {
-    if (resolvedScore === 10) {
-      mistakesList = ['Грубых ошибок не допущено, регламент соблюден в полном объеме.'];
-    } else if (operatorComment && /ошибк|недочет|пассивн|не предлож|не уточн/i.test(operatorComment)) {
-      mistakesList = [operatorComment.trim()];
-    } else {
-      const isDeclined = /отказ|не удобн|не подход/i.test(conclusionText || rawSummary || transcript);
-      const isDispute = /отмен|жалоб|претензи|недоволен/i.test(transcript);
-      if (isDeclined) {
-        mistakesList = [
-          'Администратор не предложил альтернативные дни/слоты после первичного отказа клиента',
-          'Не предложена запись в лист ожидания салона',
-        ];
-      } else if (isDispute) {
-        mistakesList = [
-          'Недостаточно оперативная отработка спорного момента',
-          'Не зафиксированы четкие сроки разрешения претензии клиента',
-        ];
-      } else if (resolvedScore < 10) {
-        mistakesList = [
-          'Не предложены сопутствующие услуги салона (допродажа)',
-          'Не оговорён регламент предварительного напоминания о визите накануне',
-        ];
-      }
-    }
-  }
-
   // Извлечение советов по оптимизации
   let adviceList: string[] = [];
   if (Array.isArray(recommendations) && recommendations.length > 0) {
@@ -1220,20 +1202,20 @@ export function formatSummaryWithEssence(
     }
   }
 
-  if (adviceList.length === 0) {
-    const isDeclined = /отказ|не удобн|не подход/i.test(conclusionText || rawSummary || transcript);
-    if (isDeclined) {
-      adviceList = [
-        'Предлагать вилку минимум из 2 вариантов времени или другие свободные дни',
-        'Предлагать занесение в лист ожидания при занятости желаемого слота',
-      ];
-    } else {
-      adviceList = [
-        'Предлагать клиентам дополнительные услуги (снятие, уход, покрытие)',
-        'Напоминать о подтверждении записи за 24 часа до визита',
-      ];
-    }
-  }
+  // 4. Синхронизация ошибок и советов с оценкой по 10 критериям
+  const evalForHarmonization = callEvaluation || extractCallEvaluation(
+    transcript,
+    rawSummary,
+    null,
+    resolvedScore,
+    mistakesList,
+    adviceList,
+    salon
+  );
+
+  const harmonized = harmonizeMistakesAndEvaluation(mistakesList, adviceList, evalForHarmonization, transcript);
+  mistakesList = harmonized.mistakes;
+  adviceList = harmonized.advice;
 
   const mistakesFormatted = mistakesList.join('; ');
   const adviceFormatted = adviceList.join('; ');
@@ -1439,6 +1421,27 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
       : `Администратор обработал обращение по регламенту салона «${salon}».`;
   const recommendations = parsed.recommendations || `Соблюдать стандарты сервиса салона «${salon}».`;
 
+  // Оценка звонка по 10 критериям
+  const rawCriteria = Array.isArray(parsed.criteria_scores)
+    ? parsed.criteria_scores
+    : (Array.isArray(parsed.evaluation?.criteria) ? parsed.evaluation.criteria : []);
+
+  const parsedEvalObj = rawCriteria.length >= 5 ? buildCallEvaluation(rawCriteria) : null;
+  const evaluation: CallEvaluation = extractCallEvaluation(
+    fullTranscript,
+    rawSummary,
+    parsedEvalObj,
+    score,
+    rawMistakes,
+    Array.isArray(recommendations) ? recommendations : [recommendations].filter(Boolean) as string[],
+    salon
+  );
+
+  // Итоговый балл оператора синхронизируется со средним баллом по применимым критериям
+  if (evaluation.overall_score !== null && !isNaN(evaluation.overall_score)) {
+    score = Math.max(1, Math.min(10, Math.round(evaluation.overall_score)));
+  }
+
   const { formattedSummary, essence, structuredSummary, mistakes, advice } = formatSummaryWithEssence(
     rawSummary,
     fullTranscript,
@@ -1452,10 +1455,12 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
     score,
     rawMistakes,
     recommendations,
-    comment
+    comment,
+    evaluation
   );
 
-  const finalMistakes = rawMistakes.length > 0 ? rawMistakes : (mistakes && mistakes.length > 0 ? mistakes : []);
+  const finalMistakes = mistakes && mistakes.length > 0 ? mistakes : [];
+  const finalAdvice = advice && advice.length > 0 ? advice : (Array.isArray(recommendations) ? recommendations : [recommendations].filter(Boolean));
 
   const modelStruct = parsed.structured_summary || {};
   const finalStructuredSummary: StructuredCallSummary = {
@@ -1470,27 +1475,6 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
       ? modelStruct.manager_next_steps
       : structuredSummary.manager_next_steps,
   };
-
-  // Оценка звонка по 10 критериям
-  const rawCriteria = Array.isArray(parsed.criteria_scores)
-    ? parsed.criteria_scores
-    : (Array.isArray(parsed.evaluation?.criteria) ? parsed.evaluation.criteria : []);
-
-  const parsedEvalObj = rawCriteria.length >= 5 ? buildCallEvaluation(rawCriteria) : null;
-  const evaluation: CallEvaluation = extractCallEvaluation(
-    fullTranscript,
-    formattedSummary,
-    parsedEvalObj,
-    score,
-    finalMistakes,
-    Array.isArray(advice) ? advice : [advice].filter(Boolean),
-    salon
-  );
-
-  // Итоговый балл оператора синхронизируется со средним баллом по применимым критериям
-  if (evaluation.overall_score !== null && !isNaN(evaluation.overall_score)) {
-    score = Math.max(1, Math.min(10, Math.round(evaluation.overall_score)));
-  }
 
   const result: AnalysisResult = {
     transcript_summary: formattedSummary,
@@ -1742,20 +1726,9 @@ function generateLocalFallbackAnalysis(
         : `Администратор предоставил базовую консультацию по регламенту «${salon}», не проявив активности в оформлении записи.`)
     : 'Краткий обмен репликами. Полноценная оценка регламента не выставляется.';
 
-  const { formattedSummary, structuredSummary } = formatSummaryWithEssence(
-    conclusionText,
-    clean,
-    essence,
-    salon,
-    score,
-    mistakes,
-    recommendationsList,
-    comment
-  );
-
   const evaluation: CallEvaluation = extractCallEvaluation(
     clean,
-    formattedSummary,
+    conclusionText,
     null,
     score,
     mistakes,
@@ -1766,6 +1739,21 @@ function generateLocalFallbackAnalysis(
   if (evaluation.overall_score !== null && !isNaN(evaluation.overall_score)) {
     score = Math.max(1, Math.min(10, Math.round(evaluation.overall_score)));
   }
+
+  const { formattedSummary, structuredSummary, mistakes: harmonizedMistakes, advice: harmonizedAdvice } = formatSummaryWithEssence(
+    conclusionText,
+    clean,
+    essence,
+    salon,
+    score,
+    mistakes,
+    recommendationsList,
+    comment,
+    evaluation
+  );
+
+  const finalMistakes = harmonizedMistakes && harmonizedMistakes.length > 0 ? harmonizedMistakes : [];
+  const finalAdvice = harmonizedAdvice && harmonizedAdvice.length > 0 ? harmonizedAdvice : recommendationsList;
 
   return {
     transcript_summary: formattedSummary,
@@ -1799,9 +1787,9 @@ function generateLocalFallbackAnalysis(
       criteria_scores: evaluation.criteria,
     },
     operator_score: score,
-    operator_mistakes: mistakes,
+    operator_mistakes: finalMistakes,
     operator_comment: comment,
-    recommendations: recommendationsList,
+    recommendations: finalAdvice,
   };
 }
 

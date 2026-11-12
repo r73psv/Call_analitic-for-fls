@@ -12,7 +12,7 @@ import dotenv from 'dotenv';
 import { CallRecord, LogEntry, SystemConfig, ModelType, DashboardStats, KeyFacts, VkConfig, YclientsConfig, GigaChatModel, SystemNotification, NotificationType, UserRole, ContextClarification } from './src/types.js';
 import { transcribeWithRetry, fixDuplicatedTranscript, refineTranscriptRoles } from './src/services/speechkit.js';
 import { transcribeAudio } from './src/services/transcriptionService.js';
-import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation } from './src/services/gigachat.js';
+import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation, harmonizeMistakesAndEvaluation } from './src/services/gigachat.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
 import { readStoreSync, writeStore } from './src/store/store.js';
 import { readConsentStoreSync, writeConsentStore } from './src/store/consent-store.js';
@@ -167,11 +167,14 @@ const SEED_CALLS: CallRecord[] = [
       master: 'Кристина'
     },
     trigger_phrases: [],
+    operator_mistakes: [
+      'Администратор не предложил сопутствующие процедуры к маникюру (снятие старого покрытия, дизайн или спа-уход).'
+    ],
     recommendations: [
       'Отличная работа оператора, вежливость на высоком уровне.',
-      'Рекомендуется также предложить клиенту сопутствующие услуги, например, парафинотерапию.'
+      'Рекомендуется уточнять необходимость снятия покрытия и предлагать сопутствующие процедуры (дизайн, спа-уход, парафинотерапия).'
     ],
-    operator_score: 10,
+    operator_score: 9,
     operator_comment: 'Мария продемонстрировала отличные навыки вежливого общения, быстро ответила на вопросы по цене и длительности, зафиксировала договоренности и пообещала напоминание.',
     next_steps: [
       'Внести подтвержденную запись Елены в CRM Yclients: маникюр с шеллаком, завтра 18:30 к мастеру Кристине',
@@ -216,6 +219,10 @@ const SEED_CALLS: CallRecord[] = [
       'Вы издеваетесь? Я уже еду к вам!',
       'Я уже второй раз к вам записываюсь, и вы вечно отменяете!',
       'Мне это абсолютно не подходит! Я трачу свое время на дорогу!'
+    ],
+    operator_mistakes: [
+      'Недостаточно оперативное переключение в режим активного слушания при претензии',
+      'Не зафиксированы четкие сроки разрешения претензии клиента'
     ],
     recommendations: [
       'Менеджер хорошо справился со снижением градуса конфликта с помощью скидки.',
@@ -265,6 +272,7 @@ const SEED_CALLS: CallRecord[] = [
       master: 'Егорова Арина'
     },
     trigger_phrases: [],
+    operator_mistakes: [],
     recommendations: [
       'Отличная консультация, администратор четко обозначила условия бронирования.',
       'Рекомендуется проконтролировать поступление предоплаты в течение 30 минут.'
@@ -5221,42 +5229,10 @@ async function startServer() {
           }
         }
 
-        // Авто-миграция: наполнение operator_mistakes и 4-частного резюме с ошибками и советами для существующих звонков
-        if (call.operator_score !== null && call.operator_score !== undefined && (!call.operator_mistakes || call.operator_mistakes.length === 0)) {
-          if (call.operator_score === 10) {
-            call.operator_mistakes = [];
-          } else if (call.key_facts?.is_dispute) {
-            call.operator_mistakes = [
-              'Недостаточно оперативное переключение в режим активного слушания при претензии',
-              'Не зафиксированы четкие сроки разрешения претензии клиента'
-            ];
-          } else if (call.booking_status === 'отказ' || call.key_facts?.call_outcome === 'отказ') {
-            call.operator_mistakes = [
-              'Администратор предложил только один временной слот без альтернативных вариантов',
-              'При отказе клиента не предложены другие свободные дни или лист ожидания салона'
-            ];
-          } else {
-            call.operator_mistakes = [
-              'Не предложены сопутствующие процедуры (дизайн, спа-уход, снятие покрытия)',
-              'Не оговорён регламент предварительного напоминания о визите накануне'
-            ];
-          }
-          fixedCount++;
-        }
+        const salonName = getEffectiveSalonName(db.config);
 
-        if (call.summary && call.operator_score !== null && !call.summary.includes('Разбор работы менеджера') && !call.summary.includes('разбор работы менеджера')) {
-          const mistakesText = call.operator_mistakes && call.operator_mistakes.length > 0
-            ? call.operator_mistakes.join('; ')
-            : (call.operator_score === 10 ? 'Грубых ошибок не допущено, регламент соблюден в полном объеме.' : 'Упущены возможности допродажи сопутствующих услуг.');
-          const adviceText = Array.isArray(call.recommendations) && call.recommendations.length > 0
-            ? call.recommendations.join('; ')
-            : 'Следовать стандартам сервиса и вежливого общения салона.';
-          call.summary = `${call.summary}\nРазбор работы менеджера (оценка ${call.operator_score}/10):\n- Ошибки и недочеты: ${mistakesText}\n- Советы по оптимизации: ${adviceText}`;
-          fixedCount++;
-        }
         // Авто-миграция: наполнение 8 параметров структурированного резюме (structured_summary)
         if (!call.structured_summary || !call.key_facts?.structured_summary) {
-          const salonName = getEffectiveSalonName(db.config);
           const struct = extractStructuredCallSummary(
             call.transcript || '',
             call.summary || '',
@@ -5287,35 +5263,58 @@ async function startServer() {
           fixedCount++;
         }
 
-        // Авто-миграция: наполнение оценки звонка по 10 критериям (evaluation, criteria_scores)
-        if (!call.evaluation || !call.criteria_scores || call.criteria_scores.length < 10) {
-          const salonName = getEffectiveSalonName(db.config);
-          const evalObj = extractCallEvaluation(
-            call.transcript || '',
-            call.summary || '',
-            call.evaluation || null,
-            call.operator_score,
-            call.operator_mistakes,
-            Array.isArray(call.recommendations) ? call.recommendations : [call.recommendations].filter(Boolean) as string[],
-            salonName
-          );
-          call.evaluation = evalObj;
-          call.criteria_scores = evalObj.criteria;
-          if (!call.key_facts) {
-            call.key_facts = {
-              is_dispute: false,
-              dispute_reason: null,
-              promises: [],
-              tone_client: 'нейтральный',
-              tone_manager: 'нейтральный',
-              call_outcome: 'консультация'
-            };
-          }
-          call.key_facts.evaluation = evalObj;
-          call.key_facts.criteria_scores = evalObj.criteria;
-          if (evalObj.overall_score !== null && (call.operator_score === null || call.operator_score === undefined)) {
-            call.operator_score = Math.round(evalObj.overall_score);
-          }
+        // Авто-миграция: полная фактологическая оценка по 10 критериям и устранение любых противоречий
+        const evalObj = extractCallEvaluation(
+          call.transcript || '',
+          call.summary || '',
+          call.evaluation || null,
+          call.operator_score,
+          call.operator_mistakes,
+          Array.isArray(call.recommendations) ? call.recommendations : [call.recommendations].filter(Boolean) as string[],
+          salonName
+        );
+        call.evaluation = evalObj;
+        call.criteria_scores = evalObj.criteria;
+        if (!call.key_facts) {
+          call.key_facts = {
+            is_dispute: false,
+            dispute_reason: null,
+            promises: [],
+            tone_client: 'нейтральный',
+            tone_manager: 'нейтральный',
+            call_outcome: 'консультация'
+          };
+        }
+        call.key_facts.evaluation = evalObj;
+        call.key_facts.criteria_scores = evalObj.criteria;
+        if (evalObj.overall_score !== null) {
+          call.operator_score = Math.round(evalObj.overall_score);
+        }
+
+        // Гармонизируем ошибки и советы с критериями оценки
+        const harmonized = harmonizeMistakesAndEvaluation(
+          call.operator_mistakes || [],
+          Array.isArray(call.recommendations) ? call.recommendations : [call.recommendations].filter(Boolean) as string[],
+          evalObj,
+          call.transcript
+        );
+        call.operator_mistakes = harmonized.mistakes;
+        call.recommendations = harmonized.advice;
+
+        // Переформатируем резюме так, чтобы блок «Разбор работы менеджера» идеально соответствовал критериям
+        const formatted = formatSummaryWithEssence(
+          call.summary || '',
+          call.transcript || '',
+          undefined,
+          salonName,
+          call.operator_score,
+          call.operator_mistakes,
+          call.recommendations,
+          call.operator_comment,
+          evalObj
+        );
+        if (call.summary !== formatted.formattedSummary) {
+          call.summary = formatted.formattedSummary;
           fixedCount++;
         }
 
