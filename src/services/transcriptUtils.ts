@@ -51,48 +51,183 @@ export function calculateTextSimilarity(s1: string, s2: string): number {
   return (2.0 * intersection) / total;
 }
 
+const IVR_SENTENCE_PATTERNS: RegExp[] = [
+  /обращаем\s+ваше\s+внимание[\s,]*разговор[\s,]*может[\s,]*быть[\s,]*записан[.!?]*/iu,
+  /разговор[\s,]*может[\s,]*быть[\s,]*записан(?:\s+в\s+целях\s+повышения\s+качества[^.!?]*)?[.!?]*/iu,
+  /здравствуйте[\s,]*оставайтесь\s+на\s+линии[\s,]*вам\s+ответит[^.!?]*[.!?]*/iu,
+  /оставайтесь\s+на\s+линии[^.!?]*[.!?]*/iu,
+  /здравствуйте[\s,]*вы\s+позвонили\s+в\s+салон[^.!?]*[.!?]*/iu,
+  /вы\s+позвонили\s+в\s+салон[^.!?]*[.!?]*/iu,
+  /мы\s+очень\s+рады[\s,]*что\s+вы\s+позвонили\s+именно\s+нам(?:\s+в\s+целях\s+повышения\s+качества(?:\s+обслуживания)?)?[.!?]*/iu,
+  /в\s+целях\s+повышения\s+качества(?:\s+обслуживания)?(?:\s+разговор[^.!?]*)?[.!?]*/iu,
+  /ваш\s+звонок\s+очень\s+важен\s+для\s+нас[^.!?]*[.!?]*/iu,
+  /соединяем\s+(?:вас\s+)?с\s+(?:оператором|администратором|сотрудником)[^.!?]*[.!?]*/iu,
+];
+
+/**
+ * Проверяет, является ли фраза полностью системным автоинформатором АТС (IVR).
+ */
+export function isIvrUtterance(text: string): boolean {
+  const cleaned = (text || '')
+    .replace(/^(?:Автоинформатор|Менеджер|Клиент|Администратор|Оператор|Неизвестный)\s*:\s*/i, '')
+    .trim();
+  if (!cleaned) return false;
+  let remainder = cleaned;
+  let matchedAny = false;
+  for (const pat of IVR_SENTENCE_PATTERNS) {
+    const gPat = new RegExp(pat.source, 'giu');
+    if (gPat.test(remainder)) {
+      matchedAny = true;
+      remainder = remainder.replace(gPat, ' ');
+    }
+  }
+  if (!matchedAny) return false;
+  const leftover = remainder.replace(/[\s.,!?;:\-–—]+/g, '').trim();
+  return leftover.length < 4;
+}
+
+/**
+ * Отделяет префикс автоинформатора АТС от начала реплики, сохраняя живой диалог.
+ */
+export function extractIvrPrefix(line: string): { ivr: string | null; rest: string } {
+  let working = (line || '').trim();
+  if (/^Автоинформатор\s*:/i.test(working)) {
+    return {
+      ivr: working.replace(/^Автоинформатор\s*:\s*/i, '').trim(),
+      rest: ''
+    };
+  }
+
+  const ivrParts: string[] = [];
+  let progress = true;
+  while (progress && working.length > 0) {
+    progress = false;
+    for (const pat of IVR_SENTENCE_PATTERNS) {
+      const startPat = new RegExp(`^\\s*(?:${pat.source})`, 'iu');
+      const m = working.match(startPat);
+      if (m && m[0].trim().length > 0) {
+        ivrParts.push(m[0].trim());
+        working = working.slice(m[0].length).replace(/^[\s.,!?;:\-–—]+/, '').trim();
+        progress = true;
+        break;
+      }
+    }
+  }
+
+  return {
+    ivr: ivrParts.length > 0 ? ivrParts.join(' ').trim() : null,
+    rest: working
+  };
+}
+
+/**
+ * Удаляет все фразы/строки автоинформатора АТС из стенограммы перед анализом смысла
+ * (чтобы фраза «разговор может быть записан» не вызывала ложного срабатывания «запись подтверждена»).
+ */
+export function stripIvrFromTranscript(raw: string): string {
+  if (!raw || typeof raw !== 'string') return '';
+  const lines = raw.split('\n');
+  const cleanLines: string[] = [];
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) continue;
+    if (/^Автоинформатор\s*:/i.test(trimmed)) continue;
+
+    const speakerPrefixMatch = trimmed.match(/^(Менеджер:|Клиент:|Администратор:|Оператор:|Неизвестный:)\s*/i);
+    const prefix = speakerPrefixMatch ? speakerPrefixMatch[0] : '';
+    const body = prefix ? trimmed.slice(prefix.length).trim() : trimmed;
+
+    const { rest } = extractIvrPrefix(body);
+    let cleanedBody = rest;
+    for (const pat of IVR_SENTENCE_PATTERNS) {
+      cleanedBody = cleanedBody.replace(new RegExp(pat.source, 'giu'), ' ');
+    }
+    cleanedBody = cleanedBody.replace(/\s{2,}/g, ' ').replace(/^[\s.,!?;:\-–—]+/, '').trim();
+
+    if (cleanedBody.length > 0) {
+      cleanLines.push(`${prefix}${cleanedBody}`);
+    }
+  }
+
+  return cleanLines.join('\n').trim();
+}
+
+/**
+ * Разделяет длинный монолитный блок текста на потенциальные смены реплик по границам предложений.
+ */
+function splitBySentenceTurnBoundaries(text: string): string[] {
+  // 1. Разделяем после приветствия администратора, если за ним сразу следует реплика клиента
+  const afterIntroRe = /^((?:добр(?:ый\s+день|ое\s+утро|ый\s+вечер)|здравствуйте|алло)[,\s]*(?:салон(?:\s+красоты)?|администратор)[^.!?]*[.!?]?)\s+(.+)$/iu;
+  const introMatch = text.match(afterIntroRe);
+  if (introMatch && introMatch[1].trim().length > 5 && introMatch[2].trim().length > 3) {
+    return [introMatch[1].trim(), ...splitBySentenceTurnBoundaries(introMatch[2].trim())];
+  }
+
+  // 2. Разделяем по знаку вопроса или точки перед явными сменными репликами
+  const splitPoints = text.split(
+    /(?<=[?])\s+(?=[А-ЯЁA-Z])|(?<=[.!])\s+(?=(?:Алло|Здравствуйте|Добрый\s+день|Доброе\s+утро|Добрый\s+вечер|Мо[её]\s+имя|Меня\s+зовут|Я\s+хотел|А\s+у\s+вас|А\s+подскажите|Подскажите|Скажите|Угу|Ага|Да,|Нет,|Хорошо,|Ладно,|В\s+нашем\s+салоне|Ничего\s+страшного|Будем\s+вас\s+ожидать|Сейчас\s+прочитаем|Всего\s+доброго|До\s+свидания)(?=[^\p{L}]|$))/u
+  );
+
+  return splitPoints.map(s => s.trim()).filter(Boolean);
+}
+
 /**
  * Разделяет склеенные в одном предложении реплики разных говорящих
- * (например, прощание администратора и ответ клиента «Угу взаимно...»)
+ * (например, автоинформатор + приветствие, прощание администратора + ответ клиента)
  */
-export function splitConjoinedLines(lines: string[]): { text: string; forcedSpeaker?: 'Менеджер' | 'Клиент' }[] {
-  const result: { text: string; forcedSpeaker?: 'Менеджер' | 'Клиент' }[] = [];
+export function splitConjoinedLines(lines: string[]): { text: string; forcedSpeaker?: 'Менеджер' | 'Клиент' | 'Автоинформатор' }[] {
+  const result: { text: string; forcedSpeaker?: 'Менеджер' | 'Клиент' | 'Автоинформатор' }[] = [];
 
   for (const line of lines) {
-    const raw = line.replace(/^(Менеджер:|Клиент:|Администратор:|Оператор:|Неизвестный:)\s*/i, '').trim();
-    if (!raw) continue;
+    const rawLine = line.replace(/^(Менеджер:|Клиент:|Администратор:|Оператор:|Автоинформатор:|Неизвестный:)\s*/i, '').trim();
+    if (!rawLine) continue;
 
-    // Склейка в финале: Прощание администратора + ответ клиента
-    const fareMatch = raw.match(
-      /^(.*?(?:записать|до свидания|всего доброго|рады видеть|до встречи))\s+(Угу\s+(?:взаимно|все|да).*|взаимно.*|и вам.*|спасибо.*до свидания.*)$/i
-    );
-    if (fareMatch && fareMatch[1].trim().length > 3 && fareMatch[2].trim().length > 3) {
-      result.push({ text: fareMatch[1].trim(), forcedSpeaker: 'Менеджер' });
-      result.push({ text: fareMatch[2].trim(), forcedSpeaker: 'Клиент' });
-      continue;
+    // Отделяем системное сообщение автоинформатора от живого диалога
+    const { ivr, rest } = extractIvrPrefix(rawLine);
+    if (ivr) {
+      result.push({ text: ivr, forcedSpeaker: 'Автоинформатор' });
     }
+    if (!rest) continue;
 
-    // Склейка в начале: Приветствие администратора + ответ/просьба клиента
-    const greetMatch = raw.match(
-      /^(.*?(?:слушаю вас|чем могу помочь)[.!]?)\s+([Зз]дравствуйте.*|[Дд]обрый.*|[Аа]\s+подскажите.*|[Яя]\s+бы хотел.*)/i
-    );
-    if (greetMatch && greetMatch[1].trim().length > 3 && greetMatch[2].trim().length > 3) {
-      result.push({ text: greetMatch[1].trim(), forcedSpeaker: 'Менеджер' });
-      result.push({ text: greetMatch[2].trim(), forcedSpeaker: 'Клиент' });
-      continue;
+    // Разбиваем потенциально склеенные предложения на фрагменты
+    const fragments = splitBySentenceTurnBoundaries(rest);
+
+    for (const raw of fragments) {
+      if (!raw) continue;
+
+      // Склейка в финале: Прощание администратора + ответ клиента
+      const fareMatch = raw.match(
+        /^(.*?(?:записать|до свидания|всего доброго|рады видеть|до встречи|будем вас ожидать)[.!?]?)\s+(Угу\s+(?:взаимно|все|да).*|взаимно.*|и вам.*|хорошо,?\s+спасибо.*|спасибо.*до свидания.*)$/i
+      );
+      if (fareMatch && fareMatch[1].trim().length > 3 && fareMatch[2].trim().length > 3) {
+        result.push({ text: fareMatch[1].trim(), forcedSpeaker: 'Менеджер' });
+        result.push({ text: fareMatch[2].trim(), forcedSpeaker: 'Клиент' });
+        continue;
+      }
+
+      // Склейка в начале: Приветствие администратора + ответ/просьба клиента
+      const greetMatch = raw.match(
+        /^(.*?(?:слушаю вас|чем могу помочь|администратор\s+[А-ЯЁа-яё]+)[.!]?)\s+([Зз]дравствуйте.*|[Дд]обрый.*|[Аа]лло.*|[Аа]\s+подскажите.*|[Яя]\s+бы хотел.*|[Яя]\s+хотел.*|[Мм]о[её]\s+имя.*)/iu
+      );
+      if (greetMatch && greetMatch[1].trim().length > 3 && greetMatch[2].trim().length > 3) {
+        result.push({ text: greetMatch[1].trim(), forcedSpeaker: 'Менеджер' });
+        result.push({ text: greetMatch[2].trim(), forcedSpeaker: 'Клиент' });
+        continue;
+      }
+
+      // Склейка вопроса о номере: Вопрос администратора + номер клиента
+      const phoneMatch = raw.match(
+        /^(.*?(?:подскажите ваш номер|ваш номер|номер телефона)[?.:!]?)\s+([0-9\s-+]{3,}.*)/i
+      );
+      if (phoneMatch && phoneMatch[1].trim().length > 3 && phoneMatch[2].trim().length > 3) {
+        result.push({ text: phoneMatch[1].trim(), forcedSpeaker: 'Менеджер' });
+        result.push({ text: phoneMatch[2].trim(), forcedSpeaker: 'Клиент' });
+        continue;
+      }
+
+      result.push({ text: raw });
     }
-
-    // Склейка вопроса о номере: Вопрос администратора + номер клиента
-    const phoneMatch = raw.match(
-      /^(.*?(?:подскажите ваш номер|ваш номер|номер телефона)[?.:!]?)\s+([0-9\s-+]{3,}.*)/i
-    );
-    if (phoneMatch && phoneMatch[1].trim().length > 3 && phoneMatch[2].trim().length > 3) {
-      result.push({ text: phoneMatch[1].trim(), forcedSpeaker: 'Менеджер' });
-      result.push({ text: phoneMatch[2].trim(), forcedSpeaker: 'Клиент' });
-      continue;
-    }
-
-    result.push({ text: raw });
   }
 
   return result;
@@ -121,6 +256,7 @@ export const DEFAULT_ROLE_MARKERS: RoleMarkersConfig = {
     'салон красоты',
     'fashion look',
     'фешен лук',
+    'фэшн лук',
     'fls',
     'лик 28',
     'слушаю вас',
@@ -140,7 +276,18 @@ export const DEFAULT_ROLE_MARKERS: RoleMarkersConfig = {
     'хотели бы попробовать',
     'к другому хотели бы',
     'могу предложить',
+    'могли бы предложить',
+    'предложить запись',
     'предложу запись',
+    'в нашем салоне',
+    'выполняется',
+    'нет такой услуги',
+    'ничего страшного',
+    'будем вас ожидать',
+    'будем ожидать',
+    'будем ждать',
+    'сейчас прочитаем',
+    'прочитаем обязательно',
     'у мастера нерабочий день',
     'у мастера выходной',
     'мастер не работает',
@@ -153,14 +300,36 @@ export const DEFAULT_ROLE_MARKERS: RoleMarkersConfig = {
     'единственное время свободное',
     'хорошего дня вам, кристина',
     'хорошего дня вам',
+    'записываю вас',
+    'записала вас',
+    'запись подтверждаем',
   ],
   client: [
     'а подскажите',
+    'а у вас есть',
+    'у вас есть',
     'у кого я стригла',
     'стригла челку',
     'хотела бы',
+    'хотела предупредить',
+    'хотел предупредить',
+    'я хотела',
+    'я хотел',
+    'опоздаю',
+    'задержусь',
+    'мое имя',
+    'моё имя',
+    'для вашего салона',
+    'вам прислал',
+    'в ватсапе',
+    'цифровая завивка',
+    'японская завивка',
+    'химическая, да',
+    'нет, цифровую',
+    'цифровую надо',
     'хочу записаться',
     'хочется записаться',
+    'у меня запись',
     'чикнула прям 5 минут',
     'чикнула',
     'мне нельзя вот',
@@ -168,7 +337,6 @@ export const DEFAULT_ROLE_MARKERS: RoleMarkersConfig = {
     'не будет в городе',
     'в москве',
     'верно.',
-    'верно',
     'да, верно',
     'угу взаимно',
     'взаимно все хорошего дня',
@@ -180,20 +348,11 @@ export const DEFAULT_ROLE_MARKERS: RoleMarkersConfig = {
  * спикера (встречные вставки, союзы-связки). Роль предыдущей реплики сохраняется,
  * переключение не выполняется.
  */
-const CONTINUATION_PREFIXES = ['и ', 'ну ', 'то есть ', 'да и ', 'а ', 'но '];
+const CONTINUATION_PREFIXES = ['и ', 'ну ', 'то есть ', 'да и ', 'но '];
 
 /**
- * Интеллектуально нормализует и распределяет реплики по ролям Менеджер / Клиент,
+ * Интеллектуально нормализует и распределяет реплики по ролям Автоинформатор / Менеджер / Клиент,
  * исправляя ошибочные метки и склеенные предложения.
- *
- * П. 3.7 ТЗ: метки спикеров (0/1, 1/2) в SpeechKit УСЛОВНЫ — они не привязаны к
- * ролям. Данная эвристика не претендует на 100% точность: возможны инверсии меток
- * и короткие встречные реплики разных людей. Финальная выверка ролей выполняется
- * на верхнем уровне (или вручную).
- *
- * Правило: реплики с разными метками спикера НИКОГДА не склеиваются, даже если
- * грамматически стыкуются. Склейка допустима только внутри одной метки при
- * связности высказывания.
  */
 export function refineTranscriptRoles(
   raw: string,
@@ -207,6 +366,7 @@ export function refineTranscriptRoles(
   const splitItems = splitConjoinedLines(rawLines);
   const result: string[] = [];
   let prevSpeaker: 'Менеджер' | 'Клиент' = 'Клиент';
+  let firstHumanSeen = false;
 
   const managerMarkers = markers.manager.map(m => m.toLowerCase());
   const clientMarkers = markers.client.map(m => m.toLowerCase());
@@ -216,28 +376,41 @@ export function refineTranscriptRoles(
     const phrase = item.text;
     const lower = phrase.toLowerCase();
 
-    if (item.forcedSpeaker) {
-      result.push(`${item.forcedSpeaker}: ${phrase}`);
-      prevSpeaker = item.forcedSpeaker;
+    if (item.forcedSpeaker === 'Автоинформатор' || isIvrUtterance(phrase)) {
+      result.push(`Автоинформатор: ${phrase}`);
+      // Автоинформатор не меняет состояние очередности живых говорящих
       continue;
     }
 
-    // П. 3.7 ТЗ: фраза — продолжение мысли предыдущего спикера.
-    // Начинается со строчной буквы или союза-связки => роль не переключаем.
+    if (item.forcedSpeaker) {
+      result.push(`${item.forcedSpeaker}: ${phrase}`);
+      prevSpeaker = item.forcedSpeaker;
+      firstHumanSeen = true;
+      continue;
+    }
+
+    const isManagerByMarker = managerMarkers.some(m => lower.includes(m));
+    const isClientByMarker =
+      clientMarkers.some(m => lower.includes(m)) ||
+      /^\+?[0-9\s-]{3,}$/.test(phrase) ||
+      /^алло[,\s]+(?:здравствуйте|добрый)/i.test(phrase) ||
+      /^нет,\s+.*?надо(?:[^\p{L}]|$)/iu.test(phrase);
+
+    // П. 3.7 ТЗ: фраза — продолжение мысли предыдущего спикера (если нет явного конфликта ролей).
     const startsLowercase = /^[а-яёa-z]/.test(phrase);
     const startsWithConnector = CONTINUATION_PREFIXES.some(p => lower.startsWith(p));
-    if (i > 0 && (startsLowercase || startsWithConnector)) {
+    if (firstHumanSeen && (startsLowercase || startsWithConnector) && !(prevSpeaker === 'Клиент' && isManagerByMarker && !isClientByMarker) && !(prevSpeaker === 'Менеджер' && isClientByMarker && !isManagerByMarker)) {
       result.push(`${prevSpeaker}: ${phrase}`);
       continue;
     }
 
-    const isManager =
-      (i === 0 && (lower.includes('добрый') || lower.includes('слушаю') || lower.includes('салон') || lower.includes('здравствуйте'))) ||
-      managerMarkers.some(m => lower.includes(m));
+    const isFirstHumanGreetingManager =
+      !firstHumanSeen &&
+      !isClientByMarker &&
+      (lower.includes('добрый') || lower.includes('слушаю') || lower.includes('салон') || lower.includes('здравствуйте'));
 
-    const isClient =
-      clientMarkers.some(m => lower.includes(m)) ||
-      /^\+?[0-9\s-]{3,}$/.test(phrase); // Цифры номера телефона
+    const isManager = isManagerByMarker || isFirstHumanGreetingManager;
+    const isClient = isClientByMarker;
 
     let currentSpeaker: 'Менеджер' | 'Клиент';
     if (isManager && !isClient) {
@@ -248,6 +421,7 @@ export function refineTranscriptRoles(
       currentSpeaker = prevSpeaker === 'Менеджер' ? 'Клиент' : 'Менеджер';
     }
 
+    firstHumanSeen = true;
     result.push(`${currentSpeaker}: ${phrase}`);
     prevSpeaker = currentSpeaker;
   }
@@ -265,12 +439,12 @@ export function fixDuplicatedTranscript(
 ): string {
   if (!raw || typeof raw !== 'string') return raw;
   const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
-  if (lines.length < 2) return raw;
+  if (lines.length === 0) return raw;
 
   // Извлекаем чистые фразы и удаляем подряд идущие дубликаты
   const cleanPhrases: string[] = [];
   for (let i = 0; i < lines.length; i++) {
-    const textOnly = lines[i].replace(/^(Менеджер:|Клиент:|Администратор:|Оператор:|Неизвестный:)\s*/i, '').trim();
+    const textOnly = lines[i].replace(/^(Менеджер:|Клиент:|Администратор:|Оператор:|Автоинформатор:|Неизвестный:)\s*/i, '').trim();
     if (!textOnly) continue;
 
     if (cleanPhrases.length > 0) {
@@ -287,6 +461,6 @@ export function fixDuplicatedTranscript(
     cleanPhrases.push(textOnly);
   }
 
-  // Применяем ролевую диаризацию и сплит склеенных предложений
+  // Применяем ролевую диаризацию и сплит склеенных предложений (в т.ч. для однострочных стенограмм)
   return refineTranscriptRoles(cleanPhrases.join('\n'), markers);
 }

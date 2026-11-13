@@ -4,6 +4,8 @@
  */
 
 import { CallEvaluationCriterion, CallEvaluation } from '../types.js';
+import { stripIvrFromTranscript } from './transcriptUtils.js';
+import { classifyCallContext, CallContextClassification } from './summaryUtils.js';
 
 export interface CriterionDefinition {
   id: string;
@@ -183,10 +185,11 @@ export interface DialogueUtterances {
 }
 
 /**
- * Извлекает реплики менеджера и клиента для раздельного фактологического анализа
+ * Извлекает реплики менеджера и клиента (без строк автоинформатора) для раздельного фактологического анализа
  */
 export function splitSpeakerLines(transcript: string): DialogueUtterances {
-  const lines = (transcript || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const cleanTranscript = stripIvrFromTranscript(transcript || '');
+  const lines = cleanTranscript.split('\n').map(l => l.trim()).filter(Boolean);
   const managerLines: string[] = [];
   const clientLines: string[] = [];
 
@@ -194,7 +197,7 @@ export function splitSpeakerLines(transcript: string): DialogueUtterances {
     if (/^(?:менеджер|администратор|оператор)\s*:/i.test(line)) {
       managerLines.push(line.replace(/^(?:менеджер|администратор|оператор)\s*:/i, '').trim());
     } else if (/^(?:клиент|гость)\s*:/i.test(line)) {
-      clientLines.push(line.replace(/^(?:клиент|гость)\s*:/i, '').trim());
+      clientLines.push(line.replace(/^(?:клиент|гость)\s*:\s*/i, '').trim());
     }
   }
 
@@ -204,7 +207,7 @@ export function splitSpeakerLines(transcript: string): DialogueUtterances {
   return {
     managerText,
     clientText,
-    fullText: transcript || ''
+    fullText: cleanTranscript
   };
 }
 
@@ -221,31 +224,40 @@ export function extractCallEvaluation(
   recommendations?: string[],
   customSalonName?: string
 ): CallEvaluation {
-  // Если уже есть готовый массив из 10 критериев в объекте оценки с валидными флагами
+  const ctx: CallContextClassification = classifyCallContext(transcript || '', summary || '');
+
+  // Проверка валидности уже существующей оценки (защита от галлюцинаций и противоречий со стенограммой)
   if (existingEvaluation?.criteria && Array.isArray(existingEvaluation.criteria) && existingEvaluation.criteria.length >= 10) {
-    // Проверяем, не содержит ли existingEvaluation устаревшую галлюцинацию по additional_services
-    // Если в существующей оценке additional_services было 10/10, но в mistakes значится "Не предложены сопутствующие",
-    // нормализуем на основе транскрипта
-    const crit6 = existingEvaluation.criteria.find(c => c.id === 'additional_services');
+    const critMap = new Map(existingEvaluation.criteria.map(c => [c.id, c]));
+    const crit6 = critMap.get('additional_services');
+    const critClosing = critMap.get('closing_booking');
+    const critPrice = critMap.get('price_presentation');
+    const critMaster = critMap.get('service_and_master_presentation');
     const mistakesStr = (mistakes || []).join(' ').toLowerCase();
-    const hasMistakeContradiction = crit6 && crit6.score === 10 && mistakesStr.includes('сопутствующ');
-    if (!hasMistakeContradiction) {
+
+    const hasCrossSellContradiction = crit6 && crit6.score === 10 && mistakesStr.includes('сопутствующ');
+    const hasWrongClosing10 =
+      !ctx.isConfirmedBooking &&
+      !ctx.isRescheduleOrCheck &&
+      critClosing &&
+      critClosing.is_applicable !== false &&
+      (critClosing.score ?? 0) >= 8;
+    const hasSalesOnNonSalesCall =
+      (ctx.isNonClient || ctx.isLateWarning) &&
+      (critClosing?.is_applicable !== false || critPrice?.is_applicable !== false || critMaster?.is_applicable !== false);
+    const hasFakePriceExplanation =
+      critPrice &&
+      critPrice.is_applicable !== false &&
+      /прайс озвучен без детализации/i.test(critPrice.explanation || '') &&
+      !/(?:стоить|рубл|₽|цена|прайс|стоит|стоимость|\d{3,5}\s*р)/iu.test(ctx.cleanTranscript);
+
+    if (!hasCrossSellContradiction && !hasWrongClosing10 && !hasSalesOnNonSalesCall && !hasFakePriceExplanation) {
       return buildCallEvaluation(existingEvaluation.criteria);
     }
   }
 
-  const salon = customSalonName || 'Fashion Look Studio';
-  const tLower = (transcript || '').toLowerCase();
-  const sLower = (summary || '').toLowerCase();
-
   // Разговор не состоялся
-  const isFailedCall =
-    tLower.includes('разговор не состоялся') ||
-    sLower.includes('разговор не состоялся') ||
-    tLower.includes('диалог отсутствует') ||
-    (!tLower.includes('менеджер:') && !tLower.includes('клиент:'));
-
-  if (isFailedCall) {
+  if (ctx.category === 'not_happened') {
     const failedCriteria: CallEvaluationCriterion[] = EVALUATION_CRITERIA_DEFINITIONS.map(def => ({
       id: def.id,
       name: def.name,
@@ -264,100 +276,175 @@ export function extractCallEvaluation(
     };
   }
 
-  // Разделение реплик говорящих
-  const { managerText, clientText, fullText } = splitSpeakerLines(transcript);
+  // Разделение реплик говорящих (строго без автоинформатора)
+  const { managerText, clientText, fullText } = splitSpeakerLines(ctx.cleanTranscript);
   const managerEffective = managerText || fullText;
+  const clientEffective = clientText || fullText;
 
-  // Анализ типа обращения
-  const isDispute = /(?:претензи|жалоб|отмен|издеваетесь|недоволен|почему отменили|верните деньги)/iu.test(fullText);
-  const isRescheduleOrCheck = /(?:перенести запись|перенос записи|у меня запись на|хотела уточнить запись|проверить запись|оставляем все спасибо|на 9 оставляю на 10:30 убираю)/iu.test(fullText)
-    && !/(?:первичн|впервые|хочу записаться на|запишите меня)/iu.test(clientText || fullText);
+  // 1. Приветствие и представление (строго по стартовой реплике приветствия менеджера)
+  const rawOpeningManager = (managerText || fullText).slice(0, 160).trim();
+  const openingManagerText = rawOpeningManager.split(/(?<=[.!?])\s+/)[0] || rawOpeningManager;
+  const hasGreeting = /(?:добрый день|здравствуйте|доброе утро|добрый вечер|приветствую|алло)/iu.test(openingManagerText);
+  const hasManagerNameIntro = /(?:меня зовут|администратор(?:\s+салона[^.!?]{0,40})?\s+[А-ЯЁа-яё]+|это\s+[А-ЯЁа-яё]+)/iu.test(openingManagerText);
+  const hasSalonName = /(?:студи|салон|fashion|фешен|фэшн|лик)/iu.test(openingManagerText);
 
-  // 1. Приветствие и представление (проверяем реплики администратора)
-  const hasGreeting = /(?:добрый день|здравствуйте|доброе утро|добрый вечер|салон|приветствую)/iu.test(managerEffective);
-  const hasManagerNameIntro = /(?:меня зовут|администратор\s+[а-яё]+|это\s+[а-яё]+)/iu.test(managerEffective);
-  const hasSalonName = /(?:студи|салон|fashion|фешен|фэшн|лик)/iu.test(managerEffective);
-
-  // 2. Выявление потребности гостя
-  const hasNeedsQuestions = /(?:какую услугу|на какую|когда вам|в какое время|какой мастер|что именно|подскажите|хотели бы|планируете|на какое число)/iu.test(managerEffective);
-
-  // 3. Презентация услуги и мастера
-  const hasMasterPresented = /(?:мастер|кристина|анна|елена|татьяна|арина|наталья|ирина|ольга|специалист|квалификац|ведущий специалист|топ-мастер)/iu.test(managerEffective);
-
-  // 4. Корректная презентация стоимости
-  const hasPriceMention = /(?:стоить|рубл|₽|цена|прайс|стоит|стоимость)/iu.test(managerEffective);
-
-  // 5. Работа с возражениями
-  // Возражения гостя: сомнения, высокая цена, неудобное время, претензия
-  const hasObjections = /(?:дорого|не могу|не успе|не удобн|отъезд|не получ|занят|пораньше нельзя|не подходит|почему отменили|издеваетесь|претензи|жалоб)/iu.test(clientText || fullText);
-  const handledObjectionWell = /(?:могу предложить|давайте посмотрим|лист ожидания|другой мастер|альтернатив|перенесем|в субботу|в воскресенье|скидк|компенсац|извините|понимаем вас)/iu.test(managerEffective);
-
-  // 6. Предложение дополнительных услуг (допродажа / сопутствующие процедуры)
-  // ВАЖНО: проверяем, исходило ли предложение сопутствующих услуг ОТ АДМИНИСТРАТОРА,
-  // а не просто запрос клиента ("хочу макияж и укладку")!
-  const managerOfferedCrossSell =
-    // Предложение снятия покрытия
-    /(?:сняти|со\s+снятием|нужно\s+ли\s+снять|потребуется\s+ли\s+снятие)/iu.test(managerEffective) ||
-    // Предложение дизайна ногтей
-    /(?:дизайн|будем\s+делать\s+дизайн|с\s+дизайном)/iu.test(managerEffective) ||
-    // Предложение ухода, спа, маски, ламинирования, пилинга, парафинотерапии, укрепления
-    /(?:спа-уход|спа\s+уход|уход\s+для|уходовую|маск|экранирован|ламинирован|пилинг|парафинотерапи|парафин|укреплени)/iu.test(managerEffective) ||
-    // Проактивное предложение второй услуги (к маникюру - педикюр, к стрижке - укладка/уход)
-    /(?:могу|можем)\s+(?:также\s+)?предложить\s+(?:вам\s+)?(?:педикюр|маникюр|бров|ресниц|укладк|стрижк|уход|макияж)/iu.test(managerEffective) ||
-    // Прямой вопрос допродажи
-    /(?:не\s+хотите\s+(?:ли\s+)?добавить|записать\s+вас\s+также\s+на|будем\s+делать\s+также|рекомендую\s+также|предложу\s+вам\s+также|дополнительно\s+можем)/iu.test(managerEffective) ||
-    // Фиксация предложения в резюме диалога со стороны администратора
-    /(?:администратор\s+предложил\s+сопутствующ|администратор\s+предложил\s+уход|администратор\s+предложил\s+дизайн)/iu.test(summary);
-
-  // Применимость критерия дополнительных услуг:
-  // При разрешении конфликта/претензии или при переносе существующей брони допродажи не применимы!
-  const isCrossSellApplicable = !isDispute && !isRescheduleOrCheck;
-
-  // 7. Параллельная запись (в 4 руки / для двоих)
-  // Применима ТОЛЬКО если обсуждался комплекс услуг (маникюр + педикюр, макияж + укладка) или запись для 2 человек
-  const isMultipleServices = /(?:маникюр\s+и\s+педикюр|педикюр\s+и\s+маникюр|макияж\s+и\s+укладка|укладка\s+и\s+макияж|2\s+макияжа|два\s+макияжа|вдвоем|подруг|сестр|вместе\s+с|для\s+двоих|2\s+человек)/iu.test(fullText);
-  const hasParallelOffer = /(?:в\s+4\s+руки|в\s+четыре\s+руки|одновременно|параллельно|сразу\s+два\s+мастера)/iu.test(managerEffective);
-
-  // 8. Предложение альтернативных вариантов (вилка времени, другие дни, другие мастера, лист ожидания)
-  // Применимо ТОЛЬКО при занятости слота, несовпадении графиков или первичном отказе гостя
-  const isSlotConflict = /(?:занят|забронирован|нет мест|нет свободного|не могу|не успе|не подходит время|не получается|пораньше нельзя)/iu.test(fullText);
-  const hasAlternativesOffered = /(?:или\s+на|есть\s+еще|могу\s+предложить\s+на|а\s+если|в\s+\d{1,2}:\d{2}\s+или\s+в\s+\d{1,2}:\d{2}|на\s+субботу|на\s+воскресенье|к\s+другому\s+мастеру|лист\s+ожидания)/iu.test(managerEffective);
-
-  // 9. Закрытие на запись
-  const hasBookingClosing = /(?:записываю вас|записала вас|ждем вас|запись подтверждаем|будем вас ожидать|оставляем|зафиксировала)/iu.test(managerEffective);
-  const isBookingAgreed = /(?:согласие|запись)/iu.test(summary) || hasBookingClosing;
-
-  // 10. Качество коммуникации и завершение
-  const hasPoliteClosing = /(?:до свидания|всего доброго|хорошего дня|ждем вас|спасибо|до встречи)/iu.test(managerEffective);
-  const hasReminderMention = /(?:напоминание|whatsapp|ватсап|смс|накануне|за полчаса|за 24 часа|сообщени)/iu.test(managerEffective);
-
-  const criteria: CallEvaluationCriterion[] = [
-    // 1. Приветствие и представление
-    {
-      id: 'greeting_intro',
-      name: 'Приветствие и представление',
-      is_applicable: true,
-      score: hasGreeting && hasManagerNameIntro && hasSalonName ? 10 : (hasGreeting && (hasManagerNameIntro || hasSalonName) ? 8 : (hasGreeting ? 7 : 4)),
-      explanation: hasGreeting && hasManagerNameIntro && hasSalonName
-        ? 'Приветствие по полному корпоративному стандарту: назван салон и имя администратора.'
+  const greetingCriterion: CallEvaluationCriterion = {
+    id: 'greeting_intro',
+    name: 'Приветствие и представление',
+    is_applicable: true,
+    score:
+      hasGreeting && hasManagerNameIntro && hasSalonName
+        ? 10
+        : hasManagerNameIntro && hasSalonName
+        ? 9
+        : hasGreeting && (hasManagerNameIntro || hasSalonName)
+        ? 8
+        : hasGreeting
+        ? 7
+        : 4,
+    explanation:
+      hasGreeting && hasManagerNameIntro && hasSalonName
+        ? 'Приветствие по полному корпоративному стандарту: названы салон и имя администратора.'
+        : hasManagerNameIntro && hasSalonName
+        ? 'Администратор представился с названием салона и собственным именем.'
         : hasGreeting && hasManagerNameIntro
-        ? 'Приветствие вежливое с указанием имени администратора, название салона сокращено.'
+        ? 'Приветствие вежливое с указанием имени администратора.'
         : hasGreeting && hasSalonName
         ? 'Приветствие вежливое с названием салона, но администратор не назвал собственное имя.'
         : hasGreeting
-        ? 'Приветствие озвучено вежливо, однако не названы имя администратора и салон.'
+        ? 'Приветствие озвучено вежливо, однако в расшифровке не зафиксированы название салона и имя администратора.'
         : 'Приветствие скомкано или не соответствует корпоративному стандарту.'
-    },
+  };
+
+  // Спец-ветка 1: Нецелевой / партнёрский / организационный звонок (например, билеты в WhatsApp)
+  if (ctx.isNonClient) {
+    const hasPoliteClosing = /(?:до свидания|всего доброго|хорошего дня|спасибо|пожалуйста|обязательно|прочитаем)/iu.test(managerEffective);
+    const acknowledgedAction = /(?:прочитаем|передам|посмотрим|хорошо|спасибо большое)/iu.test(managerEffective);
+    const notApp = 'Звонок носит организационный/партнёрский характер (не клиентская запись), критерий не применим (не снижает оценку).';
+
+    return buildCallEvaluation([
+      greetingCriterion,
+      { id: 'needs_identification', is_applicable: false, score: null, explanation: notApp },
+      { id: 'service_and_master_presentation', is_applicable: false, score: null, explanation: notApp },
+      { id: 'price_presentation', is_applicable: false, score: null, explanation: notApp },
+      { id: 'handling_objections', is_applicable: false, score: null, explanation: notApp },
+      { id: 'additional_services', is_applicable: false, score: null, explanation: notApp },
+      { id: 'parallel_booking', is_applicable: false, score: null, explanation: notApp },
+      { id: 'alternative_options', is_applicable: false, score: null, explanation: notApp },
+      { id: 'closing_booking', is_applicable: false, score: null, explanation: notApp },
+      {
+        id: 'communication_quality_closing',
+        is_applicable: true,
+        score: hasPoliteClosing && acknowledgedAction ? 9 : (hasPoliteClosing ? 8 : 6),
+        explanation: acknowledgedAction
+          ? 'Администратор вежливо принял информацию и подтвердил готовность ознакомиться с ней и завершил разговор корректно.'
+          : 'Вежливое завершение организационного звонка.'
+      }
+    ]);
+  }
+
+  // Спец-ветка 2: Предупреждение клиента об опоздании по существующей записи
+  if (ctx.isLateWarning) {
+    const confirmedWaiting = /(?:ничего страшного|будем вас ожидать|будем ждать|ждем вас|хорошо)/iu.test(managerEffective);
+    const clarifiedClientOrTime = /(?:как вас зовут|на какое время|к кому вы записаны|ваше имя|подскажите фамилию)/iu.test(managerEffective);
+    const notAppLate = 'Клиент позвонил предупредить об опоздании по действующей записи; этап продажи/новой записи не требовался (не снижает оценку).';
+
+    return buildCallEvaluation([
+      greetingCriterion,
+      { id: 'needs_identification', is_applicable: false, score: null, explanation: notAppLate },
+      { id: 'service_and_master_presentation', is_applicable: false, score: null, explanation: notAppLate },
+      { id: 'price_presentation', is_applicable: false, score: null, explanation: notAppLate },
+      { id: 'handling_objections', is_applicable: false, score: null, explanation: notAppLate },
+      { id: 'additional_services', is_applicable: false, score: null, explanation: notAppLate },
+      { id: 'parallel_booking', is_applicable: false, score: null, explanation: notAppLate },
+      { id: 'alternative_options', is_applicable: false, score: null, explanation: notAppLate },
+      { id: 'closing_booking', is_applicable: false, score: null, explanation: notAppLate },
+      {
+        id: 'communication_quality_closing',
+        is_applicable: true,
+        score: confirmedWaiting && clarifiedClientOrTime ? 10 : (confirmedWaiting ? 8 : 6),
+        explanation: confirmedWaiting && clarifiedClientOrTime
+          ? 'Администратор вежливо подтвердил ожидание гостя и уточнил детали существующей записи.'
+          : confirmedWaiting
+          ? 'Администратор доброжелательно подтвердил ожидание опаздывающего клиента, однако не уточнил имя или точное время действующей записи для отметки в расписании.'
+          : 'Ответ на предупреждение об опоздании прозвучал скомканно.'
+      }
+    ]);
+  }
+
+  // Клиентские обращения (первичная запись, перенос, спор, отказ, отсутствие услуги, консультация)
+  const isDispute = ctx.isDispute;
+  const isRescheduleOrCheck = ctx.isRescheduleOrCheck;
+
+  // 2. Выявление потребности гостя
+  const hasNeedsQuestions = /(?:какую услугу|на какую|когда вам|в какое время|какой мастер|что именно|подскажите|хотели бы|планируете|на какое число|какой эффект|какие волосы|на что именно)/iu.test(managerEffective);
+
+  // 3. Презентация услуги и мастера
+  const hasMasterPresented = /(?:мастер|специалист|квалификац|ведущий специалист|топ-мастер|опыт|елена|татьяна|арина|наталья|ольга|анна|кристина|ирина)/iu.test(managerEffective);
+
+  // 4. Корректная презентация стоимости
+  const hasPriceMention = /(?:стоить|рубл|₽|цена|прайс|стоит|стоимость|\d{3,5}\s*р(?![а-яё]))/iu.test(managerEffective);
+  const priceAskedByClient = /(?:сколько стоит|по стоимости|цена|прайс|поч[её]м)/iu.test(clientEffective);
+  const isPriceApplicable =
+    !isRescheduleOrCheck &&
+    (!ctx.isUnavailableServiceRefusal || hasPriceMention || priceAskedByClient) &&
+    (ctx.category !== 'consultation' || hasPriceMention || priceAskedByClient);
+
+  // 5. Работа с возражениями
+  const hasObjections =
+    ctx.isUnavailableServiceRefusal ||
+    /(?:дорого|не могу|не успе|не удобн|неудобно|отъезд|не получ|занят|пораньше нельзя|не подходит|почему отменили|издеваетесь|претензи|жалоб|(?:^|[^\p{L}])нет,\s+[^\n.!?]*(?:надо|нужно)(?:[^\p{L}]|$))/iu.test(clientEffective);
+  const handledObjectionWell = /(?:могу предложить|давайте посмотрим|лист ожидания|другой мастер|альтернатив|перенесем|в субботу|в воскресенье|скидк|компенсац|извините|понимаем вас|могли бы предложить запись на консультацию)/iu.test(managerEffective);
+
+  // 6. Предложение дополнительных услуг (допродажа / сопутствующие процедуры)
+  const managerOfferedCrossSell =
+    /(?:сняти|со\s+снятием|нужно\s+ли\s+снять|потребуется\s+ли\s+снятие)/iu.test(managerEffective) ||
+    /(?:дизайн|будем\s+делать\s+дизайн|с\s+дизайном)/iu.test(managerEffective) ||
+    /(?:спа-уход|спа\s+уход|уход\s+для|уходовую|маск|экранирован|ламинирован|пилинг|парафинотерапи|парафин|укреплени)/iu.test(managerEffective) ||
+    /(?:могу|можем)\s+(?:также\s+)?предложить\s+(?:вам\s+)?(?:педикюр|маникюр|бров|ресниц|укладк|стрижк|уход|макияж)/iu.test(managerEffective) ||
+    /(?:не\s+хотите\s+(?:ли\s+)?добавить|записать\s+вас\s+также\s+на|будем\s+делать\s+также|рекомендую\s+также|предложу\s+вам\s+также|дополнительно\s+можем)/iu.test(managerEffective);
+
+  const isCrossSellApplicable =
+    !isDispute &&
+    !isRescheduleOrCheck &&
+    !ctx.isUnavailableServiceRefusal &&
+    ctx.category !== 'declined';
+
+  // 7. Параллельная запись (в 4 руки / для двоих)
+  const isMultipleServices =
+    !ctx.isUnavailableServiceRefusal &&
+    /(?:маникюр\s+и\s+педикюр|педикюр\s+и\s+маникюр|макияж\s+и\s+укладка|укладка\s+и\s+макияж|2\s+макияжа|два\s+макияжа|вдвоем|подруг|сестр|вместе\s+с|для\s+двоих|2\s+человек)/iu.test(fullText);
+  const hasParallelOffer = /(?:в\s+4\s+руки|в\s+четыре\s+руки|одновременно|параллельно|сразу\s+два\s+мастера)/iu.test(managerEffective);
+
+  // 8. Предложение альтернативных вариантов
+  const isSlotConflict =
+    ctx.isUnavailableServiceRefusal ||
+    ctx.category === 'declined' ||
+    /(?:занят|забронирован|нет мест|нет свободного|не могу|не успе|не подходит время|не получается|пораньше нельзя)/iu.test(fullText);
+  const hasAlternativesOffered = /(?:или\s+на|есть\s+еще|могу\s+предложить\s+на|а\s+если|в\s+\d{1,2}:\d{2}\s+или\s+в\s+\d{1,2}:\d{2}|на\s+субботу|на\s+воскресенье|к\s+другому\s+мастеру|лист\s+ожидания|химическ[а-яё]*\s+завивк|запись\s+на\s+консультацию|предложить\s+консультацию)/iu.test(managerEffective);
+
+  // 9. Закрытие на запись
+  const hasBookingAttempt = /(?:записываю вас|записала вас|запись\s+на\s+консультацию|могли бы предложить запись|подойд[её]т|записать вас|подберем время|ждем вас|запись подтверждаем|оставляем|зафиксировала)/iu.test(managerEffective);
+  const isBookingAgreed = ctx.isConfirmedBooking || (isRescheduleOrCheck && /оставляем|подтверждаем/iu.test(managerEffective));
+
+  // 10. Качество коммуникации и завершение
+  const hasPoliteClosing = /(?:до свидания|всего доброго|хорошего дня|ждем вас|спасибо|до встречи|комфортно)/iu.test(managerEffective);
+  const hasReminderMention = /(?:напоминание|whatsapp|ватсап|смс|накануне|за полчаса|за 24 часа|сообщени)/iu.test(managerEffective);
+
+  const criteria: CallEvaluationCriterion[] = [
+    greetingCriterion,
 
     // 2. Выявление потребности гостя
     {
       id: 'needs_identification',
       name: 'Выявление потребности гостя',
       is_applicable: true,
-      score: hasNeedsQuestions ? 9 : 7,
+      score: hasNeedsQuestions ? 9 : (ctx.isUnavailableServiceRefusal ? 6 : 7),
       explanation: hasNeedsQuestions
-        ? 'Администратор задавал уточняющие вопросы, активно выявлял пожелания по времени, услуге и мастеру.'
-        : 'Потребность выявлена на базовом уровне со слов клиента без активных уточняющих вопросов.'
+        ? 'Администратор задавал уточняющие вопросы, выявляя пожелания гостя по услуге, времени или деталям визита.'
+        : ctx.isUnavailableServiceRefusal
+        ? 'Запрос клиента зафиксирован с его слов, но уточняющих вопросов (о желаемом результате, типе волос или срочности) не задано.'
+        : 'Потребность принята со слов клиента без дополнительных уточняющих вопросов.'
     },
 
     // 3. Презентация услуги и мастера
@@ -365,23 +452,31 @@ export function extractCallEvaluation(
       id: 'service_and_master_presentation',
       name: 'Презентация услуги и мастера',
       is_applicable: true,
-      score: hasMasterPresented ? 9 : 7,
-      explanation: hasMasterPresented
-        ? 'Администратор четко сориентировал по специалисту и специфике выполнения услуги.'
-        : 'Презентация мастера проведена формально без акцента на его квалификации.'
+      score: ctx.isUnavailableServiceRefusal
+        ? (hasNeedsQuestions && hasMasterPresented ? 8 : 6)
+        : (hasMasterPresented ? 9 : 6),
+      explanation: ctx.isUnavailableServiceRefusal
+        ? 'Администратор назвал доступную в салоне услугу (химическая завивка) и предложил консультацию, однако не раскрыл особенности процедуры и не представил мастера.'
+        : hasMasterPresented
+        ? 'Администратор сориентировал клиента по специалисту и/или особенностям выполнения процедуры.'
+        : 'В ходе диалога специалист и особенности услуги подробно не презентовались.'
     },
 
     // 4. Корректная презентация стоимости
     {
       id: 'price_presentation',
       name: 'Корректная презентация стоимости',
-      is_applicable: !isRescheduleOrCheck,
-      score: isRescheduleOrCheck ? null : (hasPriceMention ? 10 : 7),
-      explanation: isRescheduleOrCheck
-        ? 'Звонок посвящен согласованию расписания действующей записи, озвучивание цен не требовалось (не снижает оценку).'
+      is_applicable: isPriceApplicable,
+      score: !isPriceApplicable ? null : (hasPriceMention ? 10 : 6),
+      explanation: !isPriceApplicable
+        ? (isRescheduleOrCheck
+            ? 'Звонок посвящен согласованию расписания действующей записи, озвучивание цен не требовалось (не снижает оценку).'
+            : ctx.isUnavailableServiceRefusal
+            ? 'Обсуждение стоимости не состоялось: запрашиваемая услуга отсутствует в салоне, и клиент отказался от альтернативы (не снижает оценку).'
+            : 'Вопрос стоимости в рамках данного справочного обращения не поднимался (не снижает оценку).')
         : hasPriceMention
-        ? 'Стоимость услуги названа четко, прозрачно и уверенно в соответствии с прайс-листом.'
-        : 'Прайс озвучен без детализации стоимости сопутствующих элементов или условий оплаты.'
+        ? 'Стоимость услуг озвучена в ходе разговора.'
+        : 'Стоимость услуги/консультации в ходе разговора не была озвучена.'
     },
 
     // 5. Работа с возражениями
@@ -389,11 +484,17 @@ export function extractCallEvaluation(
       id: 'handling_objections',
       name: 'Работа с возражениями',
       is_applicable: hasObjections,
-      score: hasObjections ? (handledObjectionWell ? 9 : 4) : null,
+      score: hasObjections
+        ? (ctx.isUnavailableServiceRefusal
+            ? (handledObjectionWell ? 6 : 4)
+            : (handledObjectionWell ? 9 : 4))
+        : null,
       explanation: hasObjections
-        ? handledObjectionWell
-          ? 'Администратор профессионально отработал сомнения/претензии гостя и предложил компромиссное решение.'
-          : 'Администратор пассивно отреагировал на сомнения гостя, не предприняв попытки удержания.'
+        ? ctx.isUnavailableServiceRefusal
+          ? 'Клиент настаивал на отсутствующей услуге; администратор предложил альтернативу/консультацию, но не аргументировал преимущества и безопасность доступной методики.'
+          : handledObjectionWell
+          ? 'Администратор отработал сомнения/претензии гостя и предложил компромиссное решение.'
+          : 'Администратор пассивно отреагировал на отказ/сомнения гостя, не предприняв попытки удержания.'
         : 'Возражений со стороны гостя в ходе звонка не возникало (критерий не применим, не снижает общую оценку).'
     },
 
@@ -402,16 +503,16 @@ export function extractCallEvaluation(
       id: 'additional_services',
       name: 'Предложение дополнительных услуг',
       is_applicable: isCrossSellApplicable,
-      score: !isCrossSellApplicable
-        ? null
-        : (managerOfferedCrossSell ? 10 : 6),
+      score: !isCrossSellApplicable ? null : (managerOfferedCrossSell ? 10 : 6),
       explanation: !isCrossSellApplicable
         ? (isDispute
-            ? 'Звонок посвящен урегулированию претензии/отмены записи, предложение сопутствующих услуг не требовалось (не снижает оценку).'
+            ? 'Звонок посвящен урегулированию претензии, предложение сопутствующих услуг не требовалось (не снижает оценку).'
+            : ctx.isUnavailableServiceRefusal || ctx.category === 'declined'
+            ? 'Запись на основную услугу не состоялась, допродажа сопутствующих процедур не применима (не снижает оценку).'
             : 'Обращение касается переноса или проверки существующей записи, предложение дополнительных услуг не требовалось (не снижает оценку).')
         : managerOfferedCrossSell
         ? 'Администратор предложил гостю сопутствующие процедуры / дополнительные опции к основной услуге.'
-        : 'В разговоре зафиксирована только базовая услуга; сопутствующие процедуры (дизайн, спа-уход, снятие) администратором не предлагались.'
+        : 'Сопутствующие процедуры к основной услуге администратором не предлагались.'
     },
 
     // 7. Предложение параллельной записи
@@ -432,11 +533,13 @@ export function extractCallEvaluation(
       id: 'alternative_options',
       name: 'Предложение альтернативных вариантов',
       is_applicable: isSlotConflict || !isBookingAgreed,
-      score: (isSlotConflict || !isBookingAgreed) ? (hasAlternativesOffered ? 10 : 4) : null,
+      score: (isSlotConflict || !isBookingAgreed) ? (hasAlternativesOffered ? 7 : 4) : null,
       explanation: (isSlotConflict || !isBookingAgreed)
-        ? hasAlternativesOffered
-          ? 'При занятости основного слота администратор сразу предложил альтернативные даты, время или лист ожидания.'
-          : 'При несовпадении времени администратор не предложил альтернативные дни, слоты или других мастеров.'
+        ? ctx.isUnavailableServiceRefusal && hasAlternativesOffered
+          ? 'При отсутствии запрошенной техники администратор предложил альтернативную процедуру и консультацию, однако клиент не заинтересовался вариантом.'
+          : hasAlternativesOffered
+          ? 'Администратор предложил альтернативные варианты времени/услуги.'
+          : 'При несовпадении условий администратор не предложил альтернативные дни, слоты, мастеров или смежные решения.'
         : 'Выбранный слот времени сразу подошел клиенту, предложение альтернатив не требовалось (критерий не применим, не снижает оценку).'
     },
 
@@ -445,10 +548,14 @@ export function extractCallEvaluation(
       id: 'closing_booking',
       name: 'Закрытие на запись',
       is_applicable: true,
-      score: isBookingAgreed ? 10 : (hasBookingClosing ? 8 : 5),
+      score: isBookingAgreed ? 10 : (hasBookingAttempt ? 5 : 4),
       explanation: isBookingAgreed
-        ? 'Успешная фиксация записи с четким проговариванием даты, времени и мастера.'
-        : 'Попытка закрытия на запись была недостаточной, бронь не зафиксирована.'
+        ? 'Запись успешно подтверждена и зафиксирована с согласованием условий визита.'
+        : ctx.isUnavailableServiceRefusal
+        ? 'Администратор предложил запись на консультацию, но бронь не состоялась из-за отказа клиента от альтернативной услуги.'
+        : hasBookingAttempt
+        ? 'Попытка закрытия на запись была предпринята, но визит не согласован.'
+        : 'Попытка закрытия диалога на запись отсутствовала, бронь не оформлена.'
     },
 
     // 10. Качество коммуникации и завершение разговора
@@ -456,12 +563,16 @@ export function extractCallEvaluation(
       id: 'communication_quality_closing',
       name: 'Качество коммуникации и завершение разговора',
       is_applicable: true,
-      score: hasPoliteClosing && hasReminderMention ? 10 : (hasPoliteClosing ? 8 : 6),
-      explanation: hasPoliteClosing && hasReminderMention
-        ? 'Вежливый, доброжелательный тон, упомянуто напоминание о визите, разговор завершен на позитивной ноте.'
-        : hasPoliteClosing
-        ? 'Диалог завершен вежливо и доброжелательно, однако регламент напоминания о визите не озвучен.'
-        : 'Концовка диалога скомкана, регламент вежливого прощания не соблюден.'
+      score: isBookingAgreed
+        ? (hasPoliteClosing && hasReminderMention ? 10 : (hasPoliteClosing ? 8 : 6))
+        : (hasPoliteClosing ? 8 : 7),
+      explanation: isBookingAgreed
+        ? hasPoliteClosing && hasReminderMention
+          ? 'Вежливый, доброжелательный тон, упомянуто напоминание о визите, разговор завершен на позитивной ноте.'
+          : hasPoliteClosing
+          ? 'Диалог завершен вежливо, однако регламент напоминания о визите накануне не озвучен.'
+          : 'Концовка диалога скомкана, регламент вежливого прощания не соблюден.'
+        : 'Коммуникация вежливая и корректная в рамках характера обращения.'
     }
   ];
 
@@ -470,11 +581,7 @@ export function extractCallEvaluation(
 
 /**
  * Синхронизирует список ошибок (mistakes) и советов (advice) с критериями оценки.
- * ГАРАНТИРУЕТ отсутствие противоречий:
- * 1. Если критерий 6 (additional_services) имеет score >= 9 или is_applicable === false,
- *    в ошибках КАТЕГОРИЧЕСКИ НЕ МОЖЕТ быть фразы "Не предложены сопутствующие услуги / процедуры".
- * 2. Если критерий 7 (parallel_booking) неприменим или выполнен, в ошибках нет претензий по записи в 4 руки.
- * 3. Если ошибок нет, но балл снижен, ошибки формируются СТРОГО из применимых критериев с оценкой < 8.
+ * Гарантирует отсутствие противоречий и навязанных шаблонов, не относящихся к диалогу.
  */
 export function harmonizeMistakesAndEvaluation(
   inputMistakes: string[] = [],
@@ -485,6 +592,7 @@ export function harmonizeMistakesAndEvaluation(
   mistakes: string[];
   advice: string[];
 } {
+  const ctx = transcript ? classifyCallContext(transcript) : null;
   const criteriaMap = new Map<string, CallEvaluationCriterion>();
   (evaluation.criteria || []).forEach(c => criteriaMap.set(c.id, c));
 
@@ -492,6 +600,8 @@ export function harmonizeMistakesAndEvaluation(
   const critParallel = criteriaMap.get('parallel_booking');
   const critAlternatives = criteriaMap.get('alternative_options');
   const critObjections = criteriaMap.get('handling_objections');
+  const critPrice = criteriaMap.get('price_presentation');
+  const critClosing = criteriaMap.get('closing_booking');
 
   const isCrossSellNotApplicableOrHigh =
     !critCrossSell ||
@@ -512,30 +622,42 @@ export function harmonizeMistakesAndEvaluation(
     !critObjections ||
     critObjections.is_applicable === false;
 
-  // Очищаем входной список ошибок от противоречий с критериями
+  const isPriceNotApplicableOrHigh =
+    !critPrice ||
+    critPrice.is_applicable === false ||
+    (critPrice.score !== null && critPrice.score >= 9);
+
+  const isBookingNotApplicable =
+    !critClosing ||
+    critClosing.is_applicable === false ||
+    Boolean(ctx?.isNonClient || ctx?.isLateWarning);
+
+  // Очищаем входной список ошибок от противоречий с критериями и типом звонка
   let filteredMistakes = inputMistakes
     .map(m => m.trim())
     .filter(m => {
       if (!m) return false;
       const lower = m.toLowerCase();
 
-      // Противоречие по сопутствующим услугам
       if (isCrossSellNotApplicableOrHigh && (lower.includes('сопутствующ') || lower.includes('допродаж') || lower.includes('спа-уход') || lower.includes('снятие покрытия') || lower.includes('дополнительн'))) {
         return false;
       }
-
-      // Противоречие по параллельной записи
       if (isParallelNotApplicableOrHigh && (lower.includes('параллельн') || lower.includes('4 руки') || lower.includes('четыре руки'))) {
         return false;
       }
-
-      // Противоречие по альтернативным слотам
       if (isAlternativesNotApplicableOrHigh && (lower.includes('альтернативн') || lower.includes('лист ожидания'))) {
         return false;
       }
-
-      // Противоречие по возражениям
       if (isObjectionsNotApplicable && (lower.includes('возражен') || lower.includes('сомнени'))) {
+        return false;
+      }
+      if (isPriceNotApplicableOrHigh && (lower.includes('прайс') || lower.includes('стоимост'))) {
+        return false;
+      }
+      if (isBookingNotApplicable && (lower.includes('запис') || lower.includes('напоминан') || lower.includes('подтверждении брони') || lower.includes('слот'))) {
+        return false;
+      }
+      if (ctx && !ctx.isConfirmedBooking && (lower.includes('смс-напоминан') || lower.includes('накануне визита'))) {
         return false;
       }
 
@@ -554,21 +676,30 @@ export function harmonizeMistakesAndEvaluation(
       if (isParallelNotApplicableOrHigh && (lower.includes('параллельн') || lower.includes('4 руки') || lower.includes('четыре руки'))) {
         return false;
       }
+      if (isBookingNotApplicable && (lower.includes('смс-напоминан') || lower.includes('свободные окна') || lower.includes('прайс-лист'))) {
+        return false;
+      }
+      if (ctx && !ctx.isConfirmedBooking && (lower.includes('смс-напоминан') || lower.includes('накануне визита'))) {
+        return false;
+      }
       return true;
     });
 
   const overall = evaluation.overall_score;
 
-  // Если общий балл 10/10 — ошибок быть не может
+  // Если общий балл >= 9.8 — грубых ошибок нет
   if (overall !== null && overall >= 9.8) {
     return {
       mistakes: ['Грубых ошибок не допущено, регламент общения соблюден в полном объеме.'],
-      advice: filteredAdvice.length > 0 ? filteredAdvice : ['Поддерживать высокий уровень сервиса и направлять клиенту подтверждение визита.']
+      advice: filteredAdvice.length > 0
+        ? filteredAdvice
+        : [ctx?.isNonClient || ctx?.isLateWarning
+            ? 'Поддерживать высокий уровень вежливости и оперативной фиксации обращений.'
+            : 'Поддерживать высокий уровень сервиса и направлять клиенту подтверждение визита.']
     };
   }
 
-  // Если список ошибок опустел или был не заполнен, но оценка снижена (< 10) —
-  // выводим ошибки СТРОГО на основе критериев, где оценка < 8
+  // Если список ошибок опустел или был не заполнен — выводим строго на основе применимых критериев с оценкой < 8
   if (filteredMistakes.length === 0 && overall !== null && overall < 10) {
     const derivedMistakes: string[] = [];
     const derivedAdvice: string[] = [];
@@ -577,44 +708,49 @@ export function harmonizeMistakesAndEvaluation(
       if (c.is_applicable !== false && typeof c.score === 'number' && c.score < 8) {
         switch (c.id) {
           case 'greeting_intro':
-            derivedMistakes.push('Администратор не назвал собственное имя при приветствии клиента.');
+            derivedMistakes.push('Администратор не назвал собственное имя и/или название салона при приветствии.');
             derivedAdvice.push('Представляться по полному корпоративному стандарту (название салона + имя администратора).');
             break;
           case 'needs_identification':
-            derivedMistakes.push('Не заданы уточняющие вопросы для детального выявления потребностей гостя.');
-            derivedAdvice.push('Проявлять активное слушание и уточнять пожелания гостя по услуге, времени и мастеру.');
+            derivedMistakes.push('Не заданы уточняющие вопросы для выявления потребностей гостя.');
+            derivedAdvice.push('Проявлять активное слушание и уточнять пожелания гостя по результату, срокам и деталям.');
             break;
           case 'service_and_master_presentation':
-            derivedMistakes.push('Презентация мастера проведена формально без акцента на его квалификации и опыте.');
-            derivedAdvice.push('Кратко презентовать специалиста (квалификация, опыт, особенности выполнения процедуры).');
+            derivedMistakes.push(c.explanation || 'Особенности услуги и квалификация мастера не раскрыты.');
+            derivedAdvice.push('Кратко презентовать особенности методики и квалификацию мастера салона.');
             break;
           case 'price_presentation':
-            derivedMistakes.push('Стоимость процедуры не была озвучена клиенту в ходе диалога.');
-            derivedAdvice.push('Четко и уверенно озвучивать прайс и условия бронирования.');
+            derivedMistakes.push('Стоимость процедуры не была озвучена в ходе диалога.');
+            derivedAdvice.push('Четко и уверенно озвучивать стоимость и условия оказания услуги.');
             break;
           case 'handling_objections':
-            derivedMistakes.push('Администратор пассивно отреагировал на сомнения/возражения гостя, не предприняв попытки удержания.');
-            derivedAdvice.push('Использовать аргументацию преимуществ салона и предлагать компромиссные решения при сомнениях.');
+            derivedMistakes.push(c.explanation || 'Недостаточная аргументация при возражении/сомнении гостя.');
+            derivedAdvice.push('Аргументировать преимущества доступных методик и предлагать комфортные решения.');
             break;
           case 'additional_services':
-            derivedMistakes.push('Администратор не предложил сопутствующие процедуры к основной услуге (дизайн, спа-уход, снятие покрытия).');
-            derivedAdvice.push('Предлагать сопутствующие процедуры и уходовые комплексы при бронировании основной услуги.');
+            derivedMistakes.push('Администратор не предложил сопутствующие процедуры к основной услуге.');
+            derivedAdvice.push('Предлагать сопутствующие процедуры при оформлении основной записи.');
             break;
           case 'parallel_booking':
             derivedMistakes.push('При бронировании комплекса услуг не была предложена опция параллельной записи в 4 руки.');
-            derivedAdvice.push('Предлагать гостям параллельную запись в 4 руки для существенной экономии их времени.');
+            derivedAdvice.push('Предлагать гостям параллельную запись в 4 руки для экономии времени.');
             break;
           case 'alternative_options':
-            derivedMistakes.push('При несовпадении времени администратор не предложил альтернативные дни, слоты или лист ожидания.');
-            derivedAdvice.push('Всегда предлагать вилку минимум из 2 вариантов времени или запись в лист ожидания.');
+            derivedMistakes.push(c.explanation || 'Не предложены достаточные альтернативные варианты.');
+            derivedAdvice.push('Предлагать несколько альтернативных вариантов по времени, мастерам или смежным услугам.');
             break;
           case 'closing_booking':
-            derivedMistakes.push('Не проявлена инициатива по фиксации записи и закрытию диалога.');
-            derivedAdvice.push('Инициировать закрытие диалога с четким повторением даты, времени и мастера.');
+            derivedMistakes.push(c.explanation || 'Запись в рамках диалога не состоялась.');
+            derivedAdvice.push('При наличии интереса клиента активно переводить диалог к согласованию удобного времени или консультации.');
             break;
           case 'communication_quality_closing':
-            derivedMistakes.push('Не оговорён регламент предварительного напоминания о визите накануне.');
-            derivedAdvice.push('Обязательно предупреждать клиента об отправке напоминания о визите накануне записи.');
+            if (ctx?.isLateWarning) {
+              derivedMistakes.push('При подтверждении ожидания не уточнены имя клиента и точное время исходной записи.');
+              derivedAdvice.push('При звонке об опоздании всегда уточнять имя гостя/время брони для быстрой отметки в расписании.');
+            } else if (ctx?.isConfirmedBooking) {
+              derivedMistakes.push('Не оговорён регламент предварительного напоминания о визите накануне.');
+              derivedAdvice.push('Предупреждать клиента об отправке напоминания накануне визита.');
+            }
             break;
         }
       }
@@ -622,18 +758,32 @@ export function harmonizeMistakesAndEvaluation(
 
     if (derivedMistakes.length > 0) {
       filteredMistakes = derivedMistakes;
+    } else if (ctx?.isNonClient || ctx?.isLateWarning) {
+      filteredMistakes = ['Существенных нарушений стандартов общения по данному типу звонка не выявлено.'];
     }
     if (filteredAdvice.length === 0 && derivedAdvice.length > 0) {
       filteredAdvice = derivedAdvice;
     }
   }
 
-  // Если всё ещё нет советов
+  // Если всё ещё нет советов — подбираем strictly contextual default
   if (filteredAdvice.length === 0) {
-    filteredAdvice = [
-      'Соблюдать корпоративный регламент ведения телефонных переговоров салона.',
-      'Направлять клиенту подтверждение записи и напоминание накануне визита.'
-    ];
+    if (ctx?.isNonClient) {
+      filteredAdvice = ['Зафиксировать полученную информацию из мессенджера и передать ответственному сотруднику/управляющему.'];
+    } else if (ctx?.isLateWarning) {
+      filteredAdvice = [
+        'При получении звонка об опоздании уточнять имя гостя и время записи для оперативного уведомления мастера.'
+      ];
+    } else if (ctx?.isUnavailableServiceRefusal) {
+      filteredAdvice = [
+        'Фиксировать запросы на отсутствующие услуги в CRM для анализа спроса и аргументированно рассказывать о преимуществах доступных методик.'
+      ];
+    } else {
+      filteredAdvice = [
+        'Соблюдать корпоративный регламент ведения телефонных переговоров салона.',
+        ...(ctx?.isConfirmedBooking ? ['Направлять клиенту подтверждение записи и напоминание накануне визита.'] : [])
+      ];
+    }
   }
 
   return {

@@ -14,7 +14,10 @@ import {
   splitConjoinedLines,
   refineTranscriptRoles,
   fixDuplicatedTranscript,
-  shouldMergeDuplicate
+  shouldMergeDuplicate,
+  isIvrUtterance,
+  extractIvrPrefix,
+  stripIvrFromTranscript
 } from './transcriptUtils.js';
 
 export {
@@ -22,7 +25,10 @@ export {
   splitConjoinedLines,
   refineTranscriptRoles,
   fixDuplicatedTranscript,
-  shouldMergeDuplicate
+  shouldMergeDuplicate,
+  isIvrUtterance,
+  extractIvrPrefix,
+  stripIvrFromTranscript
 };
 
 interface TranscriptSegment {
@@ -385,9 +391,22 @@ export function buildTranscript(chunks: any[]): string {
   // Sort chronologically by start time so the dialogue flows naturally
   segments.sort((a, b) => a.startTime - b.startTime);
 
-  return segments
-    .map(s => `${s.speaker === 'manager' ? 'Менеджер' : 'Клиент'}: ${s.text}`)
-    .join('\n');
+  const stereoLines: string[] = [];
+  for (const s of segments) {
+    if (isIvrUtterance(s.text)) {
+      stereoLines.push(`Автоинформатор: ${s.text}`);
+      continue;
+    }
+    const { ivr, rest } = extractIvrPrefix(s.text);
+    if (ivr) {
+      stereoLines.push(`Автоинформатор: ${ivr}`);
+    }
+    if (rest) {
+      stereoLines.push(`${s.speaker === 'manager' ? 'Менеджер' : 'Клиент'}: ${rest}`);
+    }
+  }
+
+  return stereoLines.join('\n');
 }
 
 const MAX_RETRIES = 3;

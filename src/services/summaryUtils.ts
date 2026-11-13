@@ -4,6 +4,32 @@
  */
 
 import { StructuredCallSummary, KeyFacts } from '../types.js';
+import { stripIvrFromTranscript } from './transcriptUtils.js';
+
+export type CallIntentCategory =
+  | 'not_happened'
+  | 'non_client'
+  | 'late_or_visit_update'
+  | 'reschedule_or_cancel'
+  | 'dispute'
+  | 'refusal_unavailable_service'
+  | 'declined'
+  | 'confirmed_booking'
+  | 'consultation';
+
+export interface CallContextClassification {
+  category: CallIntentCategory;
+  cleanTranscript: string;
+  isNonClient: boolean;
+  isLateWarning: boolean;
+  isUnavailableServiceRefusal: boolean;
+  isRescheduleOrCheck: boolean;
+  isDispute: boolean;
+  isDeclined: boolean;
+  isConfirmedBooking: boolean;
+  lateMinutes: string | null;
+  nonClientTopic: string | null;
+}
 
 export interface EssenceDetails {
   service: string | null;
@@ -178,43 +204,189 @@ export function normalizeMasterName(raw?: string | null): string | null {
 }
 
 /**
+ * Классифицирует тип и фактический исход звонка строго по очищенному от IVR транскрипту.
+ */
+export function classifyCallContext(
+  transcript: string,
+  rawSummary?: string,
+  existingKeyFacts?: Partial<KeyFacts>,
+  existingBookingStatus?: string
+): CallContextClassification {
+  const cleanTranscript = stripIvrFromTranscript(transcript || '');
+  const tLower = cleanTranscript.toLowerCase();
+  const sLower = (rawSummary || '').toLowerCase();
+
+  // Разделяем явные реплики клиента и менеджера (если диаризация уже выполнена)
+  const clientLines = cleanTranscript
+    .split('\n')
+    .filter(l => /^(?:клиент|гость)\s*:/i.test(l.trim()))
+    .map(l => l.replace(/^(?:клиент|гость)\s*:\s*/i, '').trim())
+    .join(' ');
+  const managerLines = cleanTranscript
+    .split('\n')
+    .filter(l => /^(?:менеджер|администратор|оператор)\s*:/i.test(l.trim()))
+    .map(l => l.replace(/^(?:менеджер|администратор|оператор)\s*:\s*/i, '').trim())
+    .join(' ');
+  const hasExplicitRoles = clientLines.length > 0 && managerLines.length > 0;
+
+  // 1. Состоялся ли разговор
+  const hasDialogueWords = cleanTranscript.replace(/^(?:Менеджер|Клиент|Администратор|Оператор)\s*:\s*/gim, '').trim().length >= 8;
+  const isNotHappened =
+    !hasDialogueWords ||
+    (!hasExplicitRoles && /разговор не состоялся|звонок не состоялся|диалог отсутствует|автоответчик|голосовая почта|оставьте сообщение после сигнала/i.test(tLower)) ||
+    (!hasDialogueWords && /разговор не состоялся|диалог отсутствует/i.test(sLower));
+
+  if (isNotHappened) {
+    return {
+      category: 'not_happened',
+      cleanTranscript,
+      isNonClient: false,
+      isLateWarning: false,
+      isUnavailableServiceRefusal: false,
+      isRescheduleOrCheck: false,
+      isDispute: false,
+      isDeclined: false,
+      isConfirmedBooking: false,
+      lateMinutes: null,
+      nonClientTopic: null,
+    };
+  }
+
+  // 2. Предупреждение об опоздании / корректировка времени явки
+  const isLateWarning = /(?:опозда[юе]|задерж(?:усь|иваюсь)|предупредить[^.\n]{0,30}опозд|не успева[юе])/iu.test(cleanTranscript);
+  const lateMatch = cleanTranscript.match(/(?:опозда[юе]|задерж[а-яё]*)\s+(?:на\s+)?(?:минут\s+(?:на\s+)?)?(\d{1,3})|на\s+(\d{1,3})\s+минут/iu);
+  const lateMinutes = lateMatch ? `${lateMatch[1] || lateMatch[2]} мин` : null;
+
+  // 3. Нецелевой / партнёрский / организационный звонок (без запроса бьюти-услуг)
+  const hasBeautyServiceTalk = /(?:маникюр|педикюр|макияж|укладк|стрижк|окрашиван|завивк|брови|ресниц|пилинг|массаж|депиляц|эпиляц|кератин|ботокс|косметолог|процедур|покрыти|шеллак|гель-лак|опоздаю|хочу записаться|хотела записаться|свободное время|сколько стоит)/iu.test(cleanTranscript);
+  const hasPartnerOrOrgCue = /(?:билет[а-яё]*|концерт|курьер|доставк|посылк|реклам|сотрудничеств|коммерческ[а-яё]+\s+предложени[а-яё]*|ошиблись номером|в\s+ватсап[е]?\s+вам\s+прислал|прислал\s+для\s+вашего\s+салона|личн[а-яё]+\s+вопрос)/iu.test(cleanTranscript);
+  const isNonClient = hasPartnerOrOrgCue && !hasBeautyServiceTalk;
+
+  let nonClientTopic: string | null = null;
+  if (isNonClient) {
+    if (/билет|концерт/i.test(cleanTranscript)) {
+      nonClientTopic = /ватсап|whatsapp/i.test(cleanTranscript)
+        ? 'передача пригласительных билетов на концерт (отправлено в WhatsApp)'
+        : 'предложение билетов на концерт';
+    } else if (/доставк|курьер|посылк/i.test(cleanTranscript)) {
+      nonClientTopic = 'организационный звонок по доставке';
+    } else if (/реклам|сотрудничеств|коммерческ/i.test(cleanTranscript)) {
+      nonClientTopic = 'коммерческое / партнёрское предложение';
+    } else {
+      nonClientTopic = 'организационное / личное обращение, не связанное с услугами салона';
+    }
+  }
+
+  // 4. Претензия / спор (без ложного срабатывания на отмену одного из двух слотов)
+  const isDispute =
+    Boolean(existingKeyFacts?.is_dispute) ||
+    /(?:жалоб|претензи|недовол|издеваетесь|криво|испортили|верните деньги|ужасно|отвратительн)/iu.test(cleanTranscript);
+
+  // 5. Запрос отсутствующей услуги и отказ от альтернативы
+  const salonHasNoSuchService = /(?:нет такой услуги|такой услуги нет|мы не (?:делаем|выполняем)|в\s+нашем\s+салоне\s+[а-яё\s]{0,30}(?:выполняется|делается|только)|у\s+нас\s+(?:в\s+(?:нашем\s+)?салоне\s+)?[а-яё\s]{0,30}(?:выполняется|именно\s+химическ|только))/iu.test(cleanTranscript);
+  const callerTextForRefusal = clientLines || cleanTranscript;
+  const hasExplicitRefusal = /(?:не будет в городе|не смогу|не получается|не подходит|неудобно|не удобно|дорого|передумал|тогда не надо|(?:^|[^\p{L}])нет,\s+[^\n.!?]{1,40}(?:надо|нужно|хотелось бы|искала)(?:[^\p{L}]|$)|нет,\s*спасибо)/iu.test(callerTextForRefusal);
+  const isUnavailableServiceRefusal = salonHasNoSuchService && (hasExplicitRefusal || !/(?:давайте|запишите|записывайте|хорошо,?\s*запишите)/iu.test(callerTextForRefusal));
+
+  // 6. Перенос / проверка / корректировка существующей записи
+  const isRescheduleOrCheck =
+    !isLateWarning &&
+    /(?:перенести запись|перенос|у меня\s+(?:вот\s+)?запись|уточнить запись|проверить запись|оставляем\s+все|на\s+\d+\s+(?:я\s+)?оставляю.*убираю|отменить запись)/iu.test(cleanTranscript);
+
+  // 7. Отказ (общий)
+  const rawBooking = (existingBookingStatus || existingKeyFacts?.booking_status || '').toLowerCase().trim();
+  const outcome = (existingKeyFacts?.call_outcome || '').toLowerCase().trim();
+  const clientConfirmedAtEnd = /(?:да,\s*(?:отлично|давайте|записывайте|подойд[её]т|хорошо)|на\s+\d+\s+(?:я\s+)?оставляю|оставьте тогда|подтверждаю запись)/iu.test(callerTextForRefusal);
+
+  const isDeclined =
+    !isNonClient &&
+    !isLateWarning &&
+    (isUnavailableServiceRefusal ||
+      (hasExplicitRefusal && !clientConfirmedAtEnd) ||
+      (!clientConfirmedAtEnd && (rawBooking === 'отказ' || outcome === 'отказ')));
+
+  // 8. Подтверждённая запись (СТРОГО по живому диалогу, БЕЗ IVR и БЕЗ «предложить запись» при отказе!)
+  const hasRealBookingActionInTranscript =
+    /(?:записала\s+вас|записываю\s+вас|записал\s+вас|вы\s+записаны|запись\s+(?:успешно\s+)?(?:подтверждаем|подтверждена|оформлена)|на\s+\d{1,2}(?::\d{2})?\s+(?:я\s+)?оставляю|оставляем\s+все|договорились\s+(?:на|в)|жду\s+вас\s+(?:завтра|сегодня|в\s+\d))/iu.test(cleanTranscript) ||
+    (/(?:запишите|давайте\s+на\s+\d|подойд[её]т|согласна|согласен)/iu.test(callerTextForRefusal) &&
+      /(?:запис|ждем|ожида|подтвержд|хорошо)/iu.test(managerLines || cleanTranscript));
+
+  const isConfirmedBooking =
+    !isNonClient &&
+    !isLateWarning &&
+    !isDeclined &&
+    !isUnavailableServiceRefusal &&
+    hasRealBookingActionInTranscript;
+
+  let category: CallIntentCategory = 'consultation';
+  if (isNonClient) category = 'non_client';
+  else if (isLateWarning) category = 'late_or_visit_update';
+  else if (isDispute) category = 'dispute';
+  else if (isUnavailableServiceRefusal) category = 'refusal_unavailable_service';
+  else if (isDeclined) category = 'declined';
+  else if (isRescheduleOrCheck) category = 'reschedule_or_cancel';
+  else if (isConfirmedBooking) category = 'confirmed_booking';
+  else category = 'consultation';
+
+  return {
+    category,
+    cleanTranscript,
+    isNonClient,
+    isLateWarning,
+    isUnavailableServiceRefusal,
+    isRescheduleOrCheck,
+    isDispute,
+    isDeclined,
+    isConfirmedBooking,
+    lateMinutes,
+    nonClientTopic,
+  };
+}
+
+/**
  * Извлекает 4 параметра сути обращения (услуга, дата, время, мастер)
- * из текста транскрипта и/или существующего резюме.
+ * из текста транскрипта и/или существующего резюме (предварительно очищая от IVR).
  */
 export function extractEssenceDetails(
   transcript: string,
   existingSummary?: string,
   customSalonName?: string
 ): EssenceDetails {
-  const combined = `${existingSummary || ''}\n${transcript || ''}`;
+  const cleanTranscript = stripIvrFromTranscript(transcript || '');
+  const cleanExisting = existingSummary && !/Клиент обратился в салон красоты по вопросам обслуживания и записи/i.test(existingSummary)
+    ? existingSummary
+    : '';
+  const combined = `${cleanExisting}\n${cleanTranscript}`;
 
   // 1. Услуга
   let service: string | null = null;
-  const serviceSummaryMatch = existingSummary?.match(/(?:услуга|процедура)\s*[—–:\-]\s*([^,\n;.]+)/iu);
-  if (serviceSummaryMatch && !serviceSummaryMatch[1].toLowerCase().includes('не указан')) {
+  const serviceSummaryMatch = cleanExisting?.match(/(?:услуга|процедура)\s*[—–:\-]\s*([^,\n;.]+)/iu);
+  if (serviceSummaryMatch && !/не указан|не применим/i.test(serviceSummaryMatch[1])) {
     service = serviceSummaryMatch[1].trim();
   } else {
-    if (/маникюр/i.test(combined) && /педикюр/i.test(combined)) {
+    if (/маникюр/i.test(cleanTranscript) && /педикюр/i.test(cleanTranscript)) {
       service = 'маникюр и педикюр с покрытием';
-    } else if (/макияж/i.test(combined) && /укладк/i.test(combined)) {
+    } else if (/макияж/i.test(cleanTranscript) && /укладк/i.test(cleanTranscript)) {
       service = 'макияж и укладка';
     } else {
       const servicePatterns: [RegExp, string][] = [
-        [/(?:аппаратн\w*\s+)?маникюр\w*(?:\s+с\s+покрытием(?:\s+шеллак|\s+гель-лак)?)?/iu, 'маникюр с покрытием'],
-        [/педикюр\w*(?:\s+с\s+покрытием)?/iu, 'педикюр с покрытием'],
-        [/макияж\w*(?:\s+и\s+укладк\w*)?/iu, 'макияж и укладка'],
-        [/макияж\w*/iu, 'макияж'],
-        [/укладк\w*/iu, 'укладка'],
-        [/стрижк\w*(?:\s+и\s+окрашиван\w*)?/iu, 'стрижка и окрашивание'],
-        [/стрижк\w*(?:\s+и\s+укладк\w*)?/iu, 'стрижка и укладка'],
-        [/окрашиван\w*(?:\s+волос)?/iu, 'окрашивание волос'],
-        [/мелирован\w*/iu, 'мелирование'],
-        [/коррекц\w*\s+бровей|архитектур\w*\s+бровей|окрашивание\s+бровей|брови/iu, 'коррекция бровей'],
-        [/наращиван\w*\s+ресниц|ламинирован\w*\s+ресниц|ресниц\w*/iu, 'ресницы'],
-        [/косметолог\w*|чистк\w*\s+лица|пилинг/iu, 'прием косметолога'],
-        [/массаж\w*/iu, 'массаж'],
-        [/депиляц\w*|шугаринг|эпиляц\w*/iu, 'депиляция'],
-        [/кератин\w*|ботокс\w*\s+(?:для\s+)?волос/iu, 'уход для волос']
+        [/(?:цифров[а-яё]*|японск[а-яё]*)\s+завивк[а-яё]*(?:\s+волос)?/iu, 'цифровая (японская) завивка волос'],
+        [/(?:химическ[а-яё]*|био)?завивк[а-яё]*(?:\s+волос)?/iu, 'завивка волос'],
+        [/(?:аппаратн[а-яё]*\s+)?маникюр[а-яё]*(?:\s+с\s+покрытием(?:\s+шеллак|\s+гель-лак)?)?/iu, 'маникюр с покрытием'],
+        [/педикюр[а-яё]*(?:\s+с\s+покрытием)?/iu, 'педикюр с покрытием'],
+        [/макияж[а-яё]*(?:\s+и\s+укладк[а-яё]*)?/iu, 'макияж и укладка'],
+        [/макияж[а-яё]*/iu, 'макияж'],
+        [/укладк[а-яё]*/iu, 'укладка'],
+        [/стрижк[а-яё]*(?:\s+и\s+окрашиван[а-яё]*)?/iu, 'стрижка и окрашивание'],
+        [/стрижк[а-яё]*(?:\s+и\s+укладк[а-яё]*)?/iu, 'стрижка и укладка'],
+        [/окрашиван[а-яё]*(?:\s+волос)?/iu, 'окрашивание волос'],
+        [/мелирован[а-яё]*/iu, 'мелирование'],
+        [/коррекц[а-яё]*\s+бровей|архитектур[а-яё]*\s+бровей|окрашивание\s+бровей|брови/iu, 'коррекция бровей'],
+        [/наращиван[а-яё]*\s+ресниц|ламинирован[а-яё]*\s+ресниц|ресниц[а-яё]*/iu, 'ресницы'],
+        [/косметолог[а-яё]*|чистк[а-яё]*\s+лица|пилинг/iu, 'прием косметолога'],
+        [/массаж[а-яё]*/iu, 'массаж'],
+        [/депиляц[а-яё]*|шугаринг|эпиляц[а-яё]*/iu, 'депиляция'],
+        [/кератин[а-яё]*|ботокс[а-яё]*\s+(?:для\s+)?волос/iu, 'уход для волос']
       ];
       for (const [pattern, label] of servicePatterns) {
         if (pattern.test(combined)) {
@@ -227,8 +399,8 @@ export function extractEssenceDetails(
 
   // 2. Дата
   let date: string | null = null;
-  const dateSummaryMatch = existingSummary?.match(/дата\s*[—–:\-]\s*([^,\n;.]+)/iu);
-  if (dateSummaryMatch && !dateSummaryMatch[1].toLowerCase().includes('не указан')) {
+  const dateSummaryMatch = cleanExisting?.match(/дата\s*[—–:\-]\s*([^,\n;.]+)/iu);
+  if (dateSummaryMatch && !/не указан|не применим/i.test(dateSummaryMatch[1])) {
     date = dateSummaryMatch[1].trim();
   } else {
     const dm = combined.match(/(?:^|[^\p{L}\d])(\d{1,2}(?:-[а-яё]+)?\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)(?:\s+(?:в\s+)?(?:понедельник|вторник|среду|четверг|пятницу|субботу|воскресенье))?)(?:[^\p{L}\d]|$)/iu);
@@ -242,10 +414,15 @@ export function extractEssenceDetails(
     }
   }
 
-  // 3. Время
+  // 3. Время (защищено от ложного захвата длительности «на минут 15», «4 билета» и т.п.)
   let time: string | null = null;
-  const keptMatch = combined.match(/(?:на|в)\s+([012]?\d(?::[0-5]\d|\s+[0-5]\d)?)\s*(?:я\s+)?(?:оставляю|оставьте|подтверждаю)/iu) ||
-                    combined.match(/(?:оставьте|оставляю)\s+(?:на\s+|в\s+)?([012]?\d(?::[0-5]\d|\s+[0-5]\d)?)/iu);
+  const textWithoutDurations = combined
+    .replace(/(?:на\s+)?минут\s+(?:на\s+)?\d+/giu, '')
+    .replace(/\d+\s+минут[а-яё]*/giu, '')
+    .replace(/\d+\s+билет[а-яё]*/giu, '');
+
+  const keptMatch = textWithoutDurations.match(/(?:на|в)\s+([012]?\d(?::[0-5]\d|\s+[0-5]\d)?)\s*(?:я\s+)?(?:оставляю|оставьте|подтверждаю)/iu) ||
+                    textWithoutDurations.match(/(?:оставьте|оставляю)\s+(?:на\s+|в\s+)?([012]?\d(?::[0-5]\d|\s+[0-5]\d)?)/iu);
   if (keptMatch) {
     const rawSlot = keptMatch[1].trim();
     if (rawSlot.includes(':')) {
@@ -258,33 +435,39 @@ export function extractEssenceDetails(
       time = `${rawSlot.padStart(2, '0')}:00`;
     }
   } else {
-    const timeSummaryMatch = existingSummary?.match(/время\s*[—–:\-]\s*([^,\n;.]+)/iu);
-    if (timeSummaryMatch && !timeSummaryMatch[1].toLowerCase().includes('не указан')) {
+    const timeSummaryMatch = cleanExisting?.match(/время\s*[—–:\-]\s*([^,\n;.]+)/iu);
+    if (timeSummaryMatch && !/не указан|не применим/i.test(timeSummaryMatch[1])) {
       time = timeSummaryMatch[1].trim();
     } else {
-      const agreed = [...combined.matchAll(/(?:давайте|запишите|записала|буду|в|на|к)\s+([012]?\d)(?:\s*:\s*|\s+)([0-5]\d|0\s+0)\b/gi)];
+      const agreed = [...textWithoutDurations.matchAll(/(?:давайте|запишите|записала|буду|в|на|к)\s+([012]?\d)(?:\s*:\s*|\s+)([0-5]\d|0\s+0)\b/gi)];
       if (agreed.length > 0) {
         const last = agreed[agreed.length - 1];
         const hh = last[1].padStart(2, '0');
         const mmRaw = last[2].replace(/\s+/g, '');
         const mm = mmRaw === '0' || mmRaw === '00' ? '00' : mmRaw;
-        time = `${hh}:${mm}`;
+        if (Number(hh) <= 23) {
+          time = `${hh}:${mm}`;
+        }
       } else {
-        const anySpaced = [...combined.matchAll(/\b([012]?\d)\s+([0-5]\d|0\s+0)\b/gi)];
+        const anySpaced = [...textWithoutDurations.matchAll(/\b([012]?\d)\s+([0-5]\d|0\s+0)\b/gi)];
         if (anySpaced.length > 0) {
           const m = anySpaced[anySpaced.length - 1];
           const hh = m[1].padStart(2, '0');
           const mmRaw = m[2].replace(/\s+/g, '');
           const mm = mmRaw === '0' || mmRaw === '00' ? '00' : mmRaw;
-          time = `${hh}:${mm}`;
+          if (Number(hh) <= 23) {
+            time = `${hh}:${mm}`;
+          }
         } else {
-          const std = combined.match(/\b([012]?\d:[0-5]\d)\b/);
+          const std = textWithoutDurations.match(/\b([012]?\d:[0-5]\d)\b/);
           if (std) {
             time = std[1];
           } else {
-            const wordTime = combined.match(/(?:^|[^\p{L}\d])(?:в|на)\s+([012]?\d)\s+(?:часов|часа)(?:[^\p{L}\d]|$)/iu);
-            if (wordTime) {
+            const wordTime = textWithoutDurations.match(/(?:^|[^\p{L}\d])(?:в|на)\s+([012]?\d)\s+(?:часов|часа)(?:[^\p{L}\d]|$)/iu);
+            if (wordTime && Number(wordTime[1]) <= 23) {
               time = `${wordTime[1].padStart(2, '0')}:00`;
+            } else if (/(?:^|[^\p{L}\d])к\s+часу(?:[^\p{L}\d]|$)/iu.test(textWithoutDurations)) {
+              time = '13:00';
             }
           }
         }
@@ -392,29 +575,12 @@ export function extractStructuredCallSummary(
   existingBookingStatus?: string
 ): StructuredCallSummary {
   const salon = (customSalonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
-  const combined = `${rawSummary || ''}\n${transcript || ''}`;
-  const lower = combined.toLowerCase();
+  const ctx = classifyCallContext(transcript, rawSummary, existingKeyFacts, existingBookingStatus);
+  const cleanTranscript = ctx.cleanTranscript;
+  const combined = `${rawSummary && !/Клиент обратился в салон красоты по вопросам обслуживания и записи/i.test(rawSummary) ? rawSummary : ''}\n${cleanTranscript}`;
 
-  // 1. Извлекаем базовые 4 параметра (услуга, дата, время, мастер)
-  const essence = extractEssenceDetails(transcript, rawSummary, salon);
-  const service = (existingKeyFacts?.service && !existingKeyFacts.service.toLowerCase().includes('не указан'))
-    ? existingKeyFacts.service
-    : essence.service;
-  const master = (existingKeyFacts?.master && isMasterNameValid(existingKeyFacts.master))
-    ? normalizeMasterName(existingKeyFacts.master)
-    : essence.master;
-  const date = (existingKeyFacts?.date && !existingKeyFacts.date.toLowerCase().includes('не указан'))
-    ? existingKeyFacts.date
-    : essence.date;
-  const time = (existingKeyFacts?.time && !existingKeyFacts.time.toLowerCase().includes('не указан'))
-    ? existingKeyFacts.time
-    : essence.time;
-
-  // Проверка: состоялся ли диалог вообще
-  const isNotHappened = /разговор не состоялся|звонок не состоялся|диалог отсутствует|тишина|гудки|сброс/i.test(combined) &&
-    !lower.includes('клиент:');
-
-  if (isNotHappened) {
+  // 1. Проверка: состоялся ли диалог вообще
+  if (ctx.category === 'not_happened') {
     return {
       call_purpose: 'Попытка вызова (диалог отсутствует)',
       requested_service: 'Не указана',
@@ -430,39 +596,107 @@ export function extractStructuredCallSummary(
     };
   }
 
-  // Определение контекста: перенос, онлайн-запись, первичная запись, спор
-  const isReschedule = /перенес|перенести|пораньше|перенос/i.test(combined);
-  const isOnlineConfirm = /онлайн(?:\s+|-)?запис|вы к нам записались|подтвержд/i.test(combined);
-  const isDispute = Boolean(existingKeyFacts?.is_dispute) || /жалоб|претензи|недоволен|отмен/i.test(combined);
+  // 2. Извлекаем базовые 4 параметра (услуга, дата, время, мастер)
+  const essence = extractEssenceDetails(cleanTranscript, rawSummary, salon);
+  const service = (existingKeyFacts?.service && !/не указан|не применим/i.test(existingKeyFacts.service))
+    ? existingKeyFacts.service
+    : essence.service;
+  const master = (existingKeyFacts?.master && isMasterNameValid(existingKeyFacts.master))
+    ? normalizeMasterName(existingKeyFacts.master)
+    : essence.master;
+  const date = (existingKeyFacts?.date && !/не указан|не применим/i.test(existingKeyFacts.date))
+    ? existingKeyFacts.date
+    : essence.date;
+  const time = (existingKeyFacts?.time && !/не указан|не применим/i.test(existingKeyFacts.time))
+    ? existingKeyFacts.time
+    : essence.time;
+
+  // Ветка A: Нецелевой / партнёрский / организационный звонок
+  if (ctx.category === 'non_client') {
+    const topicLabel = ctx.nonClientTopic || 'организационный / партнёрский вопрос';
+    const nextSteps: string[] = [];
+    if (/ватсап|whatsapp/i.test(cleanTranscript)) {
+      nextSteps.push('Проверить входящее сообщение и вложения в WhatsApp от звонящего');
+    }
+    if (/билет|концерт/i.test(cleanTranscript)) {
+      nextSteps.push('Передать информацию о предложенных билетах команде/управляющему салона');
+    } else {
+      nextSteps.push(`Передать информацию по организационному вопросу управляющему салона «${salon}»`);
+    }
+    if (/телефон|перезвон|уточн/i.test(cleanTranscript) || nextSteps.length < 2) {
+      nextSteps.push('При необходимости дать обратную связь отправителю в мессенджере');
+    }
+
+    return {
+      call_purpose: `Организационное / партнёрское обращение (${topicLabel})`,
+      requested_service: 'Не применимо (клиентская услуга салона не запрашивалась)',
+      offered_master: 'Не применимо',
+      offered_price: 'Не применимо',
+      offered_date_time: date ? `Упомянута дата: ${date}` : 'Не применимо',
+      booking_status_text: 'Не применимо (нецелевой / партнёрский звонок)',
+      unbooked_reason: 'Звонок носит организационно-информационный характер и не связан с записью клиента на услуги салона.',
+      manager_next_steps: nextSteps
+    };
+  }
+
+  // Ветка B: Предупреждение клиента об опоздании
+  if (ctx.category === 'late_or_visit_update') {
+    const delayStr = ctx.lateMinutes ? ` (примерно на ${ctx.lateMinutes})` : '';
+    return {
+      call_purpose: `Предупреждение клиента об опоздании на действующую запись${delayStr}`,
+      requested_service: service || 'Корректировка времени явки по действующей записи',
+      offered_master: master || 'По действующей записи клиента',
+      offered_price: 'Не обсуждалась (действующая бронь)',
+      offered_date_time: time
+        ? `Ожидаемое время с учётом задержки: ориентировочно ${time}${delayStr}`
+        : `Клиент предупредил о задержке${delayStr}`,
+      booking_status_text: 'Действующая запись сохранена (администратор подтвердил ожидание)',
+      unbooked_reason: 'Новая запись не оформлялась — клиент уже записан и предупредил о задержке.',
+      manager_next_steps: [
+        `Отметить в расписании CRM/YClients задержку клиента${delayStr} и актуализировать время явки`,
+        `Предупредить мастера${master ? ` (${master})` : ''} о смещении начала визита`,
+        'При смещении графика более чем на 15–20 минут проверить и предупредить следующих гостей при необходимости'
+      ]
+    };
+  }
+
+  // Определение контекста для остальных клиентских обращений
+  const isReschedule = ctx.isRescheduleOrCheck;
+  const isOnlineConfirm = /онлайн(?:\s+|-)?запис|вы к нам записались|подтвержд/i.test(cleanTranscript);
+  const isDispute = ctx.isDispute;
 
   // 1. Цель обращения
   let call_purpose = '';
-  if (existingKeyFacts?.client_issue && existingKeyFacts.client_issue.length > 5 && !existingKeyFacts.client_issue.toLowerCase().includes('обращение в салон')) {
+  if (ctx.isUnavailableServiceRefusal) {
+    call_purpose = service
+      ? `Запрос услуги «${service}» и подбор доступной альтернативы`
+      : 'Запрос отсутствующей в салоне услуги и уточнение альтернатив';
+  } else if (existingKeyFacts?.client_issue && existingKeyFacts.client_issue.length > 5 && !/обращение в салон|консультация \/ обращение/i.test(existingKeyFacts.client_issue)) {
     call_purpose = existingKeyFacts.client_issue;
   } else if (isReschedule) {
     const masterStr = master ? ` к мастеру ${master}` : '';
     const dateStr = date ? ` на ${date}` : '';
-    call_purpose = `Перенос действующей записи${masterStr}${dateStr} на более раннее время`;
+    call_purpose = `Перенос / корректировка действующей записи${masterStr}${dateStr}`;
   } else if (isOnlineConfirm) {
     const dateStr = date ? ` на ${date}` : '';
     call_purpose = `Подтверждение и корректировка онлайн-записи${dateStr}`;
   } else if (service) {
     const masterStr = master ? ` к мастеру ${master}` : '';
-    call_purpose = `Запись на услугу «${service}»${masterStr}`;
+    call_purpose = `Запись или консультация по услуге «${service}»${masterStr}`;
   } else if (isDispute) {
     call_purpose = 'Обращение по вопросу обслуживания / урегулирование ситуации';
   } else {
-    call_purpose = `Консультация и запись на услуги салона «${salon}»`;
+    call_purpose = `Справочная консультация по услугам салона «${salon}»`;
   }
 
   // 2. Какую услугу хотел получить гость
   let requested_service = service || 'Не указана';
   if (!service && isReschedule) {
-    requested_service = 'Не указана (перенос действующей брони)';
+    requested_service = 'Не указана (корректировка действующей брони)';
   }
 
   // 3. Какого мастера предложил менеджер
-  const offered_master = master || 'Не выбран / любой свободный специалист';
+  const offered_master = master || (ctx.isUnavailableServiceRefusal ? 'Не выбирался (услуга отсутствует)' : 'Не выбран');
 
   // 4. Какую стоимость озвучили
   let offered_price = 'Не озвучивалась';
@@ -479,7 +713,7 @@ export function extractStructuredCallSummary(
       const p2 = Number(maniPediMatch[2]).toLocaleString('ru-RU');
       priceMatches.push(`Маникюр — ${p1} ₽, педикюр — ${p2} ₽`);
     } else {
-      const genericPrice = combined.match(/(?:стоимост[ьи]|стоит|цена|прайс|будет)\s*(?:по\s+стоимости\s*)?(\d{3,5})\s*(?:руб|р|рублей|₽)?/iu);
+      const genericPrice = cleanTranscript.match(/(?:стоимост[ьи]|стоит|цена|прайс|будет)\s*(?:по\s+стоимости\s*|от\s+)?(\d{3,5})\s*(?:руб|р|рублей|₽)/iu);
       if (genericPrice) {
         const p = Number(genericPrice[1]).toLocaleString('ru-RU');
         priceMatches.push(`${p} ₽`);
@@ -488,7 +722,7 @@ export function extractStructuredCallSummary(
   }
 
   // Информация о предоплате
-  const prepayMatch = combined.match(/предоплат\w*\s*(?:50%|\d+%)?\s*(\d{3,5})?\s*(?:р|руб|рублей|₽)?(?:\s+на\s+([а-яёa-z\s]+ банк))?/iu);
+  const prepayMatch = cleanTranscript.match(/предоплат[а-яё]*\s*(?:50%|\d+%)?\s*(\d{3,5})?\s*(?:р(?![а-яё])|руб[а-яё]*|₽)?(?:\s+на\s+([а-яёa-z\s]+ банк))?/iu);
   if (prepayMatch) {
     const prepayAmount = prepayMatch[1] ? `${Number(prepayMatch[1]).toLocaleString('ru-RU')} ₽` : '50%';
     const bank = prepayMatch[2] ? ` на ${prepayMatch[2].trim()}` : '';
@@ -500,21 +734,31 @@ export function extractStructuredCallSummary(
   }
 
   // 5. Какие даты и время предложили
+  const cleanForSlots = cleanTranscript
+    .replace(/(?:на\s+)?минут\s+(?:на\s+)?\d+/giu, '')
+    .replace(/\d+\s+минут[а-яё]*/giu, '')
+    .replace(/\d+\s+билет[а-яё]*/giu, '')
+    .replace(/\d{3,5}\s*(?:руб[а-яё]*|р(?![а-яё])|₽)/giu, '');
+
   const allSlots: string[] = [];
-  const timeMatches = [...combined.matchAll(/\b([012]?\d)(?::([0-5]\d)|\s+([0-5]\d|0\s+0))\b/g)];
+  const timeMatches = [...cleanForSlots.matchAll(/\b([012]?\d)(?::([0-5]\d)|\s+([0-5]\d|0\s+0))\b/g)];
   for (const tm of timeMatches) {
-    const hh = tm[1].padStart(2, '0');
+    const hhNum = Number(tm[1]);
     const mmRaw = (tm[2] || tm[3] || '00').replace(/\s+/g, '');
     const mm = mmRaw === '0' || mmRaw === '00' ? '00' : mmRaw;
-    const slot = `${hh}:${mm}`;
-    if (!allSlots.includes(slot) && Number(hh) <= 23 && Number(mm) <= 59) {
-      allSlots.push(slot);
+    if (hhNum >= 8 && hhNum <= 22 && Number(mm) <= 59) {
+      const slot = `${String(hhNum).padStart(2, '0')}:${mm}`;
+      if (!allSlots.includes(slot)) {
+        allSlots.push(slot);
+      }
     }
   }
 
   let offered_date_time = '';
   const datePart = date || 'Дата не согласована';
-  if (allSlots.length > 0) {
+  if (ctx.isUnavailableServiceRefusal) {
+    offered_date_time = 'Не предлагались (клиент отказался из-за отсутствия нужной услуги)';
+  } else if (allSlots.length > 0) {
     const slotsStr = allSlots.join(', ');
     const agreedStr = time ? ` (согласовано на ${time})` : '';
     offered_date_time = `${datePart}: слоты ${slotsStr}${agreedStr}`;
@@ -530,33 +774,40 @@ export function extractStructuredCallSummary(
   let booking_status_text = '';
   let unbooked_reason = '';
 
-  const rawBooking = (existingBookingStatus || existingKeyFacts?.booking_status || '').toLowerCase();
-  const outcome = (existingKeyFacts?.call_outcome || '').toLowerCase();
-
-  const isDeclined = rawBooking === 'отказ' || outcome === 'отказ' || /не подходит|не смогу|не будет в городе|отказ/i.test(combined);
-  const isKeptOldBooking = isReschedule && /оставьте тогда|оставляем|сохранить|перед этим все забронировано|занято/i.test(combined);
-  const isConfirmedBooking = !isDeclined && (rawBooking === 'согласие' || outcome === 'запись' || /записала|записали|подтверждаем|договорились|оставляю|на 9 я оставляю/i.test(combined));
+  const isKeptOldBooking = isReschedule && /оставьте тогда|оставляем|сохранить|перед этим все забронировано|занято/i.test(cleanTranscript);
+  const isConfirmedReschedule = isReschedule && (
+    existingBookingStatus === 'согласие' ||
+    /(?:подтверждаем|оставляю|будем вас ожидать|ждем вас|ждём вас|перенесли|записали|оформлена)/iu.test(cleanTranscript)
+  );
 
   if (isKeptOldBooking) {
     booking_status_text = 'Сохранена прежняя запись (перенос не состоялся)';
     unbooked_reason = master
       ? `У мастера ${master} всё предшествующее время уже забронировано; клиент решил оставить действующую бронь без изменений.`
       : 'Всё предшествующее время у мастера уже занято; сохранена исходная бронь.';
-  } else if (isConfirmedBooking) {
-    booking_status_text = 'Запись состоялась (успешно подтверждена)';
+  } else if (ctx.category === 'confirmed_booking' || isConfirmedReschedule) {
+    booking_status_text = isReschedule
+      ? 'Запись скорректирована и подтверждена'
+      : 'Запись состоялась (успешно подтверждена)';
     unbooked_reason = 'Запись успешно состоялась';
-  } else if (isDeclined) {
+  } else if (ctx.category === 'refusal_unavailable_service') {
+    booking_status_text = 'Запись не состоялась (отказ — запрашиваемая услуга отсутствует)';
+    unbooked_reason = `Запрашиваемая услуга${service ? ` («${service}»)` : ''} не выполняется в салоне; клиент отказался от предложенной альтернативной услуги/консультации.`;
+  } else if (ctx.category === 'declined') {
     booking_status_text = 'Запись не состоялась (отказ клиента)';
-    if (/не будет в городе|уезжа/i.test(combined)) {
+    if (/не будет в городе|уезжа/i.test(cleanTranscript)) {
       unbooked_reason = 'Клиент не сможет прийти в предложенное время из-за отъезда из города.';
-    } else if (/дорого|цена|стоимост/i.test(combined)) {
+    } else if (/дорого|цена|стоимост/i.test(cleanTranscript)) {
       unbooked_reason = 'Клиента не устроила стоимость предложенных услуг.';
     } else {
-      unbooked_reason = 'Клиенту не подошло предложенное время визита, альтернативные варианты не устроили.';
+      unbooked_reason = 'Клиенту не подошло предложенное время или условия визита.';
     }
+  } else if (isDispute) {
+    booking_status_text = 'Обращение по качеству / спорный вопрос (без новой записи)';
+    unbooked_reason = 'Звонок посвящён урегулированию вопроса или претензии клиента.';
   } else {
     booking_status_text = 'Консультация (запись не оформлялась)';
-    unbooked_reason = 'Клиент обратился за справочной консультацией без фиксации конкретного времени визита.';
+    unbooked_reason = 'Клиент получил справочную информацию без фиксации записи на визит.';
   }
 
   // 8. Какие дальнейшие действия необходимо выполнить менеджеру
@@ -570,29 +821,39 @@ export function extractStructuredCallSummary(
       `Внести клиента в лист ожидания CRM: при освобождении более раннего слота к мастеру ${master || 'специалисту'} предложить перенос`
     );
     manager_next_steps.push('Отправить клиенту контрольное напоминание накануне визита');
-  } else if (isConfirmedBooking) {
+  } else if (ctx.category === 'confirmed_booking' || isConfirmedReschedule) {
     const serviceLabel = service ? ` на ${service}` : '';
     const masterLabel = master ? ` к мастеру ${master}` : '';
     const timeLabel = time ? ` на ${time}` : '';
     const dateLabel = date ? ` ${date}` : '';
 
     manager_next_steps.push(
-      `Зафиксировать бронь в CRM/YClients${serviceLabel}${masterLabel}${dateLabel}${timeLabel}`
+      `${isReschedule ? 'Актуализировать бронь' : 'Зафиксировать бронь'} в CRM/YClients${serviceLabel}${masterLabel}${dateLabel}${timeLabel}`
     );
     if (prepayMatch) {
       manager_next_steps.push('Проконтролировать поступление предоплаты и направить чек/подтверждение клиенту');
     }
     manager_next_steps.push(
-      'Направить клиенту подтверждение бронирования, правила подготовки к визиту и геолокацию салона в WhatsApp'
+      'Направить клиенту подтверждение бронирования и геолокацию салона в мессенджер'
     );
-    manager_next_steps.push('За 24 часа до визита отправить смс-напоминание для подтверждения визита');
-  } else if (isDeclined) {
-    manager_next_steps.push('Зафиксировать в CRM причину отказа клиента (несовпадение по времени/отъезд)');
-    manager_next_steps.push('Предложить клиенту альтернативные даты визита или внесение в лист ожидания');
-    manager_next_steps.push('Запланировать контрольный контакт через 1–2 недели при появлении новых свободных окон');
+    manager_next_steps.push('За 24 часа до визита отправить напоминание для подтверждения явки');
+  } else if (ctx.category === 'refusal_unavailable_service') {
+    manager_next_steps.push(
+      `Зафиксировать в CRM/журнале спроса обращение на отсутствующую услугу${service ? ` («${service}»)` : ''} для передачи управляющему`
+    );
+    manager_next_steps.push(
+      'Если в салоне появится данная услуга или мастер по смежной щадящей технике — оповестить заинтересованных клиентов'
+    );
+  } else if (ctx.category === 'declined') {
+    manager_next_steps.push('Зафиксировать в CRM причину отказа клиента по итогам диалога');
+    manager_next_steps.push('При согласии клиента внести контакт в лист ожидания на удобные даты');
+  } else if (isDispute) {
+    manager_next_steps.push(`Зафиксировать суть обращения в журнале контроля качества и передать управляющему салона «${salon}»`);
+    manager_next_steps.push('Связаться с клиентом после разбора ситуации с предоставлением решения');
   } else {
-    manager_next_steps.push('Создать карточку клиента в CRM с пометкой «Консультация» и зафиксировать интерес к услугам');
-    manager_next_steps.push(`Направить в мессенджер прайс-лист салона «${salon}» и ссылку на онлайн-запись`);
+    const serviceTopic = service ? ` («${service}»)` : '';
+    manager_next_steps.push(`Создать карточку клиента в CRM с пометкой «Консультация»${serviceTopic}`);
+    manager_next_steps.push(`Направить в мессенджер актуальную информацию по запросу и ссылку на онлайн-запись в салон «${salon}»`);
   }
 
   return {

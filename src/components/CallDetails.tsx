@@ -18,7 +18,7 @@ import { CallRecord, NextStepItem, ContextClarification, StructuredCallSummary, 
 import { ReanalyzeButton } from './ReanalyzeButton.js';
 import { refineTranscriptRoles } from '../services/transcriptUtils.js';
 import { extractStructuredCallSummary } from '../services/summaryUtils.js';
-import { extractCallEvaluation, buildCallEvaluation, EVALUATION_CRITERIA_DEFINITIONS, harmonizeMistakesAndEvaluation } from '../services/evaluationUtils.js';
+import { extractCallEvaluation, EVALUATION_CRITERIA_DEFINITIONS, harmonizeMistakesAndEvaluation } from '../services/evaluationUtils.js';
 
 interface CallDetailsProps {
   call: CallRecord;
@@ -118,21 +118,21 @@ export function CallDetails({
     return audioReloadKey > 0 ? `${base}&r=${audioReloadKey}` : base;
   }, [call.audio_url, call.call_id, audioReloadKey]);
 
-  // Оценка звонка по 10 критериям (гарантирует наличие всех 10 пунктов даже для старых звонков)
+  // Оценка звонка по 10 критериям (валидируется на противоречия и факты стенограммы)
   const callEvaluation = useMemo<CallEvaluation>(() => {
-    if (call.evaluation && Array.isArray(call.evaluation.criteria) && call.evaluation.criteria.length >= 10) {
-      return buildCallEvaluation(call.evaluation.criteria);
-    }
-    if (call.criteria_scores && Array.isArray(call.criteria_scores) && call.criteria_scores.length >= 10) {
-      return buildCallEvaluation(call.criteria_scores);
-    }
-    if (call.key_facts?.evaluation && Array.isArray(call.key_facts.evaluation.criteria) && call.key_facts.evaluation.criteria.length >= 10) {
-      return buildCallEvaluation(call.key_facts.evaluation.criteria);
-    }
+    const existingEval =
+      call.evaluation && Array.isArray(call.evaluation.criteria) && call.evaluation.criteria.length >= 10
+        ? call.evaluation
+        : call.criteria_scores && Array.isArray(call.criteria_scores) && call.criteria_scores.length >= 10
+        ? { criteria: call.criteria_scores }
+        : call.key_facts?.evaluation && Array.isArray(call.key_facts.evaluation.criteria) && call.key_facts.evaluation.criteria.length >= 10
+        ? call.key_facts.evaluation
+        : call.evaluation || null;
+
     return extractCallEvaluation(
       call.transcript || '',
       call.summary || '',
-      call.evaluation || null,
+      existingEval,
       call.operator_score,
       call.operator_mistakes,
       Array.isArray(call.recommendations) ? call.recommendations : [call.recommendations].filter(Boolean) as string[]
@@ -283,15 +283,23 @@ export function CallDetails({
       advice.length > 0
     );
 
-    const structured: StructuredCallSummary = call.structured_summary ||
-      call.key_facts?.structured_summary ||
-      extractStructuredCallSummary(
-        call.transcript || '',
-        summary,
-        call.key_facts,
-        undefined,
-        call.booking_status
-      );
+    const computedStructured = extractStructuredCallSummary(
+      call.transcript || '',
+      summary,
+      call.key_facts,
+      undefined,
+      call.booking_status
+    );
+    const savedStructured = call.structured_summary || call.key_facts?.structured_summary;
+    const savedStepsStr = Array.isArray(savedStructured?.manager_next_steps)
+      ? savedStructured.manager_next_steps.join(' ').toLowerCase()
+      : '';
+    const isSavedStructuredStale =
+      !savedStructured ||
+      ((savedStepsStr.includes('консультац') || savedStepsStr.includes('прайс-лист') || savedStepsStr.includes('онлайн-запись')) &&
+        !computedStructured.manager_next_steps.join(' ').toLowerCase().includes('прайс-лист'));
+
+    const structured: StructuredCallSummary = isSavedStructuredStale ? computedStructured : savedStructured;
 
     return {
       essence,
@@ -707,13 +715,13 @@ export function CallDetails({
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       const textOnly = line
-        .replace(/^(Менеджер:|Клиент:|Администратор:|Оператор:|Неизвестный:)\s*/i, '')
+        .replace(/^(Менеджер:|Клиент:|Администратор:|Оператор:|Автоинформатор:|Неизвестный:)\s*/i, '')
         .trim()
         .toLowerCase();
 
       if (clean.length > 0) {
         const prevText = clean[clean.length - 1]
-          .replace(/^(Менеджер:|Клиент:|Администратор:|Оператор:|Неизвестный:)\s*/i, '')
+          .replace(/^(Менеджер:|Клиент:|Администратор:|Оператор:|Автоинформатор:|Неизвестный:)\s*/i, '')
           .trim()
           .toLowerCase();
 
@@ -2542,10 +2550,24 @@ export function CallDetails({
                   </div>
                 ) : (
                   parsedTranscriptLines.map((line, idx) => {
+                    const isIvr = /^Автоинформатор:/i.test(line);
                     const isManager = line.startsWith('Менеджер:') || line.startsWith('Администратор:') || line.startsWith('Оператор:');
-                    const cleanLine = line.replace(/^(Менеджер:|Клиент:|Администратор:|Оператор:|Неизвестный:)\s*/, '');
-                    const speakerLabel = line.match(/^(Менеджер:|Клиент:|Администратор:|Оператор:|Неизвестный:)/)?.[0] || 'Неизвестный:';
-                    
+                    const cleanLine = line.replace(/^(Менеджер:|Клиент:|Администратор:|Оператор:|Автоинформатор:|Неизвестный:)\s*/i, '');
+                    const speakerLabel = line.match(/^(Менеджер:|Клиент:|Администратор:|Оператор:|Автоинформатор:|Неизвестный:)/i)?.[0] || 'Неизвестный:';
+
+                    if (isIvr) {
+                      return (
+                        <div key={idx} className="flex flex-col items-center my-1">
+                          <span className="text-[10px] font-medium text-slate-400 mb-0.5">
+                            Автоинформатор (АТС)
+                          </span>
+                          <div className="px-3 py-1.5 rounded-lg text-[11px] leading-relaxed bg-slate-100/80 border border-slate-200/80 text-slate-500 italic text-center max-w-[92%]">
+                            {cleanLine}
+                          </div>
+                        </div>
+                      );
+                    }
+
                     return (
                       <div 
                         key={idx} 

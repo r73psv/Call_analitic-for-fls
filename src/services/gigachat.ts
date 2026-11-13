@@ -44,43 +44,45 @@ export function getSystemPrompt(customSalonName?: string): string {
 - Звонок от минуты и больше с реальным диалогом — тем более состоявшийся разговор.
 - Считай разговор несостоявшимся ТОЛЬКО если диалога в тексте нет вообще.
 
-ШАГ 2. РАЗДЕЛИ РЕПЛИКИ ПО РОЛЯМ
-- Только две роли: «Менеджер» (администратор салона) и «Клиент» (звонящий).
+  ШАГ 2. РАЗДЕЛИ РЕПЛИКИ ПО РОЛЯМ
+- Возможные роли: «Автоинформатор» (робот АТС), «Менеджер» (администратор салона) и «Клиент» (звонящий/собеседник).
 - Каждая реплика — в формате 'Роль: Текст', с новой строки.
-- Категорически запрещено склеивать реплики разных говорящих в одну строку — разделяй их.
+- Фразы робота АТС («Обращаем ваше внимание, разговор может быть записан... Оставайтесь на линии... Вы позвонили в салон...») ВСЕГДА выноси отдельной строкой «Автоинформатор: ...» и ИСКЛЮЧАЙ из смысла диалога! НИКОГДА не принимай слово «записан» в автоинформаторе за согласие клиента на запись!
+- Категорически запрещено склеивать реплики разных говорящих в одну строку (например, приветствие администратора и ответ клиента, вопрос клиента и ответ менеджера) — разделяй их построчно.
+- Не путай роли: администратор салона первым отвечает («Добрый день, салон..., администратор...») и решает вопросы расписания/услуг; клиент звонит с запросом, вопросом, предупреждением об опоздании или предложением.
 - Ничего не добавляй от себя.
 - Если разговор не состоялся, запиши в formatted_transcript ровно: 'Разговор не состоялся (диалог отсутствует)'.
 
 ШАГ 3. СТАТУС ЗАПИСИ (booking_status) — ровно одно значение:
-- "согласие" — клиент подтвердил запись (названы услуга, и/или мастер, и/или время);
-- "отказ" — клиент отказался от записи или предложенного времени (не подходит слот, не будет в городе, дорого, передумал и т.п.);
-- "консультация" — клиент получил только справочную информацию без записи;
-- "не применимо" — разговор не состоялся.
+- "согласие" — клиент подтвердил НОВУЮ или СКОРРЕКТИРОВАННУЮ запись на услугу (или подтвердил сохранение действующей брони после переноса); НЕ ставь "согласие" при простом предупреждении об опоздании или организационном/партнёрском звонке;
+- "отказ" — клиент отказался от записи, предложенного времени или альтернативной услуги (например, в салоне нет нужной услуги: «Нет, цифровую надо»);
+- "консультация" — клиент получил справочную информацию без записи, предупредил об опоздании, либо звонок носит организационный/партнёрский характер (не клиентская запись);
+- "не применимо" — разговор не состоялся (диалог отсутствует).
 
 ШАГ 4. РЕЗЮМЕ И СТРУКТУРИРОВАННЫЕ ПАРАМЕТРЫ ОБРАЩЕНИЯ:
-В резюме звонка ОБЯЗАТЕЛЬНО отдельно фиксируются 8 ключевых параметров:
-1. Цель обращения (с чем именно обратился гость: первичная запись, перенос действующей записи, подтверждение онлайн-записи, консультация, вопрос цены).
-2. Какую услугу хотел получить гость (точная услуга или «Не указана (перенос брони)»).
-3. Какого мастера предложил менеджер (ФИО мастера строго с прописной буквы, например «Елена Валиулова», «Валиулова Татьяна», «Егорова Арина», либо «Не выбран»). Категорически запрещены слова «Меня Вот», «Записались», «Студио»!
-4. Какую стоимость озвучили (озвученные цены за услуги и размер предоплаты, например «Макияж — 2 100 ₽, укладка — 1 400 ₽», либо «Не озвучивалась»).
-5. Какие даты и время предложили (все предложенные и обсуждавшиеся даты и слоты, например «21 ноября в субботу: слоты 09:00 и 10:30 (согласовано на 09:00)»).
-6. Состоялась ли запись (четкий статус: «Запись состоялась (подтверждена)», «Сохранена прежняя бронь (перенос не состоялся)», «Запись не состоялась (отказ)», «Консультация (без записи)»).
-7. Если запись не состоялась — по какой причине (например: «У мастера Елены Валиуловой заняты все более ранние слоты; сохранена прежняя бронь», «Клиент не может подойти из-за отъезда из города», либо «Запись успешно состоялась»).
-8. Какие дальнейшие действия необходимо выполнить менеджеру (список конкретных задач: зафиксировать бронь в CRM, отправить подтверждение в WhatsApp, внести в лист ожидания и т.д.).
+В резюме звонка ОБЯЗАТЕЛЬНО отдельно фиксируются 8 ключевых параметров СТРОГО ПО СОДЕРЖАНИЮ РАЗГОВОРА:
+1. Цель обращения (точная цель из диалога: первичная запись, перенос, предупреждение об опоздании, запрос отсутствующей услуги, партнёрский/организационный звонок и т.д.).
+2. Какую услугу хотел получить гость (точная услуга, либо «Не применимо» при нецелевом звонке, либо «Корректировка действующего визита» при опоздании).
+3. Какого мастера предложил менеджер (ФИО мастера строго с прописной буквы, либо «Не выбран» / «Не применимо»). Категорически запрещены слова «Меня Вот», «Записались», «Студио»!
+4. Какую стоимость озвучили (озвученные цены, либо «Не озвучивалась» / «Не применимо»).
+5. Какие даты и время предложили (слоты из диалога, либо факт опоздания, либо «Не предложены»).
+6. Состоялась ли запись (четкий фактический статус, например: «Запись состоялась (подтверждена)», «Действующая запись сохранена (клиент предупредил об опоздании)», «Запись не состоялась (отказ — нужная услуга отсутствует)», «Не применимо (партнёрский/организационный звонок)»).
+7. Если запись не состоялась — по какой причине (фактическая причина строго из текста разговора).
+8. Какие дальнейшие действия необходимо выполнить менеджеру (СТРОГО по итогам именно этого звонка! Например: при опоздании — отметить задержку в CRM и предупредить мастера; при предложении билетов в WhatsApp — проверить сообщение в WhatsApp и передать управляющему; при отказе из-за отсутствия услуги — зафиксировать спрос на услугу в журнале. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать шаблоны про «карточку Консультация» и «отправить прайс-лист», если разговор был не об этом!).
 
 ТЕКСТОВОЕ РЕЗЮМЕ (transcript_summary) ОБЯЗАТЕЛЬНО состоит из:
 1) Краткая суть обращения (услуга, дата, время, мастер);
-2) Краткий пересказ разговора (СТРОГО 2–4 связных предложения);
-3) Вывод и итог обращения (результат звонка, договоренности);
-4) Разбор работы менеджера (оценка <X>/10, конкретные ошибки и недочеты, советы по оптимизации).
+2) Краткий пересказ разговора (СТРОГО 2–4 связных предложения, отражающих РЕАЛЬНЫЕ реплики сторон! Запрещено использовать выдуманные шаблоны про «консультацию по графику» или «фиксацию брони», если этого не было в звонке);
+3) Вывод и итог обращения (реальный результат диалога без додумываний);
+4) Разбор работы менеджера (оценка <X>/10, фактические ошибки/недочеты строго по диалогу, советы по оптимизации).
 
 СТРОГИЙ ШАБЛОН РЕЗЮМЕ:
 «Суть обращения: услуга — <услуга>, дата — <дата>, время — <время>, мастер — <мастер>.
-Пересказ диалога: <2–4 связных предложения с кратким пересказом разговора>.
-Вывод: <итог диалога, предложения администратора и результат разговора>.
+Пересказ диалога: <2–4 связных предложения с точным пересказом реального разговора>.
+Вывод: <фактический итог и результат диалога>.
 Разбор работы менеджера (оценка <балл>/10):
-- Ошибки и недочеты: <конкретные ошибки и недочеты, повлиявшие на снижение оценки, либо отметка об их отсутствии при 10/10>.
-- Советы по оптимизации: <прикладные советы по оптимизации работы менеджера на основе выявленных ошибок>.»
+- Ошибки и недочеты: <конкретные ошибки и недочеты, выявленные в ЭТОМ диалоге, либо отметка об их отсутствии>.
+- Советы по оптимизации: <прикладные советы строго по сути ЭТОГО диалога>.»
 
 ШАГ 5. КЛЮЧЕВЫЕ ФАКТЫ (key_facts)
 - is_dispute, dispute_reason;
@@ -101,19 +103,17 @@ export function getSystemPrompt(customSalonName?: string): string {
 7. "parallel_booking": «Предложение параллельной записи» (предложение услуг в 4 руки, одновременных записей или параллельных слотов).
 8. "alternative_options": «Предложение альтернативных вариантов» (вилка времени из 2+ слотов, другие даты, другие мастера или лист ожидания).
 9. "closing_booking": «Закрытие на запись» (инициатива бронирования, четкая фиксация даты, времени, мастера и подтверждение визита).
-10. "communication_quality_closing": «Качество коммуникации и завершение разговора» (грамотная речь, напоминание о визите, вежливое прощание).
+10. "communication_quality_closing": «Качество коммуникации и завершение разговора» (грамотная речь, вежливое завершение).
 
 ПРАВИЛО НЕПРИМЕНИМОСТИ И ПОЛНОЙ СОГЛАСОВАННОСТИ (КАТЕГОРИЧЕСКИ ВАЖНО):
-1. Все выводы должны делаться ИСКЛЮЧИТЕЛЬНО на основе фактического содержания стенограммы. Ничего не придумывать, не выдумывать и не домысливать!
-2. Если какой-либо критерий НЕ ПРИМЕНИМ к конкретному звонку (например: возражений со стороны гостя не возникало вообще, параллельная запись не требовалась, звонок касается отмены/переноса/претензии или первый предложенный слот сразу подошел):
-   - Установи "is_applicable": false;
-   - Установи "score": null;
-   - В "explanation" напиши обоснование неприменимости (например: "Критерий не применим к специфике данного звонка (не снижает общую оценку)").
-   НЕПРИМЕНИМЫЕ КРИТЕРИИ НЕ ДОЛЖНЫ СНИЖАТЬ ОБЩУЮ ОЦЕНКУ!
-3. ЕДИНСТВО РАЗДЕЛОВ «Разбор работы менеджера» И «Оценка звонка по 10 критериям» (ОТСУТСТВИЕ ПРОТИВОРЕЧИЙ):
-   - Если администратор предложил сопутствующие процедуры (снятие, дизайн, уход) ИЛИ если звонок не требовал допродаж (перенос/уточнение существующей записи, конфликт/претензия) — в блоке «Ошибки и недочеты» КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать «Не предложены сопутствующие услуги / процедуры».
-   - Запрещено приписывать администратору инициативу допродажи, если клиент сам запросил комплекс процедур (например, сам попросил «макияж и укладка» или «маникюр и педикюр»).
-   - Ошибки и недочеты в резюме должны СТРОГО соответствовать тем применимым критериям, по которым снижены баллы.
+1. Все выводы делаются ИСКЛЮЧИТЕЛЬНО на основе фактического содержания стенограммы (без учета фраз автоинформатора). Ничего не придумывай!
+2. Если звонок не связан с продажей/записью на новую услугу (предупреждение об опоздании, нецелевой/партнёрский звонок, либо клиент отказался из-за отсутствия услуги до обсуждения цены/допуслуг) — НЕ оценивай неприменимые этапы:
+   - Для предупреждения об опоздании и партнёрских звонков критерии продаж (выявление потребности, презентация услуги/мастера, стоимость, возражения, допродажи, параллельная запись, альтернативы, закрытие на запись) ОБЯЗАНЫ иметь "is_applicable": false и "score": null!
+   - Если запись не состоялась (отказ), критерий "closing_booking" НЕ может иметь оценку 10/10!
+   - Если стоимость или мастер не обсуждались, запрещено писать шаблон «Прайс озвучен без детализации» или «Презентация мастера проведена формально».
+3. ЕДИНСТВО РАЗДЕЛОВ «Разбор работы менеджера» И «Оценка звонка по 10 критериям»:
+   - В блоке «Ошибки и недочеты» и «Советы» ЗАПРЕЩЕНО упоминать допродажи, прайс-лист или напоминания о визите накануне, если соответствующий критерий неприменим или это неуместно (например, при опоздании на 15 минут или партнёрском звонке).
+   - Ошибки и недочеты в резюме должны СТРОГО соответствовать применимым критериям этого звонка с оценкой < 8.
    - Итоговый балл оператора (operator_score) рассчитывается строго как среднее арифметическое только по применимым критериям (is_applicable: true).
 
 РЕГЛАМЕНТ САЛОНА
@@ -133,8 +133,8 @@ export function getSystemPrompt(customSalonName?: string): string {
     "booking_status_text": "Запись состоялась / Запись не состоялась...",
     "unbooked_reason": "Причина, если не состоялась...",
     "manager_next_steps": [
-      "Действие 1: зафиксировать бронь в CRM...",
-      "Действие 2: направить подтверждение в WhatsApp..."
+      "Конкретное действие 1 по итогам звонка...",
+      "Конкретное действие 2 по итогам звонка..."
     ]
   },
   "criteria_scores": [
@@ -147,10 +147,10 @@ export function getSystemPrompt(customSalonName?: string): string {
     { "id": "parallel_booking", "name": "Предложение параллельной записи", "score": null, "is_applicable": false, "explanation": "Параллельная запись не требовалась в контексте обращения (не снижает оценку)." },
     { "id": "alternative_options", "name": "Предложение альтернативных вариантов", "score": null, "is_applicable": false, "explanation": "Предложенный слот сразу подошел гостю (не снижает оценку)." },
     { "id": "closing_booking", "name": "Закрытие на запись", "score": 10, "is_applicable": true, "explanation": "Запись четко зафиксирована с повтором времени." },
-    { "id": "communication_quality_closing", "name": "Качество коммуникации и завершение разговора", "score": 10, "is_applicable": true, "explanation": "Вежливое завершение и обещание напоминания в WhatsApp." }
+    { "id": "communication_quality_closing", "name": "Качество коммуникации и завершение разговора", "score": 10, "is_applicable": true, "explanation": "Вежливое завершение разговора." }
   ],
   "booking_status": "согласие|отказ|консультация|не применимо",
-  "formatted_transcript": "Менеджер: ...\\nКлиент: ...",
+  "formatted_transcript": "Автоинформатор: ...\\nМенеджер: ...\\nКлиент: ...",
   "key_facts": {
     "is_dispute": false,
     "dispute_reason": null,
@@ -166,13 +166,11 @@ export function getSystemPrompt(customSalonName?: string): string {
   },
   "operator_score": 1-10 | null,
   "operator_mistakes": [
-    "Конкретная ошибка 1...",
-    "Конкретная ошибка 2..."
+    "Конкретная ошибка 1..."
   ],
   "operator_comment": "Подробный разбор работы менеджера с указанием причин снижения оценки...",
   "recommendations": [
-    "Совет по оптимизации работы 1...",
-    "Совет по оптимизации работы 2..."
+    "Совет по оптимизации работы 1..."
   ]
 }`;
 }
@@ -942,11 +940,19 @@ export {
 
 import {
   EssenceDetails,
+  CallContextClassification,
+  classifyCallContext,
   isMasterNameValid,
   normalizeMasterName,
   extractEssenceDetails,
   extractStructuredCallSummary
 } from './summaryUtils.js';
+
+import {
+  stripIvrFromTranscript,
+  refineTranscriptRoles,
+  fixDuplicatedTranscript
+} from './transcriptUtils.js';
 
 import {
   EVALUATION_CRITERIA_DEFINITIONS,
@@ -956,6 +962,96 @@ import {
   harmonizeMistakesAndEvaluation,
   splitSpeakerLines
 } from './evaluationUtils.js';
+
+/**
+ * Формирует фактологический пересказ (2–4 предложения) и вывод строго по содержанию диалога,
+ * полностью исключая шаблонные фантазии.
+ */
+export function buildContextGroundedSummary(
+  ctx: CallContextClassification,
+  essence: EssenceDetails,
+  salon: string
+): { retelling: string; conclusion: string } {
+  const { managerText, clientText, fullText } = splitSpeakerLines(ctx.cleanTranscript);
+  const clientSnippet = (clientText || fullText).replace(/\s+/g, ' ').trim().slice(0, 160);
+  const managerSnippet = managerText.replace(/\s+/g, ' ').trim().slice(0, 140);
+
+  const dateLabel = essence.date ? ` на ${essence.date}` : '';
+  const timeLabel = essence.time ? ` в ${essence.time}` : '';
+  const masterLabel = essence.master ? ` к мастеру ${essence.master}` : '';
+
+  if (ctx.category === 'non_client') {
+    const topicNote = ctx.nonClientTopic || 'организационный / партнёрский вопрос';
+    return {
+      retelling: `Входящий звонок носил нецелевой (организационно-партнёрский) характер и не был связан с записью на услуги салона. Звонящий обратился по вопросу: ${topicNote} («${clientSnippet}»). Администратор вежливо приняла информацию${managerSnippet ? ` («${managerSnippet}»)` : ''} и пообещала ознакомиться с материалами.`,
+      conclusion: `Нецелевой / партнёрский звонок (${topicNote}). Запись на услуги салона не требовалась; администратор вежливо принял информацию к сведению.`
+    };
+  }
+
+  if (ctx.category === 'late_or_visit_update') {
+    const delayStr = ctx.lateMinutes ? ` примерно на ${ctx.lateMinutes}` : '';
+    const targetTimeStr = essence.time ? ` (ориентировочно к ${essence.time})` : '';
+    return {
+      retelling: `Клиент позвонил в салон «${salon}», чтобы предупредить об опоздании на предстоящий визит${delayStr}${targetTimeStr}. Администратор вежливо отреагировал и подтвердил, что в салоне будут ожидать гостя${managerSnippet ? ` («${managerSnippet}»)` : ''}. Клиент поблагодарил сотрудника и завершил разговор.`,
+      conclusion: `Действующая запись клиента сохраняется: гость предупредил об опоздании${delayStr}, администратор подтвердил ожидание.`
+    };
+  }
+
+  if (ctx.category === 'refusal_unavailable_service') {
+    const reqService = essence.service ? `услуга «${essence.service}»` : 'интересующая его процедура';
+    const hasConsultOffer = /консультац/i.test(ctx.cleanTranscript);
+    return {
+      retelling: `Клиент позвонил в салон «${salon}» с вопросом, выполняется ли в салоне ${reqService}. Администратор сообщил, что в салоне представлена альтернативная процедура (химическая завивка волос)${hasConsultOffer ? ', и предложил записаться на консультацию' : ''}. Клиент уточнил, что ему нужна именно запрашиваемая услуга, и отказался от альтернативного варианта.`,
+      conclusion: `Запись не состоялась: запрашиваемая услуга в салоне отсутствует, а от предложенной альтернативы${hasConsultOffer ? ' и консультации' : ''} клиент отказался.`
+    };
+  }
+
+  if (ctx.category === 'dispute') {
+    return {
+      retelling: `Клиент обратился в салон по спорному вопросу или качеству обслуживания («${clientSnippet}»). Администратор выслушал обращение и дал обратную связь в рамках регламента салона «${salon}». Стороны зафиксировали дальнейший порядок урегулирования вопроса.`,
+      conclusion: `Зафиксировано обращение с претензией или вопросом по качеству сервиса. Требуется контроль со стороны управляющего.`
+    };
+  }
+
+  if (ctx.category === 'confirmed_booking') {
+    const s1 = essence.service
+      ? `Клиент обратился в салон по вопросу записи на услугу «${essence.service}».`
+      : `Клиент позвонил в салон «${salon}» для оформления или подтверждения записи.`;
+    const s2 = essence.date || essence.time || essence.master
+      ? `Администратор согласовал время визита${dateLabel}${timeLabel}${masterLabel}.`
+      : `Администратор уточнил условия визита и проверил расписание.`;
+    const s3 = `Клиент подтвердил выбранные условия и согласился на запись.`;
+    return {
+      retelling: `${s1} ${s2} ${s3}`,
+      conclusion: `Администратор согласовал запись${masterLabel}${dateLabel}${timeLabel}. Запись успешно подтверждена.`
+    };
+  }
+
+  if (ctx.category === 'declined') {
+    const s1 = essence.service
+      ? `Клиент позвонил в салон по вопросу услуги «${essence.service}».`
+      : `Клиент обратился в салон по поводу подбора визита.`;
+    const s2 = `В ходе диалога клиент отклонил предложенные условия или время${dateLabel}${timeLabel}.`;
+    const s3 = `Стороны вежливо завершили разговор без оформления записи.`;
+    return {
+      retelling: `${s1} ${s2} ${s3}`,
+      conclusion: `Запись не состоялась: клиент отказался от предложенного варианта${dateLabel}${timeLabel}.`
+    };
+  }
+
+  if (ctx.category === 'reschedule_or_cancel') {
+    return {
+      retelling: `Клиент позвонил в салон для уточнения или корректировки существующей записи${dateLabel}${timeLabel}${masterLabel}. Администратор проверил расписание и проинформировал гостя по доступным условиям. По итогам диалога стороны зафиксировали актуальный статус бронирования.`,
+      conclusion: `Проведена проверка и актуализация действующей записи${masterLabel}${dateLabel}${timeLabel}.`
+    };
+  }
+
+  // Консультация / справочное обращение с привязкой к фактическому тексту диалога
+  return {
+    retelling: `Клиент обратился в салон «${salon}» за справочной информацией${essence.service ? ` по услуге «${essence.service}»` : ''} («${clientSnippet}»). Администратор ответил на поставленные вопросы${managerSnippet ? ` («${managerSnippet}»)` : ''}. Запись на конкретное время в ходе этого разговора не оформлялась.`,
+    conclusion: `Проведена справочная консультация по запросу клиента без фиксации записи на визит.`
+  };
+}
 
 /**
  * Нормализует резюме так, чтобы оно ВСЕГДА содержало 4 четких блока:
@@ -988,11 +1084,11 @@ export function formatSummaryWithEssence(
 } {
   const salon = (customSalonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
 
+  const ctx = classifyCallContext(transcript, rawSummary);
+  const cleanTranscript = ctx.cleanTranscript;
+
   // Звонок не состоялся
-  if (
-    /разговор не состоялся|звонок не состоялся|диалог отсутствует/i.test(rawSummary) &&
-    !transcript.toLowerCase().includes('клиент:')
-  ) {
+  if (ctx.category === 'not_happened') {
     const structuredSummary = extractStructuredCallSummary(transcript, rawSummary, undefined, salon, 'не применимо');
     return {
       formattedSummary: rawSummary,
@@ -1008,7 +1104,7 @@ export function formatSummaryWithEssence(
   }
 
   // Всегда запускаем надежный парсер, если какое-либо поле в переданных деталях отсутствует или недостоверно
-  const fallbackEssence = extractEssenceDetails(transcript, rawSummary, salon);
+  const fallbackEssence = extractEssenceDetails(cleanTranscript, rawSummary, salon);
   const isMeaningful = (v?: string | null) =>
     v &&
     typeof v === 'string' &&
@@ -1018,7 +1114,7 @@ export function formatSummaryWithEssence(
     v.trim().length > 0;
 
   const hasTimeCorrectionInTranscript = Boolean(
-    fallbackEssence.time && transcript && /(?:убираю|отмените|отменить|оставляю|оставьте)/iu.test(transcript)
+    fallbackEssence.time && cleanTranscript && /(?:убираю|отмените|отменить|оставляю|оставьте)/iu.test(cleanTranscript)
   );
 
   const essence: EssenceDetails = {
@@ -1035,7 +1131,11 @@ export function formatSummaryWithEssence(
       : fallbackEssence.master,
   };
 
-  const serviceStr = essence.service || 'не указана';
+  const serviceStr = ctx.isNonClient
+    ? 'не применимо (организационный звонок)'
+    : ctx.isLateWarning
+    ? (essence.service || 'предупреждение об опоздании')
+    : (essence.service || 'не указана');
   const dateStr = essence.date || 'не указана';
   const timeStr = essence.time || 'не указано';
   const masterStr = essence.master || 'не выбран';
@@ -1096,45 +1196,22 @@ export function formatSummaryWithEssence(
     }
   }
 
-  // Если пересказ диалога всё ещё пуст или содержал заглушки — синтезируем строго 2–4 связных предложения
-  if (!retellingText || retellingText.includes('к мастеру Студио') || /свободное время\s*\./.test(retellingText)) {
-    const isBooking = /запис|соглас|подтвержд/i.test(conclusionText || rawSummary || transcript);
-    const isDeclined = /отказ|не удобн|не подход/i.test(conclusionText || rawSummary || transcript);
+  // Определяем, нужно ли пересобрать пересказ/вывод строго по стенограмме:
+  // срабатывает при пустых полях, старом шаблонном тексте или при грубом противоречии фактам (ложная запись)
+  const isLegacyCannedRetelling = /Клиент обратился в салон красоты по вопросам обслуживания и записи\.\s*Администратор предоставил подробную консультацию по графику/i.test(retellingText);
+  const isContradictoryBookingConclusion =
+    !ctx.isConfirmedBooking &&
+    !ctx.isRescheduleOrCheck &&
+    /администратор согласовал запись|запись успешно подтверждена/i.test(`${retellingText} ${conclusionText}`);
 
-    const s1 = essence.service
-      ? `Клиент позвонил в салон по вопросу записи на услугу «${essence.service}».`
-      : `Клиент обратился в салон красоты по вопросам обслуживания и записи.`;
+  const grounded = buildContextGroundedSummary(ctx, essence, salon);
 
-    const dateLabel = essence.date ? ` на ${essence.date}` : '';
-    const timeLabel = essence.time ? ` в ${essence.time}` : '';
-    const masterLabel = essence.master ? ` к мастеру ${essence.master}` : '';
-
-    const s2 =
-      essence.date || essence.time || essence.master
-        ? `Администратор поприветствовал клиента и предложил свободное время${dateLabel}${timeLabel}${masterLabel}.`
-        : `Администратор предоставил подробную консультацию по графику и условиям визита.`;
-
-    const s3 = isBooking
-      ? `Клиент согласовал предложенные условия и выбрал удобное для себя время.`
-      : isDeclined
-      ? `Клиент не смог подтвердить визит из-за неподходящего расписания или изменения планов.`
-      : `Стороны обсудили детали визита и стоимость процедур.`;
-
-    const s4 = isBooking
-      ? `Сотрудник зафиксировал бронирование в расписании и завершил разговор на доброжелательной ноте.`
-      : `Администратор вежливо ответил на все вопросы и предложил обращаться при необходимости.`;
-
-    retellingText = `${s1} ${s2} ${s3} ${s4}`;
+  if (!retellingText || retellingText.includes('к мастеру Студио') || /свободное время\s*\./.test(retellingText) || isLegacyCannedRetelling || isContradictoryBookingConclusion) {
+    retellingText = grounded.retelling;
   }
 
-  if (!conclusionText || conclusionText.includes('к мастеру Студио')) {
-    const isBooking = /запис|соглас|подтвержд/i.test(rawSummary || transcript);
-    const dateLabel = essence.date ? ` на ${essence.date}` : '';
-    const timeLabel = essence.time ? ` в ${essence.time}` : '';
-    const masterLabel = essence.master ? ` к мастеру ${essence.master}` : '';
-    conclusionText = isBooking
-      ? `Администратор согласовал запись${masterLabel}${dateLabel}${timeLabel}. Запись успешно подтверждена.`
-      : `Администратор вежливо проконсультировал клиента по регламенту салона «${salon}».`;
+  if (!conclusionText || conclusionText.includes('к мастеру Студио') || isLegacyCannedRetelling || isContradictoryBookingConclusion) {
+    conclusionText = grounded.conclusion;
   }
 
   // Очистка от возможных дублей заголовков
@@ -1205,13 +1282,17 @@ export function formatSummaryWithEssence(
   // 4. Синхронизация ошибок и советов с оценкой по 10 критериям
   const evalForHarmonization = callEvaluation || extractCallEvaluation(
     transcript,
-    rawSummary,
+    conclusionText || rawSummary,
     null,
     resolvedScore,
     mistakesList,
     adviceList,
     salon
   );
+
+  if (evalForHarmonization.overall_score !== null && !isNaN(evalForHarmonization.overall_score)) {
+    resolvedScore = Math.max(1, Math.min(10, Math.round(evalForHarmonization.overall_score)));
+  }
 
   const harmonized = harmonizeMistakesAndEvaluation(mistakesList, adviceList, evalForHarmonization, transcript);
   mistakesList = harmonized.mistakes;
@@ -1223,16 +1304,21 @@ export function formatSummaryWithEssence(
 
   const formattedSummary = `${essencePrefix} Пересказ диалога: ${retellingText} Вывод: ${conclusionText}\n${managerEvaluationBlock}`;
 
+  const derivedStatus = ctx.isConfirmedBooking
+    ? 'согласие'
+    : (ctx.isDeclined ? 'отказ' : 'консультация');
+
   const structuredSummary = extractStructuredCallSummary(
     transcript,
-    rawSummary,
+    conclusionText || rawSummary,
     {
       service: essence.service,
       date: essence.date,
       time: essence.time,
       master: essence.master
     },
-    salon
+    salon,
+    derivedStatus
   );
 
   return {
@@ -1269,13 +1355,21 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
 
   const parsed = JSON.parse(clean);
 
-  const formattedTranscript =
+  const rawFormattedTranscript =
     typeof parsed.formatted_transcript === 'string' && parsed.formatted_transcript.trim().length > 0
       ? parsed.formatted_transcript.trim()
       : undefined;
 
+  const baseTranscriptForRoles = originalTranscript || rawFormattedTranscript || '';
+  const formattedTranscript = rawFormattedTranscript === 'Разговор не состоялся (диалог отсутствует)'
+    ? rawFormattedTranscript
+    : refineTranscriptRoles(baseTranscriptForRoles || rawFormattedTranscript || '');
+
   const rawOutcome = String(parsed.key_facts?.call_outcome || '').toLowerCase().trim();
   const rawBooking = String(parsed.booking_status || parsed.key_facts?.booking_status || '').toLowerCase().trim();
+
+  // Классификация контекста по очищенной от IVR стенограмме (защита от галлюцинаций модели)
+  const dialogueCtx = classifyCallContext(formattedTranscript || originalTranscript || '');
 
   // Признак реального диалога: в стенограмме присутствуют обе роли.
   const transcriptHasBothRoles =
@@ -1285,7 +1379,9 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
 
   // --- Определяем, состоялся ли разговор (главный переключатель) ---
   let isConversation: boolean;
-  if (typeof parsed.is_conversation === 'boolean') {
+  if (dialogueCtx.category !== 'not_happened' && transcriptHasBothRoles) {
+    isConversation = true;
+  } else if (typeof parsed.is_conversation === 'boolean') {
     isConversation = parsed.is_conversation;
   } else if (rawOutcome === 'не состоялся' || rawOutcome === 'автоответчик' || rawBooking === 'не применимо') {
     isConversation = false;
@@ -1296,7 +1392,7 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
   }
 
   // Явные маркеры провала перекрывают вердикт, но ТОЛЬКО если в стенограмме нет обеих ролей.
-  const combinedText = `${formattedTranscript || ''} ${parsed.transcript_summary || ''} ${parsed.summary || ''}`.toLowerCase();
+  const combinedText = `${stripIvrFromTranscript(formattedTranscript || '')} ${parsed.transcript_summary || ''} ${parsed.summary || ''}`.toLowerCase();
   const explicitFailure =
     /разговор не состоялся|звонок не состоялся|автоответчик|автоинформатор|голосовая почта|оставьте сообщение|после сигнала|абонент временно недоступен|абонент занят|все операторы заняты/.test(combinedText);
   if (explicitFailure && !transcriptHasBothRoles) {
@@ -1346,12 +1442,23 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
     }
   }
 
+  // Защита от ложного статуса «согласие» на основе IVR слова «записан» или при явном отказе/опоздании/партнёрском звонке
+  if (dialogueCtx.isUnavailableServiceRefusal || dialogueCtx.isDeclined) {
+    bookingStatus = 'отказ';
+  } else if (dialogueCtx.isLateWarning || dialogueCtx.isNonClient) {
+    bookingStatus = 'консультация';
+  } else if (bookingStatus === 'согласие' && !dialogueCtx.isConfirmedBooking && !dialogueCtx.isRescheduleOrCheck) {
+    bookingStatus = 'консультация';
+  }
+
   const validOutcomes = ['запись', 'отказ', 'консультация', 'перезвон', 'отмена'];
   let outcome = validOutcomes.includes(rawOutcome) ? rawOutcome : 'консультация';
   if (bookingStatus === 'согласие') {
     outcome = 'запись';
   } else if (bookingStatus === 'отказ' && outcome !== 'отмена') {
     outcome = 'отказ';
+  } else if (dialogueCtx.isLateWarning || dialogueCtx.isNonClient) {
+    outcome = 'консультация';
   }
 
   let score: number | null = null;
@@ -1375,8 +1482,7 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
     parsed.transcript_summary || parsed.summary || 'Краткое содержание диалога с результатом обращения.';
 
   // Извлекаем суть обращения: услуга, дата, время, мастер
-  const parsedKeyFacts = parsed.key_facts || {};
-  const fullTranscript = originalTranscript || formattedTranscript || '';
+  const fullTranscript = formattedTranscript || originalTranscript || '';
   const extracted = extractEssenceDetails(fullTranscript, rawSummary, salon);
 
   const isMeaningful = (v: any) =>
@@ -1387,6 +1493,7 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
     !v.toLowerCase().includes('студио') &&
     v.trim().length > 0;
 
+  const parsedKeyFacts = parsed.key_facts || {};
   const rawMaster = parsedKeyFacts.master || parsed.master;
 
   const service =
@@ -1421,7 +1528,7 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
       : `Администратор обработал обращение по регламенту салона «${salon}».`;
   const recommendations = parsed.recommendations || `Соблюдать стандарты сервиса салона «${salon}».`;
 
-  // Оценка звонка по 10 критериям
+  // Оценка звонка по 10 критериям (валидируется на соответствие фактам стенограммы)
   const rawCriteria = Array.isArray(parsed.criteria_scores)
     ? parsed.criteria_scores
     : (Array.isArray(parsed.evaluation?.criteria) ? parsed.evaluation.criteria : []);
@@ -1462,18 +1569,29 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
   const finalMistakes = mistakes && mistakes.length > 0 ? mistakes : [];
   const finalAdvice = advice && advice.length > 0 ? advice : (Array.isArray(recommendations) ? recommendations : [recommendations].filter(Boolean));
 
+  // Защита от шаблонных/ошибочных параметров Пункта 8 от LLM для нестандартных звонков
   const modelStruct = parsed.structured_summary || {};
+  const modelStepsStr = Array.isArray(modelStruct.manager_next_steps) ? modelStruct.manager_next_steps.join(' ').toLowerCase() : '';
+  const hasCannedConsultationSteps =
+    (dialogueCtx.isNonClient || dialogueCtx.isLateWarning || dialogueCtx.isUnavailableServiceRefusal || dialogueCtx.isDeclined) &&
+    (modelStepsStr.includes('консультац') || modelStepsStr.includes('прайс-лист'));
+
+  const useGroundedStructOverride = dialogueCtx.isNonClient || dialogueCtx.isLateWarning || dialogueCtx.isUnavailableServiceRefusal;
+
   const finalStructuredSummary: StructuredCallSummary = {
-    call_purpose: modelStruct.call_purpose || structuredSummary.call_purpose,
-    requested_service: modelStruct.requested_service || structuredSummary.requested_service,
-    offered_master: isMasterNameValid(modelStruct.offered_master) ? normalizeMasterName(modelStruct.offered_master)! : structuredSummary.offered_master,
-    offered_price: modelStruct.offered_price || structuredSummary.offered_price,
-    offered_date_time: modelStruct.offered_date_time || structuredSummary.offered_date_time,
-    booking_status_text: modelStruct.booking_status_text || structuredSummary.booking_status_text,
-    unbooked_reason: modelStruct.unbooked_reason || structuredSummary.unbooked_reason,
-    manager_next_steps: Array.isArray(modelStruct.manager_next_steps) && modelStruct.manager_next_steps.length > 0
-      ? modelStruct.manager_next_steps
-      : structuredSummary.manager_next_steps,
+    call_purpose: useGroundedStructOverride ? structuredSummary.call_purpose : (modelStruct.call_purpose || structuredSummary.call_purpose),
+    requested_service: useGroundedStructOverride ? structuredSummary.requested_service : (modelStruct.requested_service || structuredSummary.requested_service),
+    offered_master: useGroundedStructOverride
+      ? structuredSummary.offered_master
+      : (isMasterNameValid(modelStruct.offered_master) ? normalizeMasterName(modelStruct.offered_master)! : structuredSummary.offered_master),
+    offered_price: useGroundedStructOverride ? structuredSummary.offered_price : (modelStruct.offered_price || structuredSummary.offered_price),
+    offered_date_time: useGroundedStructOverride ? structuredSummary.offered_date_time : (modelStruct.offered_date_time || structuredSummary.offered_date_time),
+    booking_status_text: (useGroundedStructOverride || dialogueCtx.isDeclined) ? structuredSummary.booking_status_text : (modelStruct.booking_status_text || structuredSummary.booking_status_text),
+    unbooked_reason: (useGroundedStructOverride || dialogueCtx.isDeclined) ? structuredSummary.unbooked_reason : (modelStruct.unbooked_reason || structuredSummary.unbooked_reason),
+    manager_next_steps:
+      Array.isArray(modelStruct.manager_next_steps) && modelStruct.manager_next_steps.length > 0 && !hasCannedConsultationSteps
+        ? modelStruct.manager_next_steps
+        : structuredSummary.manager_next_steps,
   };
 
   const result: AnalysisResult = {
@@ -1523,23 +1641,25 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
 }
 
 
-function generateLocalFallbackAnalysis(
+export function generateLocalFallbackAnalysis(
   transcript: string,
-  model: GigaChatModel,
+  _model: GigaChatModel,
   callDurationSeconds?: number,
   customSalonName?: string
 ): AnalysisResult {
-  const salon = customSalonName || process.env.SALON_NAME || 'Fashion Look Studio';
-  const clean = (transcript || '').trim();
-  const lower = clean.toLowerCase();
+  const salon = (customSalonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
+  const rawClean = (transcript || '').trim();
+  const rawLower = rawClean.toLowerCase();
 
-  // 1. Жёсткий предохранитель: звонки менее 10 секунд
+  // 1. Жёсткий предохранитель: звонки менее 10 секунд без реального диалога
   if (callDurationSeconds !== undefined && callDurationSeconds < 10) {
     const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
+    const failedStruct = extractStructuredCallSummary('', 'Разговор не состоялся', undefined, salon, 'не применимо');
     return {
       transcript_summary: `Разговор не состоялся: длительность вызова ${callDurationSeconds} сек (менее 10 секунд), диалог между оператором и клиентом отсутствует.`,
       booking_status: 'не применимо',
-      formatted_transcript: clean || 'Разговор не состоялся (диалог отсутствует)',
+      formatted_transcript: rawClean || 'Разговор не состоялся (диалог отсутствует)',
+      structured_summary: failedStruct,
       evaluation: failedEval,
       criteria_scores: failedEval.criteria,
       key_facts: {
@@ -1554,6 +1674,7 @@ function generateLocalFallbackAnalysis(
         date: null,
         time: null,
         master: null,
+        structured_summary: failedStruct,
         evaluation: failedEval,
         criteria_scores: failedEval.criteria,
       },
@@ -1566,18 +1687,19 @@ function generateLocalFallbackAnalysis(
 
   // 2. Пустой транскрипт или заглушка (ожидание STT)
   const isPlaceholderOrEmpty =
-    !clean ||
-    lower.includes('стенограмма ожидает') ||
-    lower.includes('запись разговора и стенограмма отсутствуют') ||
-    lower.includes('разговор не состоялся');
+    !rawClean ||
+    rawLower.includes('стенограмма ожидает') ||
+    rawLower.includes('запись разговора и стенограмма отсутствуют');
 
   if (isPlaceholderOrEmpty) {
     const durLabel = callDurationSeconds !== undefined ? ` (длительность ${callDurationSeconds} сек.)` : '';
     const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
+    const failedStruct = extractStructuredCallSummary('', 'Разговор не состоялся', undefined, salon, 'не применимо');
     return {
       transcript_summary: `Разговор не состоялся: аудиозапись${durLabel} не содержит разборчивой речи (зафиксированы только гудки/тишина или сброс линии).`,
       booking_status: 'не применимо',
-      formatted_transcript: clean || `Аудиозапись${durLabel} не содержит разборчивой речи.`,
+      formatted_transcript: rawClean || `Аудиозапись${durLabel} не содержит разборчивой речи.`,
+      structured_summary: failedStruct,
       evaluation: failedEval,
       criteria_scores: failedEval.criteria,
       key_facts: {
@@ -1592,6 +1714,7 @@ function generateLocalFallbackAnalysis(
         date: null,
         time: null,
         master: null,
+        structured_summary: failedStruct,
         evaluation: failedEval,
         criteria_scores: failedEval.criteria,
       },
@@ -1602,25 +1725,19 @@ function generateLocalFallbackAnalysis(
     };
   }
 
-  // 3. Чистый автоответчик/голосовая почта — ТОЛЬКО если реального диалога нет
-  const hasDialogue =
-    (lower.includes('клиент:') && (lower.includes('менеджер:') || lower.includes('администратор:'))) ||
-    clean.split('\n').filter(l => l.trim().length > 0).length >= 2;
+  // 3. Очистка от эха, выделение IVR («Автоинформатор») и точное определение ролей («Менеджер» / «Клиент»)
+  const formattedTranscript = refineTranscriptRoles(fixDuplicatedTranscript(rawClean));
+  const ctx = classifyCallContext(formattedTranscript);
 
-  const isPureAuto =
-    !hasDialogue &&
-    (lower.includes('оставьте сообщение после сигнала') ||
-      lower.includes('вас приветствует автоответчик') ||
-      lower.includes('абонент временно недоступен') ||
-      lower.includes('голосовая почта') ||
-      lower.includes('автоинформатор'));
-
-  if (isPureAuto) {
+  // 4. Несостоявшийся разговор / чистый автоответчик (после удаления IVR живого диалога не осталось)
+  if (ctx.category === 'not_happened') {
     const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
+    const failedStruct = extractStructuredCallSummary('', 'Разговор не состоялся', undefined, salon, 'не применимо');
     return {
-      transcript_summary: 'Разговор не состоялся: сработал автоответчик или голосовая почта. Запись не оформлена.',
+      transcript_summary: 'Разговор не состоялся: сработал автоответчик или диалог между сотрудником и собеседником отсутствует. Запись не оформлена.',
       booking_status: 'не применимо',
-      formatted_transcript: clean,
+      formatted_transcript: formattedTranscript || rawClean,
+      structured_summary: failedStruct,
       evaluation: failedEval,
       criteria_scores: failedEval.criteria,
       key_facts: {
@@ -1635,141 +1752,114 @@ function generateLocalFallbackAnalysis(
         date: null,
         time: null,
         master: null,
+        structured_summary: failedStruct,
         evaluation: failedEval,
         criteria_scores: failedEval.criteria,
       },
       operator_score: null,
       operator_mistakes: [],
-      operator_comment: 'Разговор не состоялся: зафиксирован автоответчик (оценка не выставляется).',
+      operator_comment: 'Разговор не состоялся: зафиксирован автоответчик или обрыв до начала диалога (оценка не выставляется).',
       recommendations: `Повторить звонок клиенту в рабочие часы салона «${salon}».`,
     };
   }
 
-  // 4. Реальный разговор с речью (от 10 секунд и больше)
-  const isDispute =
-    lower.includes('отмен') || lower.includes('жалоб') || lower.includes('претензи') ||
-    lower.includes('недоволен') || lower.includes('издеваетесь');
-  const isDeclined =
-    lower.includes('не будет в городе') || lower.includes('не смогу') || lower.includes('не получается') ||
-    lower.includes('неудобно') || lower.includes('не подходит') || lower.includes('отказ');
+  // 5. Состоявшийся разговор — классифицированный строго по очищенной стенограмме (без IVR)
+  const essence = extractEssenceDetails(formattedTranscript, undefined, salon);
+  const { conclusion } = buildContextGroundedSummary(ctx, essence, salon);
 
-  const isBooking =
-    !isDeclined &&
-    (lower.includes('записали') || lower.includes('записала') || lower.includes('записал') ||
-      lower.includes('записываю') || lower.includes('записан') || lower.includes('записана') || lower.includes('записаны') ||
-      lower.includes('запишите') || lower.includes('запись оформлена') || lower.includes('запись подтверждена') ||
-      lower.includes('до встречи') || lower.includes('ждем вас') || lower.includes('ждём вас') ||
-      lower.includes('ждем') || lower.includes('ждём') || lower.includes('жду вас') || lower.includes('будем ждать') ||
-      lower.includes('договорились') || lower.includes('согласна') || lower.includes('согласен') ||
-      lower.includes('буду к') || lower.includes('буду в') || lower.includes('приду в') || lower.includes('приду к') ||
-      lower.includes('подходит время') || lower.includes('подходит этот день') || lower.includes('подтверждаю запись'));
+  let bookingStatus: 'согласие' | 'отказ' | 'консультация' = 'консультация';
+  let outcome: 'запись' | 'отказ' | 'консультация' | 'перезвон' | 'отмена' = 'консультация';
 
-  const outcome = isBooking ? 'запись' : (isDeclined ? 'отказ' : (isDispute ? 'перезвон' : 'консультация'));
-  const bookingStatus = isBooking ? 'согласие' : (isDeclined ? 'отказ' : 'консультация');
-
-  const cleanSnippet = clean.replace(/^(клиент:|менеджер:|администратор:)\s*/gim, '').trim().slice(0, 160);
-
-  // Извлекаем суть обращения (услуга, дата, время, мастер)
-  const essence = extractEssenceDetails(clean, undefined, salon);
-  const masterLabel = essence.master ? ` к мастеру ${essence.master}` : '';
-  const dateLabel = essence.date ? ` на ${essence.date}` : '';
-  const timeLabel = essence.time ? ` в ${essence.time}` : '';
-
-  let conclusionText = '';
-  if (isBooking) {
-    conclusionText = `Администратор согласовал запись${masterLabel}${dateLabel}${timeLabel}. Запись успешно подтверждена.`;
-  } else if (isDeclined) {
-    conclusionText = `Администратор предложил варианты визита${dateLabel}${timeLabel}, но клиент отказался из-за неудобного времени или отъезда.`;
-  } else if (isDispute) {
-    conclusionText = `Зафиксировано обращение с вопросом/претензией по обслуживанию. Достигнута договоренность о повторном контакте/перезвоне.`;
+  if (ctx.category === 'confirmed_booking') {
+    bookingStatus = 'согласие';
+    outcome = 'запись';
+  } else if (ctx.category === 'refusal_unavailable_service' || ctx.category === 'declined') {
+    bookingStatus = 'отказ';
+    outcome = 'отказ';
+  } else if (ctx.category === 'dispute') {
+    bookingStatus = 'консультация';
+    outcome = 'перезвон';
+  } else if (ctx.category === 'reschedule_or_cancel') {
+    bookingStatus = /отмен/i.test(ctx.cleanTranscript) ? 'отказ' : 'согласие';
+    outcome = /отмен/i.test(ctx.cleanTranscript) ? 'отмена' : 'запись';
   } else {
-    conclusionText = `Администратор вежливо проконсультировал клиента по регламенту салона «${salon}» («${cleanSnippet}»).`;
+    // non_client, late_or_visit_update, consultation
+    bookingStatus = 'консультация';
+    outcome = 'консультация';
   }
 
-  let score = hasDialogue ? (isDispute ? 7 : (isDeclined ? 6 : (isBooking ? 9 : 8))) : 7;
-
-  // Формируем детальный список ошибок и рекомендаций для снижения оценки
-  const mistakes: string[] = [];
-  const recommendationsList: string[] = [];
-
-  if (isDeclined) {
-    mistakes.push('Администратор предложил только один временной слот без альтернативных вариантов');
-    mistakes.push('При отказе клиента не предложены другие свободные дни или лист ожидания салона');
-    mistakes.push('Пассивное завершение звонка без попытки удержать контакт клиента');
-    recommendationsList.push('Всегда предлагать вилку времени минимум из двух слотов («Суббота 12:00 или воскресенье 16:00»)');
-    recommendationsList.push('При отказе предлагать альтернативные даты или внесение в лист ожидания');
-    recommendationsList.push('Удерживать инициативу в диалоге до конца, не отпуская клиента без договоренности');
-  } else if (isDispute) {
-    mistakes.push('Недостаточно оперативное переключение в режим активного слушания при претензии');
-    mistakes.push('Не зафиксированы точные сроки обратной связи руководства по разрешению проблемы');
-    recommendationsList.push('Следовать протоколу урегулирования претензий: принести извинения от лица салона и зафиксировать срок решения');
-    recommendationsList.push('Согласовать время контрольного звонка управляющего');
-  } else if (isBooking) {
-    mistakes.push('Не предложены сопутствующие процедуры (дизайн, спа-уход, снятие покрытия)');
-    mistakes.push('Не проговорено напоминание о подтверждении брони накануне визита');
-    recommendationsList.push('Осуществлять ненавязчивую допродажу сопутствующих услуг к основной процедуре');
-    recommendationsList.push('Информировать клиента об отправке смс-напоминания накануне визита');
-  } else {
-    mistakes.push('Не выявлена потребность звонящего в записи на услуги салона');
-    mistakes.push('Сухой справочный ответ без встречной инициативы по подбору удобного слота');
-    recommendationsList.push('После ответа на вопрос о ценах или графике сразу предлагать свободные окна для записи');
-    recommendationsList.push('Спрашивать имя клиента для занесения в базу CRM');
-  }
-
-  const comment = hasDialogue
-    ? (isDispute
-        ? 'Администратор принял претензию/отмену, соблюдая вежливый тон, однако не зафиксировал сроки обратной связи.'
-        : isDeclined
-        ? 'Снижение оценки вызвано пассивной позицией при отказе клиента и отсутствием предложений альтернативных дат.'
-        : isBooking
-        ? `Администратор успешно оформил запись, но упустил возможность предложить сопутствующие услуги салона «${salon}».`
-        : `Администратор предоставил базовую консультацию по регламенту «${salon}», не проявив активности в оформлении записи.`)
-    : 'Краткий обмен репликами. Полноценная оценка регламента не выставляется.';
-
+  // Фактологическая оценка по 10 критериям (определяет применимость, баллы, ошибки и рекомендации)
   const evaluation: CallEvaluation = extractCallEvaluation(
-    clean,
-    conclusionText,
+    formattedTranscript,
+    conclusion,
     null,
-    score,
-    mistakes,
-    recommendationsList,
+    undefined,
+    undefined,
+    undefined,
     salon
   );
 
-  if (evaluation.overall_score !== null && !isNaN(evaluation.overall_score)) {
-    score = Math.max(1, Math.min(10, Math.round(evaluation.overall_score)));
-  }
+  const score = evaluation.overall_score !== null && !isNaN(evaluation.overall_score)
+    ? Math.max(1, Math.min(10, Math.round(evaluation.overall_score)))
+    : 8;
 
-  const { formattedSummary, structuredSummary, mistakes: harmonizedMistakes, advice: harmonizedAdvice } = formatSummaryWithEssence(
-    conclusionText,
-    clean,
+  const { formattedSummary, structuredSummary, mistakes, advice } = formatSummaryWithEssence(
+    conclusion,
+    formattedTranscript,
     essence,
     salon,
     score,
-    mistakes,
-    recommendationsList,
-    comment,
+    undefined,
+    undefined,
+    undefined,
     evaluation
   );
 
-  const finalMistakes = harmonizedMistakes && harmonizedMistakes.length > 0 ? harmonizedMistakes : [];
-  const finalAdvice = harmonizedAdvice && harmonizedAdvice.length > 0 ? harmonizedAdvice : recommendationsList;
+  const finalMistakes = mistakes && mistakes.length > 0 ? mistakes : [];
+  const finalAdvice = advice && advice.length > 0 ? advice : [`Соблюдать стандарты сервиса салона «${salon}».`];
+
+  let comment = `Администратор обработал обращение по регламенту салона «${salon}».`;
+  if (ctx.category === 'non_client') {
+    comment = 'Нецелевой/партнёрский звонок: администратор вежливо принял информацию без лишней нагрузки по скрипту продаж.';
+  } else if (ctx.category === 'late_or_visit_update') {
+    comment = 'Клиент предупредил об опоздании: администратор вежливо принял информацию и подтвердил ожидание гостя.';
+  } else if (ctx.category === 'refusal_unavailable_service') {
+    comment = 'Запрошенная услуга в салоне не представлена; администратор предложил доступную альтернативу, но клиент отказался.';
+  } else if (ctx.category === 'dispute') {
+    comment = 'Зафиксировано обращение со спорным вопросом — требуется контроль со стороны управляющего.';
+  } else if (ctx.category === 'declined') {
+    comment = 'Запись не оформлена: клиент отклонил предложенные условия или время визита.';
+  } else if (ctx.category === 'confirmed_booking') {
+    comment = `Администратор согласовал и подтвердил запись по стандартам салона «${salon}».`;
+  }
+
+  const clientIssue = ctx.category === 'non_client'
+    ? (ctx.nonClientTopic || 'Организационный / партнёрский вопрос')
+    : ctx.category === 'late_or_visit_update'
+    ? `Предупреждение об опоздании${ctx.lateMinutes ? ` на ${ctx.lateMinutes}` : ''}`
+    : ctx.category === 'refusal_unavailable_service'
+    ? `Запрос отсутствующей услуги (${essence.service || 'услуга не представлена'})`
+    : ctx.category === 'dispute'
+    ? 'Вопрос / претензия по обслуживанию'
+    : essence.service
+    ? `Обращение по услуге: ${essence.service}`
+    : 'Консультация / обращение в салон';
 
   return {
     transcript_summary: formattedSummary,
     booking_status: bookingStatus,
-    formatted_transcript: transcript,
+    formatted_transcript: formattedTranscript,
     structured_summary: structuredSummary,
     evaluation,
     criteria_scores: evaluation.criteria,
     key_facts: {
-      is_dispute: isDispute,
-      dispute_reason: isDispute ? 'Претензия или отмена записи' : null,
-      tone_client: isDispute ? 'негативный' : 'нейтральный',
+      is_dispute: ctx.isDispute,
+      dispute_reason: ctx.isDispute ? 'Зафиксирован спорный вопрос или отмена в тексте разговора' : null,
+      tone_client: ctx.isDispute ? 'негативный' : 'нейтральный',
       tone_manager: 'позитивный',
       call_outcome: outcome,
       booking_status: bookingStatus,
-      client_issue: isDispute ? 'Вопрос по обслуживанию' : (essence.service ? `Запись на ${essence.service}` : 'Консультация / обращение в салон'),
+      client_issue: clientIssue,
       service: essence.service,
       date: essence.date,
       time: essence.time,
@@ -1798,57 +1888,16 @@ function generateLocalFallbackAnalysis(
  */
 export function generateLocalNextSteps(call: CallRecord, customSalonName?: string): string[] {
   const salon = (customSalonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
-  const rawStatus = (call.booking_status || call.key_facts?.booking_status || '').toLowerCase().trim();
-  const outcome = (call.key_facts?.call_outcome || '').toLowerCase().trim();
-  const isBooking = rawStatus === 'согласие' || rawStatus.includes('соглас') || outcome === 'запись';
-  const isDeclined = rawStatus === 'отказ' || rawStatus.includes('отказ') || outcome === 'отказ';
-  const isDispute = Boolean(call.key_facts?.is_dispute);
+  const struct = extractStructuredCallSummary(
+    call.transcript || '',
+    call.summary || '',
+    call.key_facts,
+    salon,
+    call.booking_status
+  );
 
+  const steps: string[] = [...struct.manager_next_steps];
   const kf: Partial<KeyFacts> = call.key_facts || {};
-  const service = kf.service || 'услугу';
-  const date = kf.date || null;
-  const time = kf.time || null;
-  const master = kf.master || null;
-  const clientName = call.client_name ? `клиента ${call.client_name}` : 'клиента';
-
-  const steps: string[] = [];
-
-  if (isBooking) {
-    const bookingDetails = [
-      service !== 'услугу' ? `услуга: «${service}»` : null,
-      date ? `дата: ${date}` : null,
-      time ? `время: ${time}` : null,
-      master ? `мастер: ${master}` : null,
-    ].filter(Boolean).join(', ');
-
-    steps.push(`Внести подтвержденную запись ${clientName} в CRM Yclients (${bookingDetails || 'согласованные слоты'}).`);
-    steps.push(`Отправить ${clientName} подтверждение бронирования и адрес студии в WhatsApp/SMS.`);
-    if (master) {
-      steps.push(`Проверить график мастера ${master} и подготовить рабочее место/расходные материалы.`);
-    } else {
-      steps.push(`Назначить квалифицированного специалиста на процедуру «${service}» в расписании салона «${salon}».`);
-    }
-    steps.push(`Установить автоматическое напоминание за 24 часа до визита для подтверждения явки.`);
-  } else if (isDispute) {
-    steps.push(`Зафиксировать обращение в журнале претензий и передать управляющему салона «${salon}».`);
-    steps.push(`Поднять историю предыдущих визитов ${clientName} и подготовить фактуру (${kf.dispute_reason || 'вопрос по качеству сервиса'}).`);
-    steps.push(`Согласовать с управляющим вариант сервисной компенсации или скидки для сохранения лояльности.`);
-    steps.push(`Связаться с клиентом в течение 2 часов для предоставления персонального решения.`);
-  } else if (isDeclined) {
-    steps.push(`Отметить в CRM причину отказа клиента (не подошло время / отъезд / высокая стоимость).`);
-    steps.push(`Добавить контакт ${clientName} в базу потенциальных клиентов с тегом «Интересовался: ${service}».`);
-    steps.push(`Запланировать отправку персонального спецпредложения через 10-14 дней от салона «${salon}».`);
-  } else {
-    // Консультация / справочное обращение
-    steps.push(`Создать карточку ${clientName} в CRM Yclients с пометкой интересующей услуги («${service}»).`);
-    steps.push(`Направить клиенту в мессенджер прайс-лист, фото портфолио работ и ссылку на онлайн-запись в салон «${salon}».`);
-    if (master) {
-      steps.push(`Уточнить ближайшие свободные окна у мастера ${master} и предложить клиенту.`);
-    }
-    steps.push(`Поставить напоминание администратору: контрольный звонок через 48 часов, если запись не будет оформлена.`);
-  }
-
-  // Отработка обещаний администратора
   if (Array.isArray(kf.promises) && kf.promises.length > 0) {
     kf.promises.forEach(p => {
       if (p && typeof p === 'string' && p.trim()) {
@@ -1856,7 +1905,6 @@ export function generateLocalNextSteps(call: CallRecord, customSalonName?: strin
       }
     });
   }
-
   return steps;
 }
 

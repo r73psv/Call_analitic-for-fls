@@ -14,7 +14,8 @@ import dotenv from 'dotenv';
 import { CallRecord, LogEntry, SystemConfig, ModelType, DashboardStats, KeyFacts, VkConfig, YclientsConfig, GigaChatModel, SystemNotification, NotificationType, UserRole, ContextClarification } from './src/types.js';
 import { transcribeWithRetry, fixDuplicatedTranscript, refineTranscriptRoles } from './src/services/speechkit.js';
 import { transcribeAudio } from './src/services/transcriptionService.js';
-import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation, harmonizeMistakesAndEvaluation } from './src/services/gigachat.js';
+import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation, harmonizeMistakesAndEvaluation, generateLocalFallbackAnalysis } from './src/services/gigachat.js';
+import { classifyCallContext } from './src/services/summaryUtils.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
 import { readStoreSync, writeStore } from './src/store/store.js';
 import { readConsentStoreSync, writeConsentStore } from './src/store/consent-store.js';
@@ -884,7 +885,7 @@ async function analyzeCallTextOrAudio(
   }
 
   if (cleanTranscript) {
-    cleanTranscript = fixDuplicatedTranscript(cleanTranscript);
+    cleanTranscript = refineTranscriptRoles(fixDuplicatedTranscript(cleanTranscript));
   }
 
   // Strict check for calls WITHOUT speech:
@@ -1027,223 +1028,25 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
     };
   }
 
-  const cleanTranscript = (transcript || '').trim();
-  const lowerClean = cleanTranscript.toLowerCase();
-
-  // 1. Strict guard: calls under 10 seconds
-  if (callDurationSeconds !== undefined && callDurationSeconds < 10) {
-    return {
-      transcript: cleanTranscript || 'Разговор не состоялся (длительность менее 10 сек, диалог отсутствует).',
-      summary: `Разговор не состоялся: длительность вызова ${callDurationSeconds} сек (менее 10 секунд), диалог между оператором и клиентом отсутствует.`,
-      booking_status: 'не применимо',
-      key_facts: {
-        is_dispute: false,
-        dispute_reason: null,
-        promises: [],
-        tone_client: 'нейтральный',
-        tone_manager: 'нейтральный',
-        call_outcome: 'не состоялся',
-        booking_status: 'не применимо',
-        client_issue: 'Звонок менее 10 секунд / диалог отсутствует'
-      },
-      trigger_phrases: [],
-      recommendations: ['При необходимости повторить попытку дозвона клиенту.'],
-      operator_score: null,
-      operator_comment: `Оценка не выставляется: разговор не состоялся (длительность ${callDurationSeconds} сек менее 10 секунд, диалог отсутствует).`
-    };
-  }
-
-  // 2. Empty transcript
-  if (!cleanTranscript) {
-    const durStr = callDurationSeconds !== undefined ? ` (${callDurationSeconds} сек.)` : '';
-    return {
-      transcript: `Аудиозапись${durStr} не содержит разборчивой речи.`,
-      summary: `Разговор не состоялся: в аудиозаписи${durStr} отсутствуют реплики диалога (зафиксированы гудки, тишина или сброс линии).`,
-      booking_status: 'не применимо',
-      key_facts: {
-        is_dispute: false,
-        dispute_reason: null,
-        promises: [],
-        tone_client: 'нейтральный',
-        tone_manager: 'нейтральный',
-        call_outcome: 'не состоялся',
-        booking_status: 'не применимо',
-        client_issue: 'Отсутствует разборчивая речь в аудиозаписи'
-      },
-      trigger_phrases: [],
-      recommendations: ['Проверить качество связи и при необходимости перезвонить клиенту.'],
-      operator_score: null,
-      operator_comment: `Оценка не выставляется: в аудиозаписи${durStr} не обнаружен состоявшийся диалог оператора и клиента.`
-    };
-  }
-
-  // 3. Strict detection of pure auto-responder ONLY when there is NO dialogue
-  const hasDialogue = (lowerClean.includes('клиент:') && (lowerClean.includes('менеджер:') || lowerClean.includes('администратор:'))) ||
-    cleanTranscript.split('\n').filter(l => l.trim().length > 0).length >= 2;
-
-  const isPureAuto = !hasDialogue && (
-    lowerClean.includes('автоответчик') ||
-    lowerClean.includes('автоинформатор') ||
-    lowerClean.includes('голосовой помощник') ||
-    lowerClean.includes('голосовая почта') ||
-    lowerClean.includes('оставьте сообщение после сигнала') ||
-    lowerClean.includes('абонент временно недоступен')
-  );
-
-  if (isPureAuto) {
-    return {
-      transcript: cleanTranscript,
-      summary: 'Разговор не состоялся: сработал автоответчик или голосовая почта. Запись не оформлена.',
-      booking_status: 'не применимо',
-      key_facts: {
-        is_dispute: false,
-        dispute_reason: null,
-        promises: [],
-        tone_client: 'нейтральный',
-        tone_manager: 'нейтральный',
-        call_outcome: 'автоответчик',
-        booking_status: 'не применимо',
-        client_issue: 'Звонок не состоялся / автоответчик'
-      },
-      trigger_phrases: [],
-      recommendations: [
-        `Повторить попытку дозвона клиенту в рабочее время салона «${currentSalon}».`
-      ],
-      operator_score: null,
-      operator_comment: 'Разговор не состоялся: зафиксирован автоответчик (оценка оператора не выставляется).'
-    };
-  }
-
-  // 4. Genuine conversation analysis (for calls 10s–60s and longer)
-  // Dispute check strictly based on transcript text
-  const isDispute = cleanTranscript.toLowerCase().includes('отмен') || 
-                    cleanTranscript.toLowerCase().includes('криво') || 
-                    cleanTranscript.toLowerCase().includes('жалоб') ||
-                    cleanTranscript.toLowerCase().includes('претензи') ||
-                    cleanTranscript.toLowerCase().includes('недоволен');
-
-  const lines = cleanTranscript.split('\n');
-  const triggerPhrases: string[] = [];
-  if (isDispute) {
-    for (const line of lines) {
-      if (line.toLowerCase().startsWith('клиент:') && (
-        line.toLowerCase().includes('ужас') || 
-        line.toLowerCase().includes('криво') || 
-        line.toLowerCase().includes('отмен') || 
-        line.toLowerCase().includes('претензия')
-      )) {
-        triggerPhrases.push(line.replace(/^клиент:\s*/i, '').trim());
-      }
-    }
-  }
-
-  const isDeclined = lowerClean.includes('не будет в городе') || lowerClean.includes('не смогу') || lowerClean.includes('не получается') || lowerClean.includes('неудобно') || lowerClean.includes('отказ');
-  const isBooked = !isDeclined && (
-    lowerClean.includes('записали') || lowerClean.includes('записала') || lowerClean.includes('записал') ||
-    lowerClean.includes('записываю') || lowerClean.includes('записан') || lowerClean.includes('записана') || lowerClean.includes('записаны') ||
-    lowerClean.includes('запишите') || lowerClean.includes('запись оформлена') || lowerClean.includes('запись подтверждена') ||
-    lowerClean.includes('до встречи') || lowerClean.includes('ждем вас') || lowerClean.includes('ждём вас') ||
-    lowerClean.includes('ждем') || lowerClean.includes('ждём') || lowerClean.includes('жду вас') || lowerClean.includes('будем ждать') ||
-    lowerClean.includes('договорились') || lowerClean.includes('согласна') || lowerClean.includes('согласен') ||
-    lowerClean.includes('буду к') || lowerClean.includes('буду в') || lowerClean.includes('приду в') || lowerClean.includes('приду к') ||
-    lowerClean.includes('подходит время') || lowerClean.includes('подходит этот день') || lowerClean.includes('подтверждаю запись')
-  );
-  const outcome = isBooked ? 'запись' : (isDeclined ? 'отказ' : (isDispute ? 'перезвон' : 'консультация'));
-  const outcomeText = isBooked 
-    ? 'Запись успешно подтверждена.' 
-    : (isDeclined ? 'Клиент отказалась от предложенного слота из-за невозможности быть в городе/неподходящего времени.' : 'Разговор завершился консультацией.');
-
-  // Извлекаем суть обращения (услуга, дата, время, мастер)
-  const essence = extractEssenceDetails(cleanTranscript, undefined, currentSalon);
-  const masterLabel = essence.master ? ` к мастеру ${essence.master}` : '';
-  const dateLabel = essence.date ? ` на ${essence.date}` : '';
-  const timeLabel = essence.time ? ` в ${essence.time}` : '';
-  const cleanSnippet = cleanTranscript.replace(/^(клиент:|менеджер:|администратор:)\s*/gim, '').trim().slice(0, 160);
-
-  let conclusionText = '';
-  if (isBooked) {
-    conclusionText = `Администратор согласовал запись${masterLabel}${dateLabel}${timeLabel}. Запись успешно подтверждена.`;
-  } else if (isDeclined) {
-    conclusionText = `Администратор предложил варианты визита${dateLabel}${timeLabel}, однако клиент отказался из-за занятости или неподходящего времени.`;
-  } else if (isDispute) {
-    conclusionText = `Зафиксировано обращение с вопросом/претензией по обслуживанию. Достигнута договоренность о повторном контакте/перезвоне.`;
-  } else {
-    conclusionText = `Администратор вежливо проконсультировал клиента по регламенту салона «${currentSalon}» («${cleanSnippet}»).`;
-  }
-
-  const score = hasDialogue ? (isDispute ? 7 : (isDeclined ? 6 : (isBooked ? 9 : 8))) : null;
-
-  const mistakes: string[] = [];
-  const recommendationsList: string[] = [];
-  if (score !== null) {
-    if (isDeclined) {
-      mistakes.push('Администратор предложил только один временной слот без альтернатив');
-      mistakes.push('При отказе клиента не предложены другие свободные дни или лист ожидания салона');
-      recommendationsList.push('Всегда предлагать вилку времени минимум из двух слотов («Суббота 12:00 или воскресенье 16:00»)');
-      recommendationsList.push('При отказе предлагать альтернативные даты или внесение в лист ожидания');
-    } else if (isDispute) {
-      mistakes.push('Недостаточно оперативное переключение в режим активного слушания при претензии');
-      mistakes.push('Не зафиксированы сроки обратной связи руководства по разрешению проблемы');
-      recommendationsList.push('Принять претензию по алгоритму и согласовать время контрольного звонка');
-    } else if (isBooked) {
-      mistakes.push('Не предложены сопутствующие процедуры (дизайн, спа-уход, снятие покрытия)');
-      recommendationsList.push('Практиковать ненавязчивую допродажу сопутствующих услуг к основной процедуре');
-      recommendationsList.push('Информировать клиента об отправке смс-напоминания накануне визита');
-    } else {
-      mistakes.push('Не выявлена потребность звонящего в записи на услуги салона');
-      mistakes.push('Сухой справочный ответ без встречной инициативы по подбору удобного слота');
-      recommendationsList.push('После ответа о ценах/графике сразу предлагать свободные окна для записи');
-    }
-  }
-
-  const operatorComment = hasDialogue
-    ? (isDispute
-        ? 'Администратор принял претензию/отмену, соблюдая вежливый тон, однако не зафиксировал сроки обратной связи.'
-        : isDeclined
-        ? 'Снижение оценки вызвано пассивной позицией при отказе клиента и отсутствием предложений альтернативных дат.'
-        : isBooked
-        ? `Администратор успешно оформил запись, но упустил возможность предложить сопутствующие услуги салона «${currentSalon}».`
-        : `Администратор предоставил базовую консультацию по регламенту «${currentSalon}», не проявив активности в оформлении записи.`)
-    : `Краткий обмен репликами. Полноценная оценка регламента не выставляется.`;
-
-  const { formattedSummary } = formatSummaryWithEssence(
-    conclusionText,
-    cleanTranscript,
-    essence,
-    currentSalon,
-    score,
-    mistakes,
-    recommendationsList,
-    operatorComment
-  );
-
-  const bookingStatus = isBooked ? 'согласие' : (isDeclined ? 'отказ' : (isDispute ? 'консультация' : 'консультация'));
-
+  const fallbackRes = generateLocalFallbackAnalysis(transcript, 'GigaChat:Lite', callDurationSeconds, currentSalon);
   return {
-    transcript: cleanTranscript,
-    summary: formattedSummary,
-    booking_status: bookingStatus,
+    transcript: fallbackRes.formatted_transcript || transcript,
+    summary: fallbackRes.transcript_summary,
+    booking_status: fallbackRes.booking_status,
+    structured_summary: fallbackRes.structured_summary,
+    evaluation: fallbackRes.evaluation,
+    criteria_scores: fallbackRes.criteria_scores,
     key_facts: {
-      is_dispute: isDispute,
-      dispute_reason: isDispute ? 'Зафиксировано недовольство в тексте разговора' : null,
-      promises: [],
-      tone_client: isDispute ? 'недовольный' : 'нейтральный',
-      tone_manager: 'спокойный',
-      call_outcome: outcome,
-      booking_status: bookingStatus,
-      client_issue: isDispute ? 'Вопрос по обслуживанию' : (essence.service ? `Запись на ${essence.service}` : 'Запись к мастеру / консультация'),
-      service: essence.service,
-      date: essence.date,
-      time: essence.time,
-      master: essence.master,
+      ...fallbackRes.key_facts,
+      promises: []
     },
-    trigger_phrases: triggerPhrases,
-    recommendations: recommendationsList.length > 0 ? recommendationsList : [
-      `Следовать стандартам общения и вежливости при обслуживании в салоне «${currentSalon}».`
-    ],
-    operator_score: score,
-    operator_mistakes: mistakes,
-    operator_comment: operatorComment
+    trigger_phrases: [],
+    recommendations: Array.isArray(fallbackRes.recommendations)
+      ? fallbackRes.recommendations
+      : [fallbackRes.recommendations],
+    operator_score: fallbackRes.operator_score,
+    operator_mistakes: fallbackRes.operator_mistakes || [],
+    operator_comment: fallbackRes.operator_comment
   };
 }
 
@@ -3597,79 +3400,238 @@ app.post('/api/calls/fetch-poll', handleAtsPoll);
 app.post('/api/calls/poll-now', handleAtsPoll);
 
 // 1. GET ALL CALLS (with 152-ФЗ Role Masking & Consent mapping)
+function resolveCallBookingStatus(call: any): string {
+  const explicit = call.booking_status || call.key_facts?.booking_status;
+  if (explicit) return explicit;
+  const outcome = (call.key_facts?.call_outcome || '').toLowerCase();
+  const summary = (call.summary || '').toLowerCase();
+  if (outcome === 'автоответчик' || outcome === 'не состоялся') {
+    return 'не применимо';
+  }
+  if (
+    outcome === 'отказ' ||
+    outcome === 'отмена' ||
+    summary.includes('запись не состоялась') ||
+    summary.includes('отказ') ||
+    summary.includes('не будет в городе')
+  ) {
+    return 'отказ';
+  }
+  if (
+    outcome === 'запись' ||
+    summary.includes('запись подтверждена') ||
+    summary.includes('запись успешно подтверждена')
+  ) {
+    return 'согласие';
+  }
+  return 'консультация';
+}
+
+function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
+  let changed = false;
+
+  if (
+    callCopy.transcript &&
+    typeof callCopy.transcript === 'string' &&
+    !/^ошибка:|аудиозапись.*не содержит|стенограмма ожидает|запись разговора и стенограмма отсутствуют/i.test(callCopy.transcript.trim())
+  ) {
+    const cleaned = refineTranscriptRoles(fixDuplicatedTranscript(callCopy.transcript));
+    if (cleaned !== callCopy.transcript) {
+      callCopy.transcript = cleaned;
+      changed = true;
+    }
+  }
+
+  const rawSummary = String(callCopy.summary || '');
+  if (
+    !callCopy.transcript ||
+    callCopy.status !== 'completed' ||
+    /^анализ звонка заблокирован|^звонок не состоялся|^разговор не состоялся|^аудиозапись звонка доступна/i.test(rawSummary.trim())
+  ) {
+    return changed;
+  }
+
+  const ctx = classifyCallContext(callCopy.transcript || '', rawSummary);
+  if (ctx.category === 'not_happened') {
+    return changed;
+  }
+
+  if (ctx.isUnavailableServiceRefusal || ctx.isDeclined) {
+    if (callCopy.booking_status !== 'отказ') {
+      callCopy.booking_status = 'отказ';
+      if (!callCopy.key_facts) callCopy.key_facts = {};
+      callCopy.key_facts.booking_status = 'отказ';
+      callCopy.key_facts.call_outcome = 'отказ';
+      changed = true;
+    }
+  } else if ((ctx.isNonClient || ctx.isLateWarning) && callCopy.booking_status === 'согласие') {
+    callCopy.booking_status = 'консультация';
+    if (!callCopy.key_facts) callCopy.key_facts = {};
+    callCopy.key_facts.booking_status = 'консультация';
+    callCopy.key_facts.call_outcome = 'консультация';
+    changed = true;
+  }
+
+  const evalObj = extractCallEvaluation(
+    callCopy.transcript || '',
+    rawSummary,
+    callCopy.evaluation || callCopy.key_facts?.evaluation || null,
+    callCopy.operator_score,
+    callCopy.operator_mistakes,
+    Array.isArray(callCopy.recommendations) ? callCopy.recommendations : [callCopy.recommendations].filter(Boolean) as string[],
+    salonName
+  );
+
+  if (JSON.stringify(callCopy.evaluation || null) !== JSON.stringify(evalObj)) {
+    callCopy.evaluation = evalObj;
+    callCopy.criteria_scores = evalObj.criteria;
+    if (!callCopy.key_facts) callCopy.key_facts = {};
+    callCopy.key_facts.evaluation = evalObj;
+    callCopy.key_facts.criteria_scores = evalObj.criteria;
+    changed = true;
+  }
+
+  if (evalObj.overall_score !== null && !isNaN(evalObj.overall_score)) {
+    const targetScore = Math.max(1, Math.min(10, Math.round(evalObj.overall_score)));
+    if (callCopy.operator_score !== targetScore) {
+      callCopy.operator_score = targetScore;
+      changed = true;
+    }
+  }
+
+  const rawMistakes = Array.isArray(callCopy.operator_mistakes) ? callCopy.operator_mistakes : [];
+  const rawAdvice = Array.isArray(callCopy.recommendations)
+    ? callCopy.recommendations
+    : [callCopy.recommendations].filter(Boolean) as string[];
+  const harmonized = harmonizeMistakesAndEvaluation(rawMistakes, rawAdvice, evalObj, callCopy.transcript);
+
+  if (JSON.stringify(rawMistakes) !== JSON.stringify(harmonized.mistakes)) {
+    callCopy.operator_mistakes = harmonized.mistakes;
+    changed = true;
+  }
+  if (JSON.stringify(rawAdvice) !== JSON.stringify(harmonized.advice)) {
+    callCopy.recommendations = harmonized.advice;
+    changed = true;
+  }
+
+  const prevStructJson = JSON.stringify(callCopy.structured_summary || null);
+  const existingSteps = Array.isArray(callCopy.structured_summary?.manager_next_steps)
+    ? callCopy.structured_summary.manager_next_steps.join(' ').toLowerCase()
+    : '';
+  const hasBadStructuredSteps =
+    (ctx.isNonClient || ctx.isLateWarning || ctx.isUnavailableServiceRefusal || ctx.isDeclined) &&
+    (existingSteps.includes('консультац') || existingSteps.includes('прайс-лист') || existingSteps.includes('онлайн-запись'));
+  const hasBadBookedText =
+    !ctx.isConfirmedBooking &&
+    !ctx.isRescheduleOrCheck &&
+    /запись оформлена|записан/i.test(String(callCopy.structured_summary?.booking_status_text || ''));
+
+  const isLegacyCannedRetelling = /Клиент обратился в салон красоты по вопросам обслуживания и записи\.\s*Администратор предоставил подробную консультацию по графику/i.test(rawSummary);
+  const isContradictorySummary =
+    !ctx.isConfirmedBooking &&
+    !ctx.isRescheduleOrCheck &&
+    /администратор согласовал запись|запись успешно подтверждена/i.test(rawSummary);
+
+  const needsSummaryFormat = Boolean(
+    rawSummary && (
+      changed ||
+      isLegacyCannedRetelling ||
+      isContradictorySummary ||
+      hasBadStructuredSteps ||
+      hasBadBookedText ||
+      !/пересказ диалога|краткий пересказ/i.test(rawSummary) ||
+      /мастер\s*[—–:\-]\s*Студио|к мастеру Студио|Меня\s+Вот|Записались/i.test(rawSummary) ||
+      (!isMasterNameValid(callCopy.key_facts?.master) && /(?:к|у)\s+[А-ЯЁ][а-яё]+/u.test(callCopy.transcript)) ||
+      (/дата\s*[—–:\-]\s*не указан/i.test(rawSummary) && /\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)|сегодня|завтра|суббот|воскресень/iu.test(callCopy.transcript)) ||
+      (/время\s*[—–:\-]\s*не указан/i.test(rawSummary) && /\b\d{1,2}\s+[0-5]\d|\b\d{1,2}:[0-5]\d/i.test(callCopy.transcript))
+    )
+  );
+
+  if (needsSummaryFormat || !callCopy.structured_summary || !callCopy.key_facts?.structured_summary || hasBadStructuredSteps || hasBadBookedText) {
+    const formatted = formatSummaryWithEssence(
+      rawSummary,
+      callCopy.transcript || '',
+      {
+        service: callCopy.key_facts?.service || null,
+        date: callCopy.key_facts?.date || null,
+        time: callCopy.key_facts?.time || null,
+        master: isMasterNameValid(callCopy.key_facts?.master) ? callCopy.key_facts.master : null,
+      },
+      salonName,
+      callCopy.operator_score,
+      callCopy.operator_mistakes,
+      callCopy.recommendations,
+      callCopy.operator_comment,
+      evalObj
+    );
+
+    if (formatted.formattedSummary && formatted.formattedSummary !== callCopy.summary) {
+      callCopy.summary = formatted.formattedSummary;
+      changed = true;
+    }
+
+    if (JSON.stringify(formatted.structuredSummary) !== prevStructJson) {
+      callCopy.structured_summary = formatted.structuredSummary;
+      if (!callCopy.key_facts) callCopy.key_facts = {};
+      callCopy.key_facts.structured_summary = formatted.structuredSummary;
+      callCopy.key_facts.call_purpose = formatted.structuredSummary.call_purpose;
+      callCopy.key_facts.requested_service = formatted.structuredSummary.requested_service;
+      callCopy.key_facts.offered_master = formatted.structuredSummary.offered_master;
+      callCopy.key_facts.offered_price = formatted.structuredSummary.offered_price;
+      callCopy.key_facts.offered_date_time = formatted.structuredSummary.offered_date_time;
+      callCopy.key_facts.is_booked_text = formatted.structuredSummary.booking_status_text;
+      callCopy.key_facts.unbooked_reason = formatted.structuredSummary.unbooked_reason;
+      callCopy.key_facts.manager_next_steps = formatted.structuredSummary.manager_next_steps;
+      changed = true;
+    }
+
+    if (formatted.essence.date && (!callCopy.key_facts?.date || String(callCopy.key_facts.date).includes('не указан'))) {
+      if (!callCopy.key_facts) callCopy.key_facts = {};
+      callCopy.key_facts.date = formatted.essence.date;
+      changed = true;
+    }
+    if (formatted.essence.time && (!callCopy.key_facts?.time || String(callCopy.key_facts.time).includes('не указан'))) {
+      if (!callCopy.key_facts) callCopy.key_facts = {};
+      callCopy.key_facts.time = formatted.essence.time;
+      changed = true;
+    }
+    if (formatted.essence.master && (!callCopy.key_facts?.master || String(callCopy.key_facts.master).includes('не выбран') || String(callCopy.key_facts.master).includes('Студио') || !isMasterNameValid(callCopy.key_facts.master))) {
+      if (!callCopy.key_facts) callCopy.key_facts = {};
+      callCopy.key_facts.master = formatted.essence.master;
+      changed = true;
+    }
+    if (formatted.essence.service && (!callCopy.key_facts?.service || String(callCopy.key_facts.service).includes('не указан'))) {
+      if (!callCopy.key_facts) callCopy.key_facts = {};
+      callCopy.key_facts.service = formatted.essence.service;
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
 app.get('/api/calls', (req, res) => {
   const db = readDb();
   const userRole = getCurrentUserRole(req);
+  const salonName = getEffectiveSalonName(db.config);
   const rawCalls = deduplicateCalls(db.calls || []);
 
   const mappedCalls = rawCalls.map((c: any) => {
     const rawPhone = c.client_phone || c.full_phone || '';
     const masked = c.client_phone_masked || maskPhone(rawPhone);
     const consent = getConsentForPhone(rawPhone);
-
-    let bookingStatus = c.booking_status || c.key_facts?.booking_status;
-    if (!bookingStatus) {
-      const outcome = (c.key_facts?.call_outcome || '').toLowerCase();
-      const summary = (c.summary || '').toLowerCase();
-      if (outcome === 'запись' || summary.includes('запись подтверждена') || summary.includes('записан')) {
-        bookingStatus = 'согласие';
-      } else if (outcome === 'отказ' || summary.includes('отказ') || summary.includes('не будет в городе')) {
-        bookingStatus = 'отказ';
-      } else if (outcome === 'автоответчик') {
-        bookingStatus = 'не применимо';
-      } else {
-        bookingStatus = 'консультация';
-      }
-    }
+    const bookingStatus = resolveCallBookingStatus(c);
 
     const callCopy: any = {
       ...c,
+      key_facts: c.key_facts ? { ...c.key_facts } : undefined,
       booking_status: bookingStatus,
       client_phone_masked: masked,
       consent_status: consent?.status || (c.status === 'missed' ? 'not_applicable' : 'active'),
       consent_purposes: consent?.purposes || ['quality_control', 'training']
     };
 
-    const needsSummaryRepair = Boolean(
-      callCopy.summary && callCopy.status === 'completed' && (
-        !/пересказ диалога|краткий пересказ/i.test(callCopy.summary) ||
-        /мастер\s*[—–:\-]\s*Студио|к мастеру Студио|Меня\s+Вот|Записались/i.test(callCopy.summary) ||
-        (!isMasterNameValid(callCopy.key_facts?.master) && callCopy.transcript && /(?:к|у)\s+[А-ЯЁ][а-яё]+/u.test(callCopy.transcript)) ||
-        (/дата\s*[—–:\-]\s*не указан/i.test(callCopy.summary) && callCopy.transcript && /\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)|сегодня|завтра|суббот|воскресень/iu.test(callCopy.transcript)) ||
-        (/время\s*[—–:\-]\s*не указан/i.test(callCopy.summary) && callCopy.transcript && /\b\d{1,2}\s+[0-5]\d|\b\d{1,2}:[0-5]\d/i.test(callCopy.transcript))
-      )
-    );
-
-    if (needsSummaryRepair) {
-      const { formattedSummary, essence } = formatSummaryWithEssence(
-        callCopy.summary,
-        callCopy.transcript || '',
-        {
-          service: callCopy.key_facts?.service || null,
-          date: callCopy.key_facts?.date || null,
-          time: callCopy.key_facts?.time || null,
-          master: isMasterNameValid(callCopy.key_facts?.master) ? callCopy.key_facts.master : null
-        },
-        getEffectiveSalonName()
-      );
-      callCopy.summary = formattedSummary;
-      if (essence.date && (!callCopy.key_facts?.date || callCopy.key_facts.date.includes('не указан'))) {
-        if (!callCopy.key_facts) callCopy.key_facts = {};
-        callCopy.key_facts.date = essence.date;
-      }
-      if (essence.time && (!callCopy.key_facts?.time || callCopy.key_facts.time.includes('не указан'))) {
-        if (!callCopy.key_facts) callCopy.key_facts = {};
-        callCopy.key_facts.time = essence.time;
-      }
-      if (essence.master && (!callCopy.key_facts?.master || callCopy.key_facts.master.includes('не выбран') || callCopy.key_facts.master.includes('Студио') || !isMasterNameValid(callCopy.key_facts.master))) {
-        if (!callCopy.key_facts) callCopy.key_facts = {};
-        callCopy.key_facts.master = essence.master;
-      }
-      if (essence.service && (!callCopy.key_facts?.service || callCopy.key_facts.service.includes('не указан'))) {
-        if (!callCopy.key_facts) callCopy.key_facts = {};
-        callCopy.key_facts.service = essence.service;
-      }
-    }
+    repairCallCopyIfNeeded(callCopy, salonName);
 
     // Role-based data access (RBAC & 152-ФЗ):
     if (userRole === 'viewer') {
@@ -3709,21 +3671,7 @@ const handleCallsTablePdfExport = (req: express.Request, res: express.Response) 
   const sanitizedCalls = callsToExport.map((call: any) => {
     const rawPhone = call.client_phone || call.full_phone || '';
     const masked = call.client_phone_masked || maskPhone(rawPhone);
-
-    let bookingStatus = call.booking_status || call.key_facts?.booking_status;
-    if (!bookingStatus) {
-      const outcome = (call.key_facts?.call_outcome || '').toLowerCase();
-      const summary = (call.summary || '').toLowerCase();
-      if (outcome === 'запись' || summary.includes('запись подтверждена') || summary.includes('записан')) {
-        bookingStatus = 'согласие';
-      } else if (outcome === 'отказ' || summary.includes('отказ') || summary.includes('не будет в городе')) {
-        bookingStatus = 'отказ';
-      } else if (outcome === 'автоответчик') {
-        bookingStatus = 'не применимо';
-      } else {
-        bookingStatus = 'консультация';
-      }
-    }
+    const bookingStatus = resolveCallBookingStatus(call);
 
     return {
       ...call,
@@ -3774,21 +3722,7 @@ const handleCallsTableCsvExport = (req: express.Request, res: express.Response) 
   const sanitizedCalls = callsToExport.map((call: any) => {
     const rawPhone = call.client_phone || call.full_phone || '';
     const masked = call.client_phone_masked || maskPhone(rawPhone);
-
-    let bookingStatus = call.booking_status || call.key_facts?.booking_status;
-    if (!bookingStatus) {
-      const outcome = (call.key_facts?.call_outcome || '').toLowerCase();
-      const summary = (call.summary || '').toLowerCase();
-      if (outcome === 'запись' || summary.includes('запись подтверждена') || summary.includes('записан')) {
-        bookingStatus = 'согласие';
-      } else if (outcome === 'отказ' || summary.includes('отказ') || summary.includes('не будет в городе')) {
-        bookingStatus = 'отказ';
-      } else if (outcome === 'автоответчик') {
-        bookingStatus = 'не применимо';
-      } else {
-        bookingStatus = 'консультация';
-      }
-    }
+    const bookingStatus = resolveCallBookingStatus(call);
 
     return {
       ...call,
@@ -3829,70 +3763,18 @@ app.get('/api/calls/:id', (req, res) => {
   const rawPhone = call.client_phone || call.full_phone || '';
   const masked = call.client_phone_masked || maskPhone(rawPhone);
   const consent = getConsentForPhone(rawPhone);
-
-  let bookingStatus = call.booking_status || call.key_facts?.booking_status;
-  if (!bookingStatus) {
-    const outcome = (call.key_facts?.call_outcome || '').toLowerCase();
-    const summary = (call.summary || '').toLowerCase();
-    if (outcome === 'запись' || summary.includes('запись подтверждена') || summary.includes('записан')) {
-      bookingStatus = 'согласие';
-    } else if (outcome === 'отказ' || summary.includes('отказ') || summary.includes('не будет в городе')) {
-      bookingStatus = 'отказ';
-    } else if (outcome === 'автоответчик') {
-      bookingStatus = 'не применимо';
-    } else {
-      bookingStatus = 'консультация';
-    }
-  }
+  const bookingStatus = resolveCallBookingStatus(call);
 
   const callCopy: any = {
     ...call,
+    key_facts: call.key_facts ? { ...call.key_facts } : undefined,
     booking_status: bookingStatus,
     client_phone_masked: masked,
     consent_status: consent?.status || (call.status === 'missed' ? 'not_applicable' : 'active'),
     consent_purposes: consent?.purposes || ['quality_control', 'training']
   };
 
-  const needsSingleSummaryRepair = Boolean(
-    callCopy.summary && callCopy.status === 'completed' && (
-      !/пересказ диалога|краткий пересказ/i.test(callCopy.summary) ||
-      /мастер\s*[—–:\-]\s*Студио|к мастеру Студио|Меня\s+Вот|Записались/i.test(callCopy.summary) ||
-      (!isMasterNameValid(callCopy.key_facts?.master) && callCopy.transcript && /(?:к|у)\s+[А-ЯЁ][а-яё]+/u.test(callCopy.transcript)) ||
-      (/дата\s*[—–:\-]\s*не указан/i.test(callCopy.summary) && callCopy.transcript && /\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)|сегодня|завтра|суббот|воскресень/iu.test(callCopy.transcript)) ||
-      (/время\s*[—–:\-]\s*не указан/i.test(callCopy.summary) && callCopy.transcript && /\b\d{1,2}\s+[0-5]\d|\b\d{1,2}:[0-5]\d/i.test(callCopy.transcript))
-    )
-  );
-
-  if (needsSingleSummaryRepair) {
-    const { formattedSummary, essence } = formatSummaryWithEssence(
-      callCopy.summary,
-      callCopy.transcript || '',
-      {
-        service: callCopy.key_facts?.service || null,
-        date: callCopy.key_facts?.date || null,
-        time: callCopy.key_facts?.time || null,
-        master: isMasterNameValid(callCopy.key_facts?.master) ? callCopy.key_facts.master : null
-      },
-      getEffectiveSalonName()
-    );
-    callCopy.summary = formattedSummary;
-    if (essence.date && (!callCopy.key_facts?.date || callCopy.key_facts.date.includes('не указан'))) {
-      if (!callCopy.key_facts) callCopy.key_facts = {};
-      callCopy.key_facts.date = essence.date;
-    }
-    if (essence.time && (!callCopy.key_facts?.time || callCopy.key_facts.time.includes('не указан'))) {
-      if (!callCopy.key_facts) callCopy.key_facts = {};
-      callCopy.key_facts.time = essence.time;
-    }
-    if (essence.master && (!callCopy.key_facts?.master || callCopy.key_facts.master.includes('не выбран') || callCopy.key_facts.master.includes('Студио') || !isMasterNameValid(callCopy.key_facts.master))) {
-      if (!callCopy.key_facts) callCopy.key_facts = {};
-      callCopy.key_facts.master = essence.master;
-    }
-    if (essence.service && (!callCopy.key_facts?.service || callCopy.key_facts.service.includes('не указан'))) {
-      if (!callCopy.key_facts) callCopy.key_facts = {};
-      callCopy.key_facts.service = essence.service;
-    }
-  }
+  repairCallCopyIfNeeded(callCopy, getEffectiveSalonName(db.config));
 
   if (userRole === 'viewer') {
     delete callCopy.transcript;
@@ -4281,21 +4163,7 @@ app.get('/api/calls/:id/export-pdf', (req, res) => {
 
   const rawPhone = call.client_phone || call.full_phone || '';
   const masked = call.client_phone_masked || maskPhone(rawPhone);
-
-  let bookingStatus = call.booking_status || call.key_facts?.booking_status;
-  if (!bookingStatus) {
-    const outcome = (call.key_facts?.call_outcome || '').toLowerCase();
-    const summary = (call.summary || '').toLowerCase();
-    if (outcome === 'запись' || summary.includes('запись подтверждена') || summary.includes('записан')) {
-      bookingStatus = 'согласие';
-    } else if (outcome === 'отказ' || summary.includes('отказ') || summary.includes('не будет в городе')) {
-      bookingStatus = 'отказ';
-    } else if (outcome === 'автоответчик') {
-      bookingStatus = 'не применимо';
-    } else {
-      bookingStatus = 'консультация';
-    }
-  }
+  const bookingStatus = resolveCallBookingStatus(call);
 
   const callForReport: any = {
     ...call,
@@ -4359,21 +4227,7 @@ app.get('/api/calls/:id/export-csv', (req, res) => {
 
   const rawPhone = call.client_phone || call.full_phone || '';
   const masked = call.client_phone_masked || maskPhone(rawPhone);
-
-  let bookingStatus = call.booking_status || call.key_facts?.booking_status;
-  if (!bookingStatus) {
-    const outcome = (call.key_facts?.call_outcome || '').toLowerCase();
-    const summary = (call.summary || '').toLowerCase();
-    if (outcome === 'запись' || summary.includes('запись подтверждена') || summary.includes('записан')) {
-      bookingStatus = 'согласие';
-    } else if (outcome === 'отказ' || summary.includes('отказ') || summary.includes('не будет в городе')) {
-      bookingStatus = 'отказ';
-    } else if (outcome === 'автоответчик') {
-      bookingStatus = 'не применимо';
-    } else {
-      bookingStatus = 'консультация';
-    }
-  }
+  const bookingStatus = resolveCallBookingStatus(call);
 
   const callForReport: any = {
     ...call,
@@ -5488,91 +5342,7 @@ async function startServer() {
         }
 
         const salonName = getEffectiveSalonName(db.config);
-
-        // Авто-миграция: наполнение 8 параметров структурированного резюме (structured_summary)
-        if (!call.structured_summary || !call.key_facts?.structured_summary) {
-          const struct = extractStructuredCallSummary(
-            call.transcript || '',
-            call.summary || '',
-            call.key_facts || {},
-            salonName,
-            call.booking_status
-          );
-          call.structured_summary = struct;
-          if (!call.key_facts) {
-            call.key_facts = {
-              is_dispute: false,
-              dispute_reason: null,
-              promises: [],
-              tone_client: 'нейтральный',
-              tone_manager: 'нейтральный',
-              call_outcome: 'консультация'
-            };
-          }
-          call.key_facts.structured_summary = struct;
-          call.key_facts.call_purpose = struct.call_purpose;
-          call.key_facts.requested_service = struct.requested_service;
-          call.key_facts.offered_master = struct.offered_master;
-          call.key_facts.offered_price = struct.offered_price;
-          call.key_facts.offered_date_time = struct.offered_date_time;
-          call.key_facts.is_booked_text = struct.booking_status_text;
-          call.key_facts.unbooked_reason = struct.unbooked_reason;
-          call.key_facts.manager_next_steps = struct.manager_next_steps;
-          fixedCount++;
-        }
-
-        // Авто-миграция: полная фактологическая оценка по 10 критериям и устранение любых противоречий
-        const evalObj = extractCallEvaluation(
-          call.transcript || '',
-          call.summary || '',
-          call.evaluation || null,
-          call.operator_score,
-          call.operator_mistakes,
-          Array.isArray(call.recommendations) ? call.recommendations : [call.recommendations].filter(Boolean) as string[],
-          salonName
-        );
-        call.evaluation = evalObj;
-        call.criteria_scores = evalObj.criteria;
-        if (!call.key_facts) {
-          call.key_facts = {
-            is_dispute: false,
-            dispute_reason: null,
-            promises: [],
-            tone_client: 'нейтральный',
-            tone_manager: 'нейтральный',
-            call_outcome: 'консультация'
-          };
-        }
-        call.key_facts.evaluation = evalObj;
-        call.key_facts.criteria_scores = evalObj.criteria;
-        if (evalObj.overall_score !== null) {
-          call.operator_score = Math.round(evalObj.overall_score);
-        }
-
-        // Гармонизируем ошибки и советы с критериями оценки
-        const harmonized = harmonizeMistakesAndEvaluation(
-          call.operator_mistakes || [],
-          Array.isArray(call.recommendations) ? call.recommendations : [call.recommendations].filter(Boolean) as string[],
-          evalObj,
-          call.transcript
-        );
-        call.operator_mistakes = harmonized.mistakes;
-        call.recommendations = harmonized.advice;
-
-        // Переформатируем резюме так, чтобы блок «Разбор работы менеджера» идеально соответствовал критериям
-        const formatted = formatSummaryWithEssence(
-          call.summary || '',
-          call.transcript || '',
-          undefined,
-          salonName,
-          call.operator_score,
-          call.operator_mistakes,
-          call.recommendations,
-          call.operator_comment,
-          evalObj
-        );
-        if (call.summary !== formatted.formattedSummary) {
-          call.summary = formatted.formattedSummary;
+        if (repairCallCopyIfNeeded(call, salonName)) {
           fixedCount++;
         }
 
