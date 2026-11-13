@@ -414,8 +414,8 @@ authRouter.post('/verify-admin-password', async (req: Request, res: Response) =>
 // ─────────────────────────────────────────────────────────────
 export const adminUsersRouter = Router();
 
-// Protect all user management endpoints - only admin
-adminUsersRouter.use(requireRole(['admin']));
+// Protect user management endpoints: accessible to admin and manager
+adminUsersRouter.use(requireRole(['admin', 'manager']));
 
 /**
  * GET /api/admin/users
@@ -452,9 +452,15 @@ adminUsersRouter.post('/', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Поля username, name, password, role обязательны' });
     }
 
+    const currentUser = getCurrentUser(req);
     const validRoles: UserRole[] = ['admin', 'manager', 'operator', 'viewer'];
     if (!validRoles.includes(role)) {
       return res.status(400).json({ error: `Недопустимая роль. Допустимые: ${validRoles.join(', ')}` });
+    }
+
+    // Manager can create receptionists (operator) and viewers, but cannot create admin accounts
+    if (currentUser?.role === 'manager' && (role === 'admin' || role === 'manager')) {
+      return res.status(403).json({ error: 'Управляющий может создавать только учетные записи администраторов ресепшена (operator) и наблюдателей' });
     }
 
     if (String(password).length < 6) {
@@ -555,10 +561,21 @@ adminUsersRouter.put('/:id', async (req: Request, res: Response) => {
       }
     }
 
+    // Managers can only edit receptionists and viewers, not admins or other managers
+    if (currentUser?.role === 'manager' && (user.role === 'admin' || user.role === 'manager')) {
+      return res.status(403).json({ error: 'Управляющий может изменять только администраторов ресепшена (operator) и наблюдателей' });
+    }
+
     if (name) user.name = String(name).trim();
     if (role) {
       const validRoles: UserRole[] = ['admin', 'manager', 'operator', 'viewer'];
-      if (validRoles.includes(role)) user.role = role;
+      if (!validRoles.includes(role)) {
+        return res.status(400).json({ error: `Недопустимая роль. Допустимые: ${validRoles.join(', ')}` });
+      }
+      if (currentUser?.role === 'manager' && (role === 'admin' || role === 'manager')) {
+        return res.status(403).json({ error: 'Управляющий не может повышать пользователей до администратора или управляющего' });
+      }
+      user.role = role;
     }
     if (typeof isActive === 'boolean') user.isActive = isActive;
     if (notes !== undefined) user.notes = String(notes).trim();
@@ -610,6 +627,12 @@ adminUsersRouter.post('/:id/set-credentials', async (req: Request, res: Response
       return res.status(404).json({ error: 'Пользователь не найден' });
     }
 
+    const currentUser = getCurrentUser(req);
+    // Managers can only edit receptionists and viewers, not admins or other managers
+    if (currentUser?.role === 'manager' && (user.role === 'admin' || user.role === 'manager')) {
+      return res.status(403).json({ error: 'Управляющий может задавать логины и пароли только для администраторов ресепшена (operator)' });
+    }
+
     if (username) {
       const normUsername = String(username).trim().toLowerCase();
       if (normUsername.length < 3) {
@@ -638,11 +661,20 @@ adminUsersRouter.post('/:id/set-credentials', async (req: Request, res: Response
     user.updatedAt = new Date().toISOString();
     await writeStore(store);
 
+    const actorName = currentUser?.name || (currentUser?.role === 'manager' ? 'Управляющий' : 'Администратор');
+    const actorRoleTitle = currentUser?.role === 'manager' ? 'Управляющий салона' : 'Администратор салона';
+
     await logAccess(
-      getCurrentUser(req)?.name || 'Администратор',
+      actorName,
       'write',
-      `Администратор салона установил логин/пароль для администратора ресепшена ${user.name} (@${user.username})`,
-      req.ip || '127.0.0.1'
+      `${actorRoleTitle} установил логин/пароль для администратора ресепшена ${user.name} (@${user.username})`,
+      req.ip || '127.0.0.1',
+      {
+        category: 'password',
+        details: `Назначены учетные данные для ${user.name} (@${user.username})`,
+        role: currentUser?.role || 'manager',
+        userId: currentUser?.id,
+      }
     );
 
     res.json({
@@ -683,6 +715,11 @@ adminUsersRouter.delete('/:id', async (req: Request, res: Response) => {
     // Safeguard: Cannot delete self
     if (currentUser && currentUser.id === user.id) {
       return res.status(400).json({ error: 'Нельзя удалить собственную учетную запись' });
+    }
+
+    // Manager can only delete receptionists and viewers
+    if (currentUser?.role === 'manager' && (user.role === 'admin' || user.role === 'manager')) {
+      return res.status(403).json({ error: 'Управляющий может удалять только администраторов ресепшена (operator) и наблюдателей' });
     }
 
     // Safeguard: Cannot delete last admin

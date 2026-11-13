@@ -84,13 +84,17 @@ export function StaffPerformanceTab({ authToken, onSelectCall }: StaffPerformanc
     setLoading(true);
     setError(null);
     try {
-      let url = `/api/admin/staff-performance?period=${period}`;
+      let url = `/api/settings/staff-performance?period=${period}`;
       if (period === 'custom' && startDate) {
         url += `&startDate=${startDate}`;
         if (endDate) url += `&endDate=${endDate}`;
       }
 
-      const res = await fetch(url, { headers: getHeaders() });
+      let res = await fetch(url, { headers: getHeaders() });
+      if (!res.ok) {
+        // Fallback to /api/admin/staff-performance if settings route unavailable
+        res = await fetch(`/api/admin/staff-performance?period=${period}`, { headers: getHeaders() });
+      }
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || 'Ошибка загрузки данных персонала');

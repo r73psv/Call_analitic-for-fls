@@ -9,7 +9,7 @@ import {
   PhoneCall, Settings, Activity, RefreshCw, 
   ShieldAlert, AlertCircle, HardDrive, Shield, ShieldCheck,
   Lock, Unlock, UserCheck, HeartHandshake, Sparkles, 
-  CheckCircle2, LogOut, User, Key, KeyRound, BarChart3, Pencil, BookOpen, ListTodo
+  CheckCircle2, LogOut, User, Key, KeyRound, BarChart3, Pencil, BookOpen, ListTodo, Headphones
 } from 'lucide-react';
 
 import { StatsGrid } from './components/StatsGrid.js';
@@ -29,6 +29,7 @@ import { UserGuide } from './components/UserGuide.js';
 import { PendingTasksList } from './components/PendingTasksList.js';
 import { NextStepsReminderToast } from './components/NextStepsReminderToast.js';
 import { SystemPromptEditor } from './components/SystemPromptEditor.js';
+import { UsersManagement } from './components/admin/UsersManagement.js';
 
 import { CallRecord, DashboardStats, SystemConfig, LogEntry, GigaChatModel, UserRole } from './types.js';
 import { deduplicateCalls } from './services/callUtils.js';
@@ -126,7 +127,7 @@ export default function App() {
   const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'list' | 'details' | 'tasks' | 'stats' | 'consents' | 'prompt' | 'admin' | 'guide'>('list');
+  const [activeTab, setActiveTab] = useState<'list' | 'details' | 'tasks' | 'stats' | 'consents' | 'prompt' | 'reception' | 'admin' | 'guide'>('list');
 
   // Count of calls with uncompleted next steps
   const pendingNextStepsCount = React.useMemo(() => {
@@ -808,6 +809,22 @@ export default function App() {
               </button>
             )}
 
+            {/* Администраторы ресепшена: добавление, логины и пароли (доступно управляющему и администратору) */}
+            {(userRole === 'admin' || userRole === 'manager') && (
+              <button
+                id="tab-btn-reception"
+                onClick={() => setActiveTab('reception')}
+                className={`px-5 py-3.5 text-xs font-bold border-b-2 transition-all flex items-center gap-2 ${
+                  activeTab === 'reception'
+                    ? 'border-purple-600 text-purple-700 bg-white'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <Headphones className="w-4 h-4 text-purple-600" />
+                <span>Администраторы ресепшена</span>
+              </button>
+            )}
+
             <button
               id="tab-btn-guide"
               onClick={() => setActiveTab('guide')}
@@ -980,6 +997,24 @@ export default function App() {
                         });
                       }
                     }}
+                  />
+                </motion.div>
+              )}
+
+              {/* Receptionists Management for Managers and Admins */}
+              {activeTab === 'reception' && (userRole === 'admin' || userRole === 'manager') && (
+                <motion.div
+                  key="tab-workspace-reception"
+                  initial={{ opacity: 0, y: 5 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -5 }}
+                  transition={{ duration: 0.12 }}
+                  className="min-h-[500px]"
+                >
+                  <UsersManagement
+                    authToken={authToken}
+                    currentUserId={currentUser?.id}
+                    userRole={userRole}
                   />
                 </motion.div>
               )}
