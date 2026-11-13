@@ -177,11 +177,42 @@ function tryParseJson(text: string): any {
 }
 
 /**
+ * Normalizes a recording URL or relative path returned by Megafon WCGP (`record` / `link`)
+ */
+export function normalizeWcgpRecordUrl(rawValue: any, domain?: string): string | undefined {
+  if (rawValue === undefined || rawValue === null) return undefined;
+  let val = String(rawValue).replace(/^["']|["']$/g, '').trim();
+  if (!val) return undefined;
+
+  const lower = val.toLowerCase();
+  if (lower === '0' || lower === 'false' || lower === 'null' || lower === 'undefined' || lower === '-' || lower === 'нет') {
+    return undefined;
+  }
+
+  if (val.startsWith('//')) {
+    return `https:${val}`;
+  }
+  if (/^https?:\/\//i.test(val)) {
+    return val;
+  }
+
+  const host = domain ? normalizeWcgpDomain(domain) : '';
+  if (val.startsWith('/')) {
+    return host ? `https://${host}${val}` : val;
+  }
+  if (/\.(mp3|wav|ogg|m4a|opus)(\?.*)?$/i.test(val) || val.includes('/')) {
+    return host ? `https://${host}/${val.replace(/^\/+/, '')}` : `/${val.replace(/^\/+/, '')}`;
+  }
+
+  return undefined;
+}
+
+/**
  * Parses the CSV response returned by `cmd=history`
  * Header: UID,type,client,account,via,start,wait,duration,record,quality_control
  * Supports both comma (,) and semicolon (;) delimiters, BOM markers, quotes, and JSON fallback.
  */
-export function parseWcgpCsvHistory(csvText: string): MegafonWcgpCall[] {
+export function parseWcgpCsvHistory(csvText: string, domain?: string): MegafonWcgpCall[] {
   if (!csvText || typeof csvText !== 'string') return [];
   const clean = csvText.replace(/^\uFEFF/, '').trim();
   if (!clean) return [];
@@ -201,7 +232,7 @@ export function parseWcgpCsvHistory(csvText: string): MegafonWcgpCall[] {
           start: parseWcgpDate(item.start || item.timestamp || ''),
           wait: Number(item.wait || 0),
           duration: Number(item.duration || 0),
-          record: item.record || item.link,
+          record: normalizeWcgpRecordUrl(item.record || item.record_url || item.audio_url || item.link || item.url, domain),
           quality_control: item.quality_control !== undefined ? Number(item.quality_control) : (item.rating !== undefined ? Number(item.rating) : undefined)
         }));
       }
@@ -211,7 +242,7 @@ export function parseWcgpCsvHistory(csvText: string): MegafonWcgpCall[] {
   const rawLines = clean.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
   if (rawLines.length === 0) return [];
 
-  // Detect delimiter: semicolon (;) vs comma (,)
+  // Detect delimiter: semicolon (;) vs comma (,) vs tab
   const firstLine = rawLines[0];
   const semiCount = (firstLine.match(/;/g) || []).length;
   const commaCount = (firstLine.match(/,/g) || []).length;
@@ -219,13 +250,33 @@ export function parseWcgpCsvHistory(csvText: string): MegafonWcgpCall[] {
   const delim = semiCount >= commaCount && semiCount >= tabCount ? ';' : (tabCount > commaCount ? '\t' : ',');
 
   const splitCols = (line: string): string[] => {
-    return line.split(delim).map(col => col.replace(/^["']|["']$/g, '').trim());
+    const cols: string[] = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQuotes && line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (ch === delim && !inQuotes) {
+        cols.push(current.replace(/^["']|["']$/g, '').trim());
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+    cols.push(current.replace(/^["']|["']$/g, '').trim());
+    return cols;
   };
 
   const firstParts = splitCols(firstLine).map(h => h.toLowerCase());
   const hasHeader = firstParts.some(h => [
-    'uid', 'type', 'client', 'account', 'start', 'duration',
-    'тип', 'клиент', 'сотрудник', 'начало', 'длительность'
+    'uid', 'type', 'client', 'account', 'start', 'duration', 'record', 'link',
+    'тип', 'клиент', 'сотрудник', 'начало', 'длительность', 'запись'
   ].includes(h));
 
   let startRow = 0;
@@ -250,7 +301,7 @@ export function parseWcgpCsvHistory(csvText: string): MegafonWcgpCall[] {
     startIdx = firstParts.findIndex(h => h === 'start' || h === 'начало' || h === 'время' || h === 'date');
     waitIdx = firstParts.findIndex(h => h === 'wait' || h === 'ожидание');
     durationIdx = firstParts.findIndex(h => h === 'duration' || h === 'длительность');
-    recordIdx = firstParts.findIndex(h => h === 'record' || h === 'запись' || h === 'link');
+    recordIdx = firstParts.findIndex(h => ['record', 'record_url', 'audio_url', 'link', 'url', 'запись', 'ссылка', 'запись_звонка'].includes(h));
     qualityIdx = firstParts.findIndex(h => h === 'quality_control' || h === 'оценка' || h === 'rating' || h === 'quality');
   }
 
@@ -274,7 +325,7 @@ export function parseWcgpCsvHistory(csvText: string): MegafonWcgpCall[] {
     const start = parts[startIdx !== -1 ? startIdx : 5] || '';
     const wait = waitIdx !== -1 && parts[waitIdx] ? parseInt(parts[waitIdx], 10) : 0;
     const duration = durationIdx !== -1 && parts[durationIdx] ? parseInt(parts[durationIdx], 10) : 0;
-    const record = recordIdx !== -1 && parts[recordIdx] ? parts[recordIdx] : undefined;
+    const rawRecord = recordIdx !== -1 && parts[recordIdx] ? parts[recordIdx] : undefined;
     const qc = qualityIdx !== -1 && parts[qualityIdx] ? parseFloat(parts[qualityIdx]) : undefined;
 
     results.push({
@@ -286,7 +337,7 @@ export function parseWcgpCsvHistory(csvText: string): MegafonWcgpCall[] {
       start: parseWcgpDate(start),
       wait: isNaN(wait) ? 0 : wait,
       duration: isNaN(duration) ? 0 : duration,
-      record: record && record.startsWith('http') ? record : undefined,
+      record: normalizeWcgpRecordUrl(rawRecord, domain),
       quality_control: isNaN(qc as number) ? undefined : qc,
     });
   }
@@ -652,7 +703,7 @@ export async function getWcgpHistory(
     throw new Error(res.error || 'Не удалось выгрузить историю звонков из АТС');
   }
 
-  let calls = parseWcgpCsvHistory(res.rawText);
+  let calls = parseWcgpCsvHistory(res.rawText, domain);
 
   // Fallback: If 'today' returned 0 calls, try explicit start/end for the last 24h to avoid UTC boundary issues
   if (calls.length === 0 && (!options.period || options.period === 'today') && !options.start) {
@@ -666,7 +717,7 @@ export async function getWcgpHistory(
 
     const resFallback = await sendWcgpRequest(domain, token, 'history', fallbackParams);
     if (resFallback.ok) {
-      const fallbackCalls = parseWcgpCsvHistory(resFallback.rawText);
+      const fallbackCalls = parseWcgpCsvHistory(resFallback.rawText, domain);
       if (fallbackCalls.length > 0) {
         calls = fallbackCalls;
         return {

@@ -59,6 +59,10 @@ export function NotificationsBell({
         });
         clearTimeout(timeoutId);
 
+        if (res.status === 429 || res.status === 401 || res.status === 403) {
+          return;
+        }
+
         if (res.ok) {
           const text = await res.text();
           if (text && !text.trim().startsWith('<')) {
@@ -72,7 +76,7 @@ export function NotificationsBell({
       } catch (err: any) {
         if (!isMountedRef.current) return;
         if (attempt < retries) {
-          await new Promise(r => setTimeout(r, 600 * (attempt + 1)));
+          await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
           continue;
         }
         // Soft warning for network glitch or server restart without throwing console.error
@@ -85,8 +89,9 @@ export function NotificationsBell({
     if (!isAuthorized) return;
     fetchNotifications();
     const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       fetchNotifications(1);
-    }, 10000);
+    }, 30000);
     return () => clearInterval(interval);
   }, [isAuthorized, userRole, authToken]);
 

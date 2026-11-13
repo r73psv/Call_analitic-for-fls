@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   AlertTriangle, Check, ShieldAlert, Star, 
   ThumbsUp, Volume2, MessageSquare, 
@@ -12,7 +12,7 @@ import {
   CheckCircle2, XCircle, HelpCircle, Tag, Tags, Plus, X, Bookmark, Trash2,
   Scissors, Calendar, UserCheck, Sparkles, ListTodo, CheckSquare, Square, Copy, ArrowRight,
   MessageSquareQuote, Send, Target, Banknote, CalendarClock, ArrowRightCircle,
-  Award, Gauge, BarChart3, Filter, CheckCheck, MinusCircle, ChevronDown, ChevronUp, Info, Sparkle
+  Award, Gauge, BarChart3, Filter, CheckCheck, MinusCircle, ChevronDown, ChevronUp, Info, Sparkle, RefreshCw
 } from 'lucide-react';
 import { CallRecord, NextStepItem, ContextClarification, StructuredCallSummary, CallEvaluation, CallEvaluationCriterion } from '../types.js';
 import { ReanalyzeButton } from './ReanalyzeButton.js';
@@ -95,6 +95,28 @@ export function CallDetails({
   const [criteriaFilter, setCriteriaFilter] = useState<'all' | 'applicable' | 'not_applicable' | 'low'>('all');
   const [criteriaSearch, setCriteriaSearch] = useState('');
   const [expandedCriteriaId, setExpandedCriteriaId] = useState<string | null>(null);
+
+  // Состояние аудиоплеера
+  const [audioError, setAudioError] = useState<string | null>(null);
+  const [audioReloadKey, setAudioReloadKey] = useState(0);
+
+  useEffect(() => {
+    setAudioError(null);
+    setAudioReloadKey(0);
+  }, [call.call_id, call.audio_url]);
+
+  const proxiedAudioSrc = useMemo(() => {
+    if (!call.audio_url) return '';
+    if (
+      call.audio_url.startsWith('data:') ||
+      call.audio_url.startsWith('blob:') ||
+      call.audio_url.startsWith('/api/')
+    ) {
+      return call.audio_url;
+    }
+    const base = `/api/megafon-ats/record-proxy?url=${encodeURIComponent(call.audio_url)}&callId=${encodeURIComponent(call.call_id)}`;
+    return audioReloadKey > 0 ? `${base}&r=${audioReloadKey}` : base;
+  }, [call.audio_url, call.call_id, audioReloadKey]);
 
   // Оценка звонка по 10 критериям (гарантирует наличие всех 10 пунктов даже для старых звонков)
   const callEvaluation = useMemo<CallEvaluation>(() => {
@@ -2413,9 +2435,22 @@ export function CallDetails({
 
           {/* Audio recording & TTL */}
           <div className="border border-slate-100 rounded-xl p-4 bg-slate-50/50 space-y-3">
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-              <Volume2 className="w-4 h-4 text-indigo-500" /> Аудиозапись звонка (152-ФЗ)
-            </h3>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                <Volume2 className="w-4 h-4 text-indigo-500" /> Аудиозапись звонка (152-ФЗ)
+              </h3>
+              {!call.audio_deleted && call.audio_url && (
+                <a
+                  href={`${proxiedAudioSrc}${proxiedAudioSrc.includes('?') ? '&' : '?'}download=1`}
+                  download={`call-${call.call_id}.mp3`}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/80 rounded-md transition-colors"
+                  title="Скачать аудиозапись"
+                >
+                  <Download className="w-3 h-3" />
+                  Скачать
+                </a>
+              )}
+            </div>
 
             {call.audio_deleted ? (
               <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 flex items-start gap-2">
@@ -2430,15 +2465,43 @@ export function CallDetails({
             ) : call.audio_url ? (
               <div className="space-y-2">
                 <audio 
-                  src={
-                    (!call.audio_url.startsWith('http') || call.audio_url.includes('megafon') || call.audio_url.includes('cp.megafon.ru'))
-                      ? `/api/megafon-ats/record-proxy?url=${encodeURIComponent(call.audio_url)}`
-                      : call.audio_url
-                  } 
+                  key={`${call.call_id}-${audioReloadKey}`}
+                  src={proxiedAudioSrc} 
                   controls 
                   className="w-full h-9 rounded-lg"
                   preload="metadata"
+                  onLoadedData={() => setAudioError(null)}
+                  onError={() => {
+                    setAudioError('Не удалось воспроизвести аудиозапись напрямую через прокси АТС. Проверьте домен/токен ВАТС или попробуйте повторить загрузку.');
+                  }}
                 />
+                {audioError && (
+                  <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-[11px] text-rose-800 flex flex-wrap items-center justify-between gap-2">
+                    <span>{audioError}</span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAudioError(null);
+                          setAudioReloadKey(k => k + 1);
+                        }}
+                        className="inline-flex items-center gap-1 px-2 py-1 bg-white border border-rose-300 rounded text-rose-700 hover:bg-rose-100 font-semibold"
+                      >
+                        <RefreshCw className="w-3 h-3" /> Повторить
+                      </button>
+                      {call.audio_url.startsWith('http') && (
+                        <a
+                          href={call.audio_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 px-2 py-1 bg-white border border-slate-300 rounded text-slate-700 hover:bg-slate-100 font-semibold"
+                        >
+                          <ExternalLink className="w-3 h-3" /> Оригинал АТС
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <div className="text-[10px] text-slate-400">
                   * Запись хранится не более 30 дней, затем автоматически очищается ежедневным фоновым заданием.
                 </div>

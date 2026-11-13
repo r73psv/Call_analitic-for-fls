@@ -46,8 +46,8 @@ async function safeFetchJson<T = any>(
   options?: RequestInit, 
   authToken?: string | null,
   userRole?: UserRole,
-  retries = 6, 
-  delay = 1000
+  retries = 4, 
+  delay = 1200
 ): Promise<T> {
   const headers: Record<string, string> = {
     ...(options?.headers as Record<string, string> || {}),
@@ -76,20 +76,42 @@ async function safeFetchJson<T = any>(
               detail: errorData.error || 'Сессия завершена из-за отсутствия активности более 4 часов (152-ФЗ)'
             }));
           }
-          throw new Error(errorData.error || 'Требуется авторизация в системе (401)');
+          const err401: any = new Error(errorData.error || 'Требуется авторизация в системе (401)');
+          err401.nonRetryable = true;
+          throw err401;
+        }
+        if (response.status === 429) {
+          if (attempt < retries) {
+            const retryAfterRaw = response.headers.get('Retry-After');
+            const retryAfterSec = retryAfterRaw && /^\d+$/.test(retryAfterRaw.trim())
+              ? parseInt(retryAfterRaw.trim(), 10)
+              : 0;
+            const backoffMs = retryAfterSec > 0
+              ? Math.min(retryAfterSec * 1000, 15000)
+              : Math.min(2500 * Math.pow(2, attempt - 1), 15000) + Math.floor(Math.random() * 600);
+            await new Promise(resolve => setTimeout(resolve, backoffMs));
+            continue;
+          }
+          const err429: any = new Error('Слишком много запросов к серверу (429). Пожалуйста, подождите несколько секунд.');
+          err429.nonRetryable = true;
+          throw err429;
         }
         if (response.status >= 500 && attempt < retries) {
-          const waitTime = Math.min(delay * attempt, 3500);
+          const waitTime = Math.min(delay * attempt, 4500);
           await new Promise(resolve => setTimeout(resolve, waitTime));
           continue;
         }
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `Ошибка (${response.status}): ${response.statusText}`);
+        const clientErr: any = new Error(errorData.error || `Ошибка (${response.status}): ${response.statusText}`);
+        if (response.status >= 400 && response.status < 500) {
+          clientErr.nonRetryable = true;
+        }
+        throw clientErr;
       }
       const text = await response.text();
       if (text.trim().startsWith('<')) {
         if (attempt < retries) {
-          const waitTime = Math.min(delay * attempt, 3500);
+          const waitTime = Math.min(delay * attempt, 4500);
           await new Promise(resolve => setTimeout(resolve, waitTime));
           continue;
         }
@@ -97,9 +119,8 @@ async function safeFetchJson<T = any>(
       }
       return JSON.parse(text) as T;
     } catch (err: any) {
-      if (attempt < retries) {
-        // Wait with backoff before next attempt (especially on TypeError: Failed to fetch during boot)
-        const waitTime = Math.min(delay * attempt, 3500);
+      if (!err?.nonRetryable && attempt < retries) {
+        const waitTime = Math.min(delay * attempt, 4500);
         await new Promise(resolve => setTimeout(resolve, waitTime));
         continue;
       }
@@ -212,9 +233,15 @@ export default function App() {
     loadData(true);
   };
 
+  const isLoadingDataRef = React.useRef(false);
+  const selectedCallIdRef = React.useRef<string | null>(selectedCallId);
+  selectedCallIdRef.current = selectedCallId;
+
   // Synchronize state with backend APIs
   const loadData = async (silent = false) => {
     if (!authToken || !currentUser) return;
+    if (isLoadingDataRef.current) return;
+    isLoadingDataRef.current = true;
     if (!silent) setLoading(true);
     try {
       const [callsData, statsData, configData, logsData] = await Promise.all([
@@ -230,29 +257,31 @@ export default function App() {
       setConfig(configData);
       setLogs(logsData || []);
 
-      if (uniqueCalls.length > 0 && !selectedCallId) {
+      if (uniqueCalls.length > 0 && !selectedCallIdRef.current) {
         setSelectedCallId(uniqueCalls[0].call_id);
       }
       setError(null);
     } catch (err: any) {
-      console.error('Data loading error:', err);
+      console.warn('Data loading error:', err?.message || err);
       // Only set visible error if we don't have calls loaded yet, or during explicit (non-silent) manual fetch
       if (!silent || calls.length === 0) {
         setError(err.message || 'Ошибка подключения к серверу');
       }
     } finally {
+      isLoadingDataRef.current = false;
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    if (!authToken || !currentUser) return;
+    if (!authToken || !currentUser?.id) return;
     loadData();
     const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       loadData(true);
-    }, 10000);
+    }, 30000);
     return () => clearInterval(timer);
-  }, [selectedCallId, userRole, authToken, currentUser]);
+  }, [userRole, authToken, currentUser?.id]);
 
   const handleLogout = async (reason?: string) => {
     try {
@@ -287,7 +316,6 @@ export default function App() {
     if (user.role !== 'admin' && activeTab === 'admin') {
       setActiveTab('list');
     }
-    loadData();
   };
 
   // 4-Hour Inactivity Tracker (152-ФЗ)
@@ -348,7 +376,18 @@ export default function App() {
         if (!data.authenticated || !data.user) {
           handleLogout('Сессия завершена или истек срок действия. Пожалуйста, выполните вход.');
         } else {
-          setCurrentUser(data.user);
+          setCurrentUser(prev => {
+            if (
+              prev &&
+              prev.id === data.user.id &&
+              prev.role === data.user.role &&
+              prev.username === data.user.username &&
+              prev.name === data.user.name
+            ) {
+              return prev;
+            }
+            return data.user;
+          });
           localStorage.setItem('callqa_last_activity', String(Date.now()));
         }
       })

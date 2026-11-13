@@ -6,6 +6,8 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import dotenv from 'dotenv';
@@ -35,6 +37,7 @@ import {
   getWcgpHistory,
   parseWcgpDate,
   normalizeWcgpDomain,
+  normalizeWcgpRecordUrl,
   sendWcgpRequest
 } from './src/services/megafonRest.js';
 
@@ -1783,11 +1786,129 @@ async function findRealRecordingLinkFromApi(communicationId: string, token: stri
   return null;
 }
 
-// Download remote audio recording from Megafon VATS and encode as base64
-async function downloadAudioAsBase64(url: string, token?: string): Promise<{ data: string; mimeType: string } | null> {
+const AUDIO_CACHE_DIR = path.resolve(os.tmpdir(), 'lik28-audio-cache');
+
+function getMegafonAuthContext(db: any) {
+  const megafon = db?.config?.megafon || {};
+  const apiVersion = megafon.apiVersion === 'rest_wcgp' ? 'rest_wcgp' : 'json_rpc';
+  const restDomain = normalizeWcgpDomain(megafon.restDomain || process.env.MEGAFON_REST_DOMAIN || '');
+  const clean = (v: any) => (typeof v === 'string' ? v.trim().replace(/^['"]|['"]$/g, '') : '');
+  const jsonRpcToken = clean(megafon.token || (db?.config as any)?.credentials?.megafonToken || process.env.MEGAFON_TOKEN || '');
+  const restToken = clean(megafon.restToken || process.env.MEGAFON_REST_TOKEN || jsonRpcToken || '');
+  const activeToken = apiVersion === 'rest_wcgp' ? (restToken || jsonRpcToken) : (jsonRpcToken || restToken);
+  return { apiVersion, restDomain, jsonRpcToken, restToken, activeToken };
+}
+
+function isPresignedOrTokenizedUrl(targetUrl: string): boolean {
+  return /[?&](X-Amz-Signature|Signature|AWSAccessKeyId|token|access_token)=/i.test(targetUrl);
+}
+
+function resolveCandidateAudioUrl(rawUrl: string, apiVersion: string, restDomain: string): string {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('//')) return `https:${trimmed}`;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  const cleanPath = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+  if (apiVersion === 'rest_wcgp' && restDomain) {
+    return `https://${restDomain}${cleanPath}`;
+  }
+  return `https://data-api.cp.megafon.ru${cleanPath}`;
+}
+
+function isAudioPayloadValid(contentType: string, buffer: Buffer): boolean {
+  if (!buffer || buffer.length < 256) return false;
+  const lowerCt = (contentType || '').toLowerCase();
+  if (lowerCt.includes('text/html') || lowerCt.includes('application/json') || lowerCt.includes('application/xml')) {
+    return false;
+  }
+  const sample = buffer.toString('utf-8', 0, Math.min(200, buffer.length)).trim().toLowerCase();
+  if (
+    sample.startsWith('<html') ||
+    sample.startsWith('<!doctype') ||
+    sample.startsWith('<body') ||
+    sample.startsWith('<?xml') ||
+    (sample.startsWith('{') && (sample.includes('"error"') || sample.includes('"message"')))
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function getAudioCacheFileKeys(callId?: string | null, audioUrl?: string | null): string[] {
+  const keys: string[] = [];
+  if (callId) {
+    const safeId = String(callId).replace(/[^a-zA-Z0-9_-]/g, '_');
+    if (safeId) keys.push(`call-${safeId}`);
+  }
+  if (audioUrl) {
+    const hash = crypto.createHash('sha1').update(String(audioUrl)).digest('hex').slice(0, 16);
+    keys.push(`url-${hash}`);
+  }
+  return keys;
+}
+
+function saveAudioToCache(buffer: Buffer, mimeType: string, callId?: string | null, audioUrl?: string | null): void {
   try {
-    const cleanToken = token ? token.trim().replace(/^['"]|['"]$/g, '') : '';
-    
+    if (!buffer || buffer.length < 256) return;
+    fs.mkdirSync(AUDIO_CACHE_DIR, { recursive: true });
+    const keys = getAudioCacheFileKeys(callId, audioUrl);
+    for (const key of keys) {
+      fs.writeFileSync(path.join(AUDIO_CACHE_DIR, `${key}.bin`), buffer);
+      fs.writeFileSync(
+        path.join(AUDIO_CACHE_DIR, `${key}.meta.json`),
+        JSON.stringify({ mimeType: mimeType || 'audio/mpeg', cachedAt: Date.now() })
+      );
+    }
+  } catch (err) {
+    console.warn('[AudioCache] Ошибка сохранения кеша аудио:', err);
+  }
+}
+
+function readAudioFromCache(callId?: string | null, audioUrl?: string | null): { buffer: Buffer; mimeType: string } | null {
+  try {
+    if (!fs.existsSync(AUDIO_CACHE_DIR)) return null;
+    const keys = getAudioCacheFileKeys(callId, audioUrl);
+    for (const key of keys) {
+      const binPath = path.join(AUDIO_CACHE_DIR, `${key}.bin`);
+      const metaPath = path.join(AUDIO_CACHE_DIR, `${key}.meta.json`);
+      if (fs.existsSync(binPath)) {
+        const buffer = fs.readFileSync(binPath);
+        if (buffer.length < 256) continue;
+        let mimeType = 'audio/mpeg';
+        if (fs.existsSync(metaPath)) {
+          try {
+            const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+            if (meta?.mimeType) mimeType = meta.mimeType;
+          } catch {}
+        }
+        return { buffer, mimeType };
+      }
+    }
+  } catch (err) {
+    console.warn('[AudioCache] Ошибка чтения кеша аудио:', err);
+  }
+  return null;
+}
+
+// Download remote audio recording from Megafon VATS and encode as base64
+async function downloadAudioAsBase64(url: string, token?: string, callId?: string): Promise<{ data: string; mimeType: string } | null> {
+  try {
+    const db = readDb();
+    const authCtx = getMegafonAuthContext(db);
+    const cleanPassedToken = token ? token.trim().replace(/^['"]|['"]$/g, '') : '';
+    const candidateTokens = Array.from(new Set([
+      cleanPassedToken,
+      authCtx.activeToken,
+      authCtx.restToken,
+      authCtx.jsonRpcToken
+    ].filter(Boolean)));
+
+    // Check local cache first if callId/url already downloaded
+    const cached = readAudioFromCache(callId, url);
+    if (cached) {
+      return { data: cached.buffer.toString('base64'), mimeType: cached.mimeType };
+    }
+
     // Extract call UUID/communication_id if present
     const reportMatch = url.match(/vats\.cp\.megafon\.ru\/reports\/mgf_calls\/([^?#/]+)/i) || 
                         url.match(/cp\.megafon\.ru\/reports\/mgf_calls\/([^?#/]+)/i) ||
@@ -1799,9 +1920,9 @@ async function downloadAudioAsBase64(url: string, token?: string): Promise<{ dat
     // List of candidate URLs to try in order
     const urlsToTry: string[] = [];
 
-    // 1. If we can resolve direct link via Megafon API, put it first
-    if (callUuid && cleanToken) {
-      const directLink = await findRealRecordingLinkFromApi(callUuid, cleanToken);
+    // 1. If we can resolve direct link via JSON-RPC Megafon API, put it first
+    if (callUuid && authCtx.jsonRpcToken && authCtx.apiVersion !== 'rest_wcgp') {
+      const directLink = await findRealRecordingLinkFromApi(callUuid, authCtx.jsonRpcToken);
       if (directLink) {
         urlsToTry.push(directLink);
       }
@@ -1812,66 +1933,80 @@ async function downloadAudioAsBase64(url: string, token?: string): Promise<{ dat
       urlsToTry.push(url);
     }
 
-    // 3. Add API endpoints for callUuid if available
-    if (callUuid) {
+    // 3. Add API endpoints for callUuid if available (JSON-RPC legacy fallback)
+    if (callUuid && authCtx.apiVersion !== 'rest_wcgp') {
       urlsToTry.push(`https://vats.cp.megafon.ru/api/v1.0/records?uuid=${callUuid}`);
       urlsToTry.push(`https://data-api.cp.megafon.ru/v2.0/records/${callUuid}`);
       urlsToTry.push(`https://simple-api.cp.megafon.ru/records/${callUuid}`);
     }
 
-    // De-duplicate candidate URLs
     const uniqueUrls = Array.from(new Set(urlsToTry));
 
-    for (let candidateUrl of uniqueUrls) {
-      if (!candidateUrl.startsWith('http')) {
-        const cleanPath = candidateUrl.startsWith('/') ? candidateUrl : `/${candidateUrl}`;
-        candidateUrl = `https://data-api.cp.megafon.ru${cleanPath}`;
-      }
+    for (const rawCandidate of uniqueUrls) {
+      const candidateUrl = resolveCandidateAudioUrl(rawCandidate, authCtx.apiVersion, authCtx.restDomain);
+      if (!candidateUrl) continue;
 
-      const headers: Record<string, string> = {
+      const attempts: Array<{ reqUrl: string; headers: Record<string, string> }> = [];
+      const baseHeaders: Record<string, string> = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       };
 
-      let requestUrl = candidateUrl;
-      if (cleanToken) {
-        headers['Authorization'] = cleanToken;
-        headers['X-Authorization'] = cleanToken;
-        headers['X-Auth-Token'] = cleanToken;
-        headers['X-Token'] = cleanToken;
-        
-        const separator = requestUrl.includes('?') ? '&' : '?';
-        requestUrl = `${requestUrl}${separator}token=${encodeURIComponent(cleanToken)}`;
+      if (isPresignedOrTokenizedUrl(candidateUrl) || candidateTokens.length === 0) {
+        attempts.push({ reqUrl: candidateUrl, headers: { ...baseHeaders } });
+      }
+      for (const tok of candidateTokens) {
+        attempts.push({
+          reqUrl: candidateUrl,
+          headers: {
+            ...baseHeaders,
+            'Authorization': tok,
+            'X-Authorization': tok,
+            'X-Auth-Token': tok,
+            'X-Token': tok,
+          }
+        });
+        if (!isPresignedOrTokenizedUrl(candidateUrl)) {
+          const sep = candidateUrl.includes('?') ? '&' : '?';
+          attempts.push({
+            reqUrl: `${candidateUrl}${sep}token=${encodeURIComponent(tok)}`,
+            headers: {
+              ...baseHeaders,
+              'Authorization': tok,
+              'X-Auth-Token': tok,
+              'X-Token': tok,
+            }
+          });
+        }
       }
 
-      try {
-        appendLog('info', 'megafon', `Запуск fetch для скачивания аудиозаписи с ${requestUrl}...`);
-        const response = await fetch(requestUrl, { headers });
-        if (!response.ok) {
-          appendLog('warning', 'megafon', `Не удалось скачать аудиозапись с ${requestUrl}: HTTP ${response.status} ${response.statusText}`);
-          continue;
-        }
-
-        const contentType = (response.headers.get('content-type') || '').toLowerCase();
-        const arrayBuffer = await response.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-
-        // Check if returned payload is HTML instead of actual audio media
-        if (contentType.includes('text/html') || buffer.length < 300) {
-          const sample = buffer.toString('utf-8', 0, 150).toLowerCase();
-          if (sample.includes('<html') || sample.includes('<!doctype') || sample.includes('<body')) {
-            appendLog('warning', 'megafon', `Ответ от ${requestUrl} является HTML-страницей, а не аудиофайлом. Пробуем следующий адрес...`);
+      for (const att of attempts) {
+        try {
+          appendLog('info', 'megafon', `Запуск fetch для скачивания аудиозаписи с ${att.reqUrl.replace(/token=[^&]+/gi, 'token=***')}...`);
+          const response = await fetch(att.reqUrl, { headers: att.headers });
+          if (!response.ok) {
+            appendLog('warning', 'megafon', `Не удалось скачать аудиозапись (HTTP ${response.status} ${response.statusText})`);
             continue;
           }
-        }
 
-        const mimeType = contentType.includes('audio') ? contentType : 'audio/mp3';
-        appendLog('success', 'megafon', `Аудиозапись успешно загружена (${buffer.length} байт).`);
-        return {
-          data: buffer.toString('base64'),
-          mimeType
-        };
-      } catch (fetchErr: any) {
-        appendLog('warning', 'megafon', `Ошибка сетевого запроса к ${requestUrl}: ${fetchErr.message || fetchErr}`);
+          const contentType = (response.headers.get('content-type') || '').toLowerCase();
+          const arrayBuffer = await response.arrayBuffer();
+          const buffer = Buffer.from(arrayBuffer);
+
+          if (!isAudioPayloadValid(contentType, buffer)) {
+            appendLog('warning', 'megafon', `Ответ не является аудиофайлом (${contentType || 'unknown'}, ${buffer.length} байт). Пробуем следующий вариант...`);
+            continue;
+          }
+
+          const mimeType = contentType.includes('audio') ? contentType.split(';')[0] : 'audio/mpeg';
+          saveAudioToCache(buffer, mimeType, callId, url);
+          appendLog('success', 'megafon', `Аудиозапись успешно загружена (${buffer.length} байт).`);
+          return {
+            data: buffer.toString('base64'),
+            mimeType
+          };
+        } catch (fetchErr: any) {
+          appendLog('warning', 'megafon', `Ошибка сетевого запроса при скачивании аудио: ${fetchErr.message || fetchErr}`);
+        }
       }
     }
   } catch (err: any) {
@@ -2437,7 +2572,7 @@ async function importCallRecord(extCall: any): Promise<boolean> {
     appendLog('info', 'megafon', `Импортирован короткий звонок ${extCall.call_id} (${extCall.duration_seconds} сек < 10 сек): разговор не состоялся, оценка не выставляется.`);
     return true;
   } else {
-    const megafonToken = db.config.megafon?.token;
+    const megafonToken = getMegafonAuthContext(db).activeToken;
 
     // Answered call with recording ready
     newCall = {
@@ -2497,7 +2632,7 @@ async function importCallRecord(extCall: any): Promise<boolean> {
 
         if (extCall.record_play_uri) {
           appendLog('info', 'megafon', `Скачивание аудиозаписи звонка ${extCall.call_id} для ИИ-анализа...`);
-          const audioData = await downloadAudioAsBase64(extCall.record_play_uri, megafonToken);
+          const audioData = await downloadAudioAsBase64(extCall.record_play_uri, megafonToken, extCall.call_id);
           if (audioData) {
             audioBase64 = audioData;
             appendLog('success', 'megafon', `Аудиозапись звонка ${extCall.call_id} успешно скачана.`);
@@ -2652,7 +2787,7 @@ setInterval(async () => {
               full_phone: row.client,
               client_name: lastSix ? `Клиент (${lastSix})` : 'Клиент',
               operator_name: row.account || 'Администратор',
-              record_play_uri: row.record && row.record.startsWith('http') ? row.record : undefined,
+              record_play_uri: normalizeWcgpRecordUrl(row.record, domain),
               status: isAnswered ? 'запись готова' : 'пропущен'
             });
           }
@@ -2781,79 +2916,167 @@ app.post('/api/s3/pull', async (req, res) => {
   }
 });
 
-// Proxy endpoint to securely fetch Megafon audio recordings with Authorization headers
+// Proxy endpoint to securely fetch Megafon audio recordings (both JSON-RPC v1 and REST WCGP v2) with HTTP Range streaming
 app.get('/api/megafon-ats/record-proxy', async (req, res) => {
   const audioUrl = req.query.url as string;
-  if (!audioUrl) {
-    return res.status(400).send('Missing url parameter');
+  const queryCallId = (req.query.callId as string) || '';
+  const forceDownload = req.query.download === '1' || req.query.download === 'true';
+  if (!audioUrl && !queryCallId) {
+    return res.status(400).send('Missing url or callId parameter');
   }
+
+  const sendAudioBuffer = (buffer: Buffer, mimeType: string, filenameBase: string) => {
+    const cleanFilename = /\.(mp3|ogg|wav|m4a|opus)$/i.test(filenameBase) ? filenameBase : `${filenameBase}.mp3`;
+    const disposition = forceDownload ? 'attachment' : 'inline';
+    res.setHeader('Content-Type', mimeType || 'audio/mpeg');
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.setHeader('Content-Disposition', `${disposition}; filename="${encodeURIComponent(cleanFilename)}"`);
+
+    const rangeHeader = req.headers.range;
+    const total = buffer.length;
+    if (rangeHeader && /^bytes=\d*-\d*$/i.test(rangeHeader.trim())) {
+      const match = rangeHeader.trim().match(/^bytes=(\d*)-(\d*)$/i);
+      const start = match && match[1] ? parseInt(match[1], 10) : 0;
+      const end = match && match[2] ? Math.min(parseInt(match[2], 10), total - 1) : total - 1;
+      if (start >= 0 && start <= end && start < total) {
+        const chunk = buffer.subarray(start, end + 1);
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+        res.setHeader('Content-Length', String(chunk.length));
+        return res.send(chunk);
+      }
+      return res.status(416).setHeader('Content-Range', `bytes */${total}`).end();
+    }
+
+    res.setHeader('Content-Length', String(total));
+    return res.send(buffer);
+  };
 
   try {
     const db = readDb();
-    const token = db.config.megafon?.token;
-    const cleanToken = token ? token.trim().replace(/^['"]|['"]$/g, '') : '';
+    const authCtx = getMegafonAuthContext(db);
 
-    let finalUrl = audioUrl;
-    let callId: string | null = null;
-    
-    // Auto-detect and transform Megafon report web links to API direct download links
-    const reportMatch = audioUrl.match(/vats\.cp\.megafon\.ru\/reports\/mgf_calls\/([^?#/]+)/i) || 
-                        audioUrl.match(/cp\.megafon\.ru\/reports\/mgf_calls\/([^?#/]+)/i) ||
-                        audioUrl.match(/\/reports\/mgf_calls\/([^?#/]+)/i) ||
-                        audioUrl.match(/uuid=([^?#/&]+)/i);
-                        
+    // Check if call is already in cache
+    const cached = readAudioFromCache(queryCallId, audioUrl);
+    if (cached) {
+      const fallbackName = queryCallId ? `megafon-call-${queryCallId}.mp3` : 'recording.mp3';
+      return sendAudioBuffer(cached.buffer, cached.mimeType, fallbackName);
+    }
+
+    let resolvedInputUrl = audioUrl || '';
+    if (!resolvedInputUrl && queryCallId) {
+      const existing = (db.calls || []).find((c: any) => c.call_id === queryCallId);
+      resolvedInputUrl = existing?.audio_url || '';
+    }
+    if (!resolvedInputUrl) {
+      return res.status(404).send('Recording URL not found');
+    }
+
+    let finalUrl = resolvedInputUrl;
+    let callId: string | null = queryCallId || null;
+
+    // Auto-detect and transform Megafon v1 report web links to API direct download links
+    const reportMatch = resolvedInputUrl.match(/vats\.cp\.megafon\.ru\/reports\/mgf_calls\/([^?#/]+)/i) ||
+                        resolvedInputUrl.match(/cp\.megafon\.ru\/reports\/mgf_calls\/([^?#/]+)/i) ||
+                        resolvedInputUrl.match(/\/reports\/mgf_calls\/([^?#/]+)/i) ||
+                        resolvedInputUrl.match(/uuid=([^?#/&]+)/i);
+
     if (reportMatch && reportMatch[1]) {
-      callId = reportMatch[1];
-      if (cleanToken) {
-        const directLink = await findRealRecordingLinkFromApi(callId, cleanToken);
+      callId = callId || reportMatch[1];
+      if (authCtx.jsonRpcToken) {
+        const directLink = await findRealRecordingLinkFromApi(reportMatch[1], authCtx.jsonRpcToken);
         if (directLink) {
           finalUrl = directLink;
         } else {
-          finalUrl = `https://vats.cp.megafon.ru/api/v1.0/records?uuid=${callId}`;
+          finalUrl = `https://vats.cp.megafon.ru/api/v1.0/records?uuid=${reportMatch[1]}`;
         }
       } else {
-        finalUrl = `https://vats.cp.megafon.ru/api/v1.0/records?uuid=${callId}`;
+        finalUrl = `https://vats.cp.megafon.ru/api/v1.0/records?uuid=${reportMatch[1]}`;
       }
-    } else if (!audioUrl.startsWith('http')) {
-      const cleanPath = audioUrl.startsWith('/') ? audioUrl : `/${audioUrl}`;
-      finalUrl = `https://data-api.cp.megafon.ru${cleanPath}`;
+    } else {
+      finalUrl = resolveCandidateAudioUrl(resolvedInputUrl, authCtx.apiVersion, authCtx.restDomain);
     }
 
-    const headers: Record<string, string> = {};
-    if (cleanToken) {
-      headers['Authorization'] = cleanToken;
-      headers['X-Authorization'] = cleanToken;
-      headers['X-Auth-Token'] = cleanToken;
-      headers['X-Token'] = cleanToken;
+    const tokensToTry = Array.from(new Set([
+      authCtx.activeToken,
+      authCtx.restToken,
+      authCtx.jsonRpcToken
+    ].filter(Boolean)));
 
-      // Pass token as query parameter as well for cdn compatibility
-      const separator = finalUrl.includes('?') ? '&' : '?';
-      finalUrl = `${finalUrl}${separator}token=${encodeURIComponent(cleanToken)}`;
+    const attempts: Array<{ url: string; headers: Record<string, string> }> = [];
+    const baseHeaders: Record<string, string> = {
+      'User-Agent': 'CallQA-Audio-Proxy/1.0'
+    };
+
+    if (isPresignedOrTokenizedUrl(finalUrl) || tokensToTry.length === 0) {
+      attempts.push({ url: finalUrl, headers: { ...baseHeaders } });
+    }
+    for (const tok of tokensToTry) {
+      attempts.push({
+        url: finalUrl,
+        headers: {
+          ...baseHeaders,
+          'Authorization': tok,
+          'X-Authorization': tok,
+          'X-Auth-Token': tok,
+          'X-Token': tok,
+        }
+      });
+      if (!isPresignedOrTokenizedUrl(finalUrl)) {
+        const sep = finalUrl.includes('?') ? '&' : '?';
+        attempts.push({
+          url: `${finalUrl}${sep}token=${encodeURIComponent(tok)}`,
+          headers: {
+            ...baseHeaders,
+            'Authorization': tok,
+            'X-Auth-Token': tok,
+            'X-Token': tok,
+          }
+        });
+      }
     }
 
-    appendLog('info', 'megafon', `Запрос проксирования аудиозаписи: ${finalUrl}`);
+    let lastStatus = 502;
+    let lastStatusText = 'Unable to fetch audio from ATS';
+    let lastHtmlError = false;
 
-    const response = await fetch(finalUrl, { headers });
-    if (!response.ok) {
-      appendLog('error', 'megafon', `Не удалось проксировать запись: ${response.status} ${response.statusText}`);
-      return res.status(response.status).send(`Failed to fetch audio: ${response.statusText}`);
+    for (const att of attempts) {
+      try {
+        appendLog('info', 'megafon', `Запрос проксирования аудиозаписи: ${att.url.replace(/token=[^&]+/gi, 'token=***')}`);
+        const response = await fetch(att.url, { headers: att.headers });
+        if (!response.ok) {
+          lastStatus = response.status;
+          lastStatusText = response.statusText;
+          continue;
+        }
+
+        const contentType = (response.headers.get('content-type') || 'audio/mpeg').toLowerCase();
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+
+        if (!isAudioPayloadValid(contentType, buffer)) {
+          if (contentType.includes('text/html')) lastHtmlError = true;
+          continue;
+        }
+
+        const cleanMime = contentType.includes('audio') ? contentType.split(';')[0] : 'audio/mpeg';
+        saveAudioToCache(buffer, cleanMime, callId, resolvedInputUrl);
+
+        const filename = callId ? `megafon-call-${callId}.mp3` : (path.basename(finalUrl.split('?')[0]) || 'recording.mp3');
+        return sendAudioBuffer(buffer, cleanMime, filename);
+      } catch (fetchErr: any) {
+        lastStatusText = fetchErr?.message || String(fetchErr);
+      }
     }
 
-    const contentType = response.headers.get('content-type') || 'audio/mpeg';
-    if (contentType.includes('text/html')) {
-      appendLog('error', 'megafon', `Ссылка на аудиозапись вернула HTML-страницу личного кабинета Мегафона. Требуется прямая ссылка.`);
-      return res.status(400).send('Ошибка: Ссылка ведет на веб-страницу личного кабинета Мегафона, которая требует ввода логина/пароля в браузере. Вы можете прослушать оригинал, перейдя по ссылке "Оригинал АТС" в деталях звонка.');
+    if (lastHtmlError) {
+      appendLog('error', 'megafon', `Ссылка на аудиозапись вернула HTML-страницу вместо аудиофайла.`);
+      return res.status(400).send('Ошибка: Ссылка ведет на веб-страницу личного кабинета Мегафона, а не на прямой аудиофайл.');
     }
 
-    res.setHeader('Content-Type', contentType);
-    
-    const filename = callId ? `megafon-call-${callId}.mp3` : (path.basename(finalUrl.split('?')[0]) || 'recording.mp3');
-    const cleanFilename = filename.endsWith('.mp3') ? filename : `${filename}.mp3`;
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(cleanFilename)}"`);
-
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    res.send(buffer);
+    appendLog('error', 'megafon', `Не удалось проксировать запись: ${lastStatus} ${lastStatusText}`);
+    return res.status(lastStatus).send(`Failed to fetch audio: ${lastStatusText}`);
   } catch (error: any) {
     console.error('Error proxying audio:', error);
     res.status(500).send(`Internal server error: ${error.message}`);
@@ -2878,8 +3101,7 @@ app.get('/api/megafon-ats/calls', async (req, res) => {
 
 // Helper to get effective Megafon token from db config or env
 function getEffectiveMegafonToken(db: any): string {
-  const token = db?.config?.megafon?.token || db?.config?.credentials?.megafonToken || process.env.MEGAFON_TOKEN || '';
-  return typeof token === 'string' ? token.trim().replace(/^['"]|['"]$/g, '') : '';
+  return getMegafonAuthContext(db).activeToken;
 }
 
 // Manual period load trigger
@@ -3015,7 +3237,7 @@ const handleAtsPoll = async (req: express.Request, res: express.Response) => {
           full_phone: row.client,
           client_name: lastSix ? `Клиент (${lastSix})` : 'Клиент',
           operator_name: row.account || 'Администратор',
-          record_play_uri: row.record && row.record.startsWith('http') ? row.record : undefined,
+          record_play_uri: normalizeWcgpRecordUrl(row.record, effectiveRestDomain),
           status: isAnswered ? 'запись готова' : 'пропущен'
         });
       }
@@ -3089,7 +3311,10 @@ async function handleMegafonWcgpWebhook(req: express.Request, res: express.Respo
     const groupRealName = String(body.groupRealName || query.groupRealName || '').trim();
     const ext = String(body.ext || query.ext || '').trim();
     const duration = Number(body.duration || query.duration || 0);
-    const link = String(body.link || query.link || '').trim();
+    const rawLink = String(
+      body.link || body.record || body.record_url || body.audio_url || body.url ||
+      query.link || query.record || query.record_url || query.audio_url || ''
+    ).trim();
     const start = String(body.start || query.start || '').trim();
 
     const isAnswered = status === 'Success' && duration > 0;
@@ -3110,7 +3335,7 @@ async function handleMegafonWcgpWebhook(req: express.Request, res: express.Respo
       full_phone: phone,
       client_name: clientName,
       operator_name: operatorName,
-      record_play_uri: link && link.startsWith('http') ? link : undefined,
+      record_play_uri: normalizeWcgpRecordUrl(rawLink, megafon?.restDomain),
       status: isAnswered ? 'запись готова' : 'пропущен'
     };
 
@@ -3335,7 +3560,7 @@ app.post('/api/megafon/rest/fetch-history', async (req, res) => {
         full_phone: row.client,
         client_name: lastSix ? `Клиент (${lastSix})` : 'Клиент',
         operator_name: row.account || 'Администратор',
-        record_play_uri: row.record && row.record.startsWith('http') ? row.record : undefined,
+        record_play_uri: normalizeWcgpRecordUrl(row.record, domain),
         status: isAnswered ? 'запись готова' : 'пропущен'
       };
       const imported = await importCallRecord(extCall);
@@ -4532,8 +4757,9 @@ async function performCallReanalysis(callId: string, modelOverride?: string): Pr
 
   try {
     let audioUrl = call.audio_url;
-    const megafonToken = db.config.megafon?.token;
-    const cleanToken = megafonToken ? megafonToken.trim().replace(/^['"]|['"]$/g, '') : '';
+    const authCtx = getMegafonAuthContext(db);
+    const megafonToken = authCtx.activeToken;
+    const cleanToken = authCtx.jsonRpcToken;
 
     let audioBase64: { data: string; mimeType: string } | null = null;
     let audioDownloadFailed = false;
@@ -4542,18 +4768,37 @@ async function performCallReanalysis(callId: string, modelOverride?: string): Pr
     const needsLinkLookup = !audioUrl || 
                             audioUrl.includes('/reports/mgf_calls/') || 
                             audioUrl.includes('uuid=');
-    if (callId.startsWith('megafon-real-') && cleanToken && needsLinkLookup) {
+    if (callId.startsWith('megafon-real-') && needsLinkLookup) {
       const commId = callId.replace('megafon-real-', '');
-      appendLog('info', 'megafon', `[Переанализ/Авто-Повтор] Поиск актуальной прямой ссылки для звонка ${commId}...`);
-      const directLink = await findRealRecordingLinkFromApi(commId, cleanToken);
-      if (directLink) {
-        audioUrl = directLink;
+      if (authCtx.apiVersion === 'rest_wcgp' && authCtx.restDomain && authCtx.restToken && call.timestamp) {
+        try {
+          const callDt = new Date(call.timestamp);
+          if (!isNaN(callDt.getTime())) {
+            appendLog('info', 'megafon', `[Переанализ/Авто-Повтор] Поиск записи в истории WCGP для звонка ${commId}...`);
+            const { calls: wcgpRows } = await getWcgpHistory(authCtx.restDomain, authCtx.restToken, {
+              start: new Date(callDt.getTime() - 2 * 3600 * 1000),
+              end: new Date(callDt.getTime() + 2 * 3600 * 1000)
+            });
+            const matched = wcgpRows.find(r => r.uid === commId || `megafon-real-${r.uid}` === callId);
+            if (matched?.record) {
+              audioUrl = matched.record;
+            }
+          }
+        } catch (wcgpErr: any) {
+          console.warn('[WCGP Reanalysis lookup error]', wcgpErr?.message || wcgpErr);
+        }
+      } else if (cleanToken) {
+        appendLog('info', 'megafon', `[Переанализ/Авто-Повтор] Поиск актуальной прямой ссылки для звонка ${commId}...`);
+        const directLink = await findRealRecordingLinkFromApi(commId, cleanToken);
+        if (directLink) {
+          audioUrl = directLink;
+        }
       }
     }
 
     if (audioUrl) {
       appendLog('info', 'megafon', `[Переанализ/Авто-Повтор] Скачивание аудиозаписи с ${audioUrl}...`);
-      audioBase64 = await downloadAudioAsBase64(audioUrl, megafonToken);
+      audioBase64 = await downloadAudioAsBase64(audioUrl, megafonToken, callId);
       if (!audioBase64) {
         audioDownloadFailed = true;
         appendLog('warning', 'megafon', `[Переанализ/Авто-Повтор] Не удалось скачать аудиозапись.`);
