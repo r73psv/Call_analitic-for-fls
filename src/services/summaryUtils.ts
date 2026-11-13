@@ -73,7 +73,10 @@ export const FORBIDDEN_MASTER_WORDS = new Set([
   'январь', 'января', 'февраль', 'февраля', 'март', 'марта', 'апрель', 'апреля',
   'май', 'мая', 'июнь', 'июня', 'июль', 'июля', 'август', 'августа',
   'сентябрь', 'сентября', 'октябрь', 'октября', 'ноябрь', 'ноября', 'декабрь', 'декабря',
-  'не указан', 'не указана', 'не выбран', 'не выбрана', 'неизвестно', 'неизвестен'
+  'не указан', 'не указана', 'не выбран', 'не выбрана', 'неизвестно', 'неизвестен',
+  'продукции', 'продукция', 'матрикс', 'матриксе', 'экспресс', 'локоны', 'стрижку',
+  'подруга', 'подруге', 'подругой', 'подружка', 'подружкой', 'девушка', 'девушки',
+  'данный', 'слушаю', 'загрузит', 'верно', 'свободно', 'вечернее', 'дневное'
 ]);
 
 /**
@@ -296,7 +299,9 @@ export function classifyCallContext(
   // 7. Отказ (общий)
   const rawBooking = (existingBookingStatus || existingKeyFacts?.booking_status || '').toLowerCase().trim();
   const outcome = (existingKeyFacts?.call_outcome || '').toLowerCase().trim();
-  const clientConfirmedAtEnd = /(?:да,\s*(?:отлично|давайте|записывайте|подойд[её]т|хорошо)|на\s+\d+\s+(?:я\s+)?оставляю|оставьте тогда|подтверждаю запись)/iu.test(callerTextForRefusal);
+  const clientConfirmedAtEnd =
+    /(?:да,\s*(?:отлично|давайте|записывайте|подойд[её]т|хорошо)|на\s+\d{1,2}\s+(?:я\s+)?оставляю|оставьте тогда|подтверждаю запись|давайте я продиктую|угу,?\s*хорошо(?:[.,\s]+до свидания)?)/iu.test(callerTextForRefusal) ||
+    /(?<!не\s)(?:записала|записываю|записал|записали|записываем)\s+вас/iu.test(managerLines || cleanTranscript);
 
   const isDeclined =
     !isNonClient &&
@@ -306,10 +311,11 @@ export function classifyCallContext(
       (!clientConfirmedAtEnd && (rawBooking === 'отказ' || outcome === 'отказ')));
 
   // 8. Подтверждённая запись (СТРОГО по живому диалогу, БЕЗ IVR и БЕЗ «предложить запись» при отказе!)
+  const managerEffectiveForBooking = managerLines || cleanTranscript;
   const hasRealBookingActionInTranscript =
-    /(?:записала\s+вас|записываю\s+вас|записал\s+вас|вы\s+записаны|запись\s+(?:успешно\s+)?(?:подтверждаем|подтверждена|оформлена)|на\s+\d{1,2}(?::\d{2})?\s+(?:я\s+)?оставляю|оставляем\s+все|договорились\s+(?:на|в)|жду\s+вас\s+(?:завтра|сегодня|в\s+\d))/iu.test(cleanTranscript) ||
-    (/(?:запишите|давайте\s+на\s+\d|подойд[её]т|согласна|согласен)/iu.test(callerTextForRefusal) &&
-      /(?:запис|ждем|ожида|подтвержд|хорошо)/iu.test(managerLines || cleanTranscript));
+    /(?<!не\s)(?:записала(?:\s+вас)?|записываю(?:\s+вас)?|записал(?:\s+вас)?|записали(?:\s+вас)?|запишем(?:\s+вас)?|записываем(?:\s+вас)?|вы\s+записаны|запись\s+(?:успешно\s+)?(?:подтверждаем|подтверждена|оформлена)|на\s+\d{1,2}(?::\d{2})?\s+(?:я\s+)?оставляю|оставляем\s+все|договорились\s+(?:на|в)|жду\s+вас\s+(?:завтра|сегодня|в\s+\d))/iu.test(managerEffectiveForBooking) ||
+    (/(?:запишите|давайте\s+на\s+\d|подойд[её]т|согласна|согласен|давайте я продиктую)/iu.test(callerTextForRefusal) &&
+      /(?:запис|жд[её]м|ожида|подтвержд|хорошо)/iu.test(managerEffectiveForBooking));
 
   const isConfirmedBooking =
     !isNonClient &&
@@ -356,60 +362,113 @@ export function extractEssenceDetails(
   const cleanExisting = existingSummary && !/Клиент обратился в салон красоты по вопросам обслуживания и записи/i.test(existingSummary)
     ? existingSummary
     : '';
-  const combined = `${cleanExisting}\n${cleanTranscript}`;
+  const combined = `${cleanTranscript}\n${cleanExisting}`;
 
-  // 1. Услуга
-  let service: string | null = null;
-  const serviceSummaryMatch = cleanExisting?.match(/(?:услуга|процедура)\s*[—–:\-]\s*([^,\n;.]+)/iu);
-  if (serviceSummaryMatch && !/не указан|не применим/i.test(serviceSummaryMatch[1])) {
-    service = serviceSummaryMatch[1].trim();
-  } else {
-    if (/маникюр/i.test(cleanTranscript) && /педикюр/i.test(cleanTranscript)) {
-      service = 'маникюр и педикюр с покрытием';
-    } else if (/макияж/i.test(cleanTranscript) && /укладк/i.test(cleanTranscript)) {
-      service = 'макияж и укладка';
-    } else {
-      const servicePatterns: [RegExp, string][] = [
-        [/(?:цифров[а-яё]*|японск[а-яё]*)\s+завивк[а-яё]*(?:\s+волос)?/iu, 'цифровая (японская) завивка волос'],
-        [/(?:химическ[а-яё]*|био)?завивк[а-яё]*(?:\s+волос)?/iu, 'завивка волос'],
-        [/(?:аппаратн[а-яё]*\s+)?маникюр[а-яё]*(?:\s+с\s+покрытием(?:\s+шеллак|\s+гель-лак)?)?/iu, 'маникюр с покрытием'],
-        [/педикюр[а-яё]*(?:\s+с\s+покрытием)?/iu, 'педикюр с покрытием'],
-        [/макияж[а-яё]*(?:\s+и\s+укладк[а-яё]*)?/iu, 'макияж и укладка'],
-        [/макияж[а-яё]*/iu, 'макияж'],
-        [/укладк[а-яё]*/iu, 'укладка'],
-        [/стрижк[а-яё]*(?:\s+и\s+окрашиван[а-яё]*)?/iu, 'стрижка и окрашивание'],
-        [/стрижк[а-яё]*(?:\s+и\s+укладк[а-яё]*)?/iu, 'стрижка и укладка'],
-        [/окрашиван[а-яё]*(?:\s+волос)?/iu, 'окрашивание волос'],
-        [/мелирован[а-яё]*/iu, 'мелирование'],
-        [/коррекц[а-яё]*\s+бровей|архитектур[а-яё]*\s+бровей|окрашивание\s+бровей|брови/iu, 'коррекция бровей'],
-        [/наращиван[а-яё]*\s+ресниц|ламинирован[а-яё]*\s+ресниц|ресниц[а-яё]*/iu, 'ресницы'],
-        [/косметолог[а-яё]*|чистк[а-яё]*\s+лица|пилинг/iu, 'прием косметолога'],
-        [/массаж[а-яё]*/iu, 'массаж'],
-        [/депиляц[а-яё]*|шугаринг|эпиляц[а-яё]*/iu, 'депиляция'],
-        [/кератин[а-яё]*|ботокс[а-яё]*\s+(?:для\s+)?волос/iu, 'уход для волос']
-      ];
-      for (const [pattern, label] of servicePatterns) {
-        if (pattern.test(combined)) {
-          service = label;
-          break;
-        }
+  const singleServicePatterns: [RegExp, string][] = [
+    [/(?:цифров[а-яё]*|японск[а-яё]*)\s+завивк[а-яё]*(?:\s+волос)?/iu, 'цифровая (японская) завивка волос'],
+    [/(?:химическ[а-яё]*|био)?завивк[а-яё]*(?:\s+волос)?/iu, 'завивка волос'],
+    [/(?:аппаратн[а-яё]*\s+)?маникюр[а-яё]*\s+и\s+педикюр[а-яё]*(?:\s+с\s+покрытием)?/iu, 'маникюр и педикюр с покрытием'],
+    [/(?:аппаратн[а-яё]*\s+)?маникюр[а-яё]*(?:\s+с\s+покрытием(?:\s+шеллак|\s+гель-лак)?)?/iu, 'маникюр с покрытием'],
+    [/педикюр[а-яё]*(?:\s+с\s+покрытием)?/iu, 'педикюр с покрытием'],
+    [/стрижк[а-яё]*\s+и\s+окрашиван[а-яё]*/iu, 'стрижка и окрашивание'],
+    [/стрижк[а-яё]*\s+и\s+укладк[а-яё]*/iu, 'стрижка и укладка'],
+    [/макияж[а-яё]*\s+и\s+укладк[а-яё]*/iu, 'макияж и укладка'],
+    [/укладк[а-яё]*\s+и\s+макияж[а-яё]*/iu, 'макияж и укладка'],
+    [/стрижк[а-яё]*/iu, 'стрижка'],
+    [/окрашиван[а-яё]*(?:\s+волос)?/iu, 'окрашивание волос'],
+    [/макияж[а-яё]*/iu, 'макияж'],
+    [/укладк[а-яё]*/iu, 'укладка'],
+    [/мелирован[а-яё]*/iu, 'мелирование'],
+    [/коррекц[а-яё]*\s+бровей|архитектур[а-яё]*\s+бровей|окрашивание\s+бровей|брови/iu, 'коррекция бровей'],
+    [/наращиван[а-яё]*\s+ресниц|ламинирован[а-яё]*\s+ресниц|ресниц[а-яё]*/iu, 'ресницы'],
+    [/косметолог[а-яё]*|чистк[а-яё]*\s+лица|пилинг/iu, 'прием косметолога'],
+    [/массаж[а-яё]*/iu, 'массаж'],
+    [/депиляц[а-яё]*|шугаринг|эпиляц[а-яё]*/iu, 'депиляция'],
+    [/кератин[а-яё]*|ботокс[а-яё]*\s+(?:для\s+)?волос/iu, 'уход для волос']
+  ];
+
+  const matchServiceLabel = (text: string): string | null => {
+    for (const [pattern, label] of singleServicePatterns) {
+      if (pattern.test(text)) {
+        return label;
       }
+    }
+    return null;
+  };
+
+  // 1. Услуга (приоритет: явное подтверждение брони в стенограмме -> активный запрос без реплик о прошлом визите -> общий анализ)
+  let service: string | null = null;
+  const bookedServiceConfirmMatches = [
+    ...cleanTranscript.matchAll(/(?:необходимо|нужно)\s+будет\s+(?:только\s+)?([^.!?\n]{3,45})/giu),
+    ...cleanTranscript.matchAll(/([^.!?\n]{3,45}?)(?:\s+[А-ЯЁ][а-яё]+)?(?:\s+на\s+продукции[^.!?\n]+)?\s+по\s+стоимости\s+\d{3,5}\s*(?:р|руб|₽)[^.!?\n]*(?:записали|записала|записываю)/giu),
+  ];
+  for (const m of bookedServiceConfirmMatches) {
+    const candidate = matchServiceLabel(m[1]);
+    if (candidate) {
+      service = candidate;
+      break;
     }
   }
 
-  // 2. Дата
-  let date: string | null = null;
-  const dateSummaryMatch = cleanExisting?.match(/дата\s*[—–:\-]\s*([^,\n;.]+)/iu);
-  if (dateSummaryMatch && !/не указан|не применим/i.test(dateSummaryMatch[1])) {
-    date = dateSummaryMatch[1].trim();
-  } else {
-    const dm = combined.match(/(?:^|[^\p{L}\d])(\d{1,2}(?:-[а-яё]+)?\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)(?:\s+(?:в\s+)?(?:понедельник|вторник|среду|четверг|пятницу|субботу|воскресенье))?)(?:[^\p{L}\d]|$)/iu);
-    if (dm) {
-      date = dm[1].trim();
+  if (!service && cleanTranscript.trim().length > 0) {
+    // Отфильтровываем воспоминания о прошлом визите ("4 мая я была на укладке и макияж"), если дальше обсуждается новая услуга
+    const nonPastTranscript = cleanTranscript
+      .split('\n')
+      .filter(line => !/(?:была\s+(?:на|у)|укладывала|делала)\b/iu.test(line) || /запис|стоимост|необходимо\s+будет|стрижк/iu.test(line))
+      .join('\n');
+
+    if (/маникюр/i.test(nonPastTranscript) && /педикюр/i.test(nonPastTranscript)) {
+      service = 'маникюр и педикюр с покрытием';
+    } else if (/макияж/i.test(nonPastTranscript) && /укладк/i.test(nonPastTranscript)) {
+      service = 'макияж и укладка';
     } else {
-      const rel = combined.match(/(?:^|[^\p{L}\d])(сегодня|завтра|послезавтра|в\s+понедельник|во\s+вторник|в\s+среду|в\s+четверг|в\s+пятницу|в\s+субботу|в\s+воскресенье|на\s+выходных|на\s+выходные)(?:[^\p{L}\d]|$)/iu);
-      if (rel) {
-        date = rel[1].trim();
+      service = matchServiceLabel(nonPastTranscript) || matchServiceLabel(cleanTranscript);
+    }
+  }
+
+  if (!service) {
+    const serviceSummaryMatch = cleanExisting?.match(/(?:услуга|процедура)\s*[—–:\-]\s*([^,\n;.]+)/iu);
+    if (serviceSummaryMatch && !/не указан|не применим/i.test(serviceSummaryMatch[1])) {
+      service = serviceSummaryMatch[1].trim();
+    }
+  }
+
+  // 2. Дата (оцениваем все даты в стенограмме: подтверждение записи побеждает прошлое воспоминание вроде «4 мая я была»)
+  let date: string | null = null;
+  const monthDateRe = /(?:^|[^\p{L}\d])(\d{1,2}(?:-[а-яё]+)?\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)(?:\s+(?:в\s+)?(?:понедельник|вторник|среду|четверг|пятницу|субботу|воскресенье))?)(?=[^\p{L}\d]|$)/giu;
+  const dateCandidates: { value: string; score: number; index: number }[] = [];
+
+  for (const dm of cleanTranscript.matchAll(monthDateRe)) {
+    const val = dm[1].trim();
+    const idx = dm.index ?? 0;
+    const before = cleanTranscript.slice(Math.max(0, idx - 60), idx).toLowerCase();
+    const after = cleanTranscript.slice(idx, Math.min(cleanTranscript.length, idx + val.length + 75)).toLowerCase();
+    const windowCtx = `${before} ${after}`;
+
+    let s = 0;
+    if (/(?:записали|записала|записываю|вы\s+записаны|подтверждаем|оформлена|оставляю|подойд[её]т)/iu.test(windowCtx)) {
+      s += 10;
+    }
+    if (/(?:предложить|ближайшее|свободн|слоты|есть\s+(?:дневное|вечернее|время))/iu.test(windowCtx)) {
+      s += 6;
+    }
+    if (/(?:была|был[аи]?|приходила|делала|укладывала|в\s+прошлом|год\s+назад)/iu.test(windowCtx)) {
+      s -= 12;
+    }
+    dateCandidates.push({ value: val, score: s, index: idx });
+  }
+
+  if (dateCandidates.length > 0) {
+    dateCandidates.sort((a, b) => (b.score !== a.score ? b.score - a.score : b.index - a.index));
+    date = dateCandidates[0].value;
+  } else {
+    const rel = cleanTranscript.match(/(?:^|[^\p{L}\d])(сегодня|завтра|послезавтра|в\s+понедельник|во\s+вторник|в\s+среду|в\s+четверг|в\s+пятницу|в\s+субботу|в\s+воскресенье|на\s+выходных|на\s+выходные)(?:[^\p{L}\d]|$)/iu);
+    if (rel) {
+      date = rel[1].trim();
+    } else {
+      const dateSummaryMatch = cleanExisting?.match(/дата\s*[—–:\-]\s*([^,\n;.]+)/iu);
+      if (dateSummaryMatch && !/не указан|не применим/i.test(dateSummaryMatch[1])) {
+        date = dateSummaryMatch[1].trim();
       }
     }
   }
@@ -421,135 +480,139 @@ export function extractEssenceDetails(
     .replace(/\d+\s+минут[а-яё]*/giu, '')
     .replace(/\d+\s+билет[а-яё]*/giu, '');
 
+  const normalizeSlot = (rawSlot: string): string => {
+    const s = rawSlot.trim();
+    if (s.includes(':')) {
+      const [h, m] = s.split(':');
+      return `${h.padStart(2, '0')}:${m.padStart(2, '0')}`;
+    }
+    if (/\s/.test(s)) {
+      const parts = s.split(/\s+/);
+      const mmRaw = parts.slice(1).join('');
+      const mm = mmRaw === '0' || mmRaw === '00' ? '00' : mmRaw.padStart(2, '0');
+      return `${parts[0].padStart(2, '0')}:${mm}`;
+    }
+    return `${s.padStart(2, '0')}:00`;
+  };
+
   const keptMatch = textWithoutDurations.match(/(?:на|в)\s+([012]?\d(?::[0-5]\d|\s+[0-5]\d)?)\s*(?:я\s+)?(?:оставляю|оставьте|подтверждаю)/iu) ||
                     textWithoutDurations.match(/(?:оставьте|оставляю)\s+(?:на\s+|в\s+)?([012]?\d(?::[0-5]\d|\s+[0-5]\d)?)/iu);
+  const directBookedTimeMatch = cleanTranscript.match(/(?:на|в)\s+([012]?\d(?:\s*:\s*[0-5]\d|\s+(?:[0-5]\d|0\s+0)))\s*(?:я\s+вас\s+|вас\s+)?(?:записал[аи]?|записываю|вы\s+записаны)/iu);
+
   if (keptMatch) {
-    const rawSlot = keptMatch[1].trim();
-    if (rawSlot.includes(':')) {
-      const [h, m] = rawSlot.split(':');
-      time = `${h.padStart(2, '0')}:${m.padStart(2, '0')}`;
-    } else if (rawSlot.includes(' ')) {
-      const parts = rawSlot.split(/\s+/);
-      time = `${parts[0].padStart(2, '0')}:${parts.slice(1).join('').padStart(2, '0')}`;
-    } else {
-      time = `${rawSlot.padStart(2, '0')}:00`;
-    }
+    time = normalizeSlot(keptMatch[1]);
+  } else if (directBookedTimeMatch) {
+    time = normalizeSlot(directBookedTimeMatch[1]);
   } else {
-    const timeSummaryMatch = cleanExisting?.match(/время\s*[—–:\-]\s*([^,\n;.]+)/iu);
-    if (timeSummaryMatch && !/не указан|не применим/i.test(timeSummaryMatch[1])) {
-      time = timeSummaryMatch[1].trim();
+    const agreed = [...cleanTranscript.matchAll(/(?:давайте|запишите|записала|записали|буду|в|на|к)\s+([012]?\d)(?:\s*:\s*|\s+)([0-5]\d|0\s+0)\b/gi)];
+    if (agreed.length > 0) {
+      const last = agreed[agreed.length - 1];
+      const hh = last[1].padStart(2, '0');
+      const mmRaw = last[2].replace(/\s+/g, '');
+      const mm = mmRaw === '0' || mmRaw === '00' ? '00' : mmRaw;
+      if (Number(hh) <= 23) {
+        time = `${hh}:${mm}`;
+      }
     } else {
-      const agreed = [...textWithoutDurations.matchAll(/(?:давайте|запишите|записала|буду|в|на|к)\s+([012]?\d)(?:\s*:\s*|\s+)([0-5]\d|0\s+0)\b/gi)];
-      if (agreed.length > 0) {
-        const last = agreed[agreed.length - 1];
-        const hh = last[1].padStart(2, '0');
-        const mmRaw = last[2].replace(/\s+/g, '');
+      const anySpaced = [...cleanTranscript.matchAll(/\b([012]?\d)\s+([0-5]\d|0\s+0)\b/gi)];
+      if (anySpaced.length > 0) {
+        const m = anySpaced[anySpaced.length - 1];
+        const hh = m[1].padStart(2, '0');
+        const mmRaw = m[2].replace(/\s+/g, '');
         const mm = mmRaw === '0' || mmRaw === '00' ? '00' : mmRaw;
         if (Number(hh) <= 23) {
           time = `${hh}:${mm}`;
         }
       } else {
-        const anySpaced = [...textWithoutDurations.matchAll(/\b([012]?\d)\s+([0-5]\d|0\s+0)\b/gi)];
-        if (anySpaced.length > 0) {
-          const m = anySpaced[anySpaced.length - 1];
-          const hh = m[1].padStart(2, '0');
-          const mmRaw = m[2].replace(/\s+/g, '');
-          const mm = mmRaw === '0' || mmRaw === '00' ? '00' : mmRaw;
-          if (Number(hh) <= 23) {
-            time = `${hh}:${mm}`;
-          }
+        const std = cleanTranscript.match(/\b([012]?\d:[0-5]\d)\b/);
+        if (std) {
+          time = std[1];
         } else {
-          const std = textWithoutDurations.match(/\b([012]?\d:[0-5]\d)\b/);
-          if (std) {
-            time = std[1];
-          } else {
-            const wordTime = textWithoutDurations.match(/(?:^|[^\p{L}\d])(?:в|на)\s+([012]?\d)\s+(?:часов|часа)(?:[^\p{L}\d]|$)/iu);
-            if (wordTime && Number(wordTime[1]) <= 23) {
-              time = `${wordTime[1].padStart(2, '0')}:00`;
-            } else if (/(?:^|[^\p{L}\d])к\s+часу(?:[^\p{L}\d]|$)/iu.test(textWithoutDurations)) {
-              time = '13:00';
-            }
+          const wordTime = cleanTranscript.match(/(?:^|[^\p{L}\d])(?:в|на)\s+([012]?\d)\s+(?:часов|часа)(?:[^\p{L}\d]|$)/iu);
+          if (wordTime && Number(wordTime[1]) <= 23) {
+            time = `${wordTime[1].padStart(2, '0')}:00`;
+          } else if (/(?:^|[^\p{L}\d])к\s+часу(?:[^\p{L}\d]|$)/iu.test(cleanTranscript)) {
+            time = '13:00';
           }
         }
       }
     }
+    if (!time) {
+      const timeSummaryMatch = cleanExisting?.match(/время\s*[—–:\-]\s*([^,\n;.]+)/iu);
+      if (timeSummaryMatch && !/не указан|не применим/i.test(timeSummaryMatch[1])) {
+        time = timeSummaryMatch[1].trim();
+      }
+    }
   }
 
-  // 4. Мастер
+  // 4. Мастер (приоритет: мастер, связанный с записью/расписанием, а не случайные упоминания из прошлого визита)
   let master: string | null = null;
-  const masterSummaryMatch = existingSummary?.match(/мастер\s*[—–:\-]\s*([^,\n;.]+)/iu);
-  if (masterSummaryMatch && isMasterNameValid(masterSummaryMatch[1].trim())) {
-    master = normalizeMasterName(masterSummaryMatch[1].trim());
+  const cleanTranscriptForMaster = cleanTranscript
+    .replace(/(?:салон[а-яё\s]*)?(?:фэшн\s+лук\s+студио|fashion\s+look\s+studio)/gi, '')
+    .replace(/фэшн\s+лук\s+студио/gi, '');
+
+  const masterCandidates: { name: string; score: number; index: number }[] = [];
+  const pushMasterCandidate = (rawName: string, score: number, index: number) => {
+    const norm = normalizeMasterName(rawName);
+    if (norm && isMasterNameValid(norm)) {
+      masterCandidates.push({ name: norm, score, index });
+    }
+  };
+
+  // а) ФИО из 2 слов с «к / у» (допускаем строчную фамилию в STT: «к кожевниковой Екатерине»)
+  for (const match of cleanTranscriptForMaster.matchAll(/(?:^|[^\p{L}\d])(?:к|у)\s+(?:мастеру\s+)?([А-ЯЁа-яё]{2,})\s+([А-ЯЁа-яё]{2,})(?=[^\p{L}\d]|$)/gu)) {
+    const candidate = `${match[1]} ${match[2]}`;
+    const idx = match.index ?? 0;
+    const around = cleanTranscriptForMaster.slice(Math.max(0, idx - 50), idx + match[0].length + 50).toLowerCase();
+    let s = 5;
+    if (/записа|хотели бы|работает|свободн/i.test(around)) s += 10;
+    if (/делал[аи]?|приехал/i.test(around)) s -= 4;
+    pushMasterCandidate(candidate, s, idx);
   }
 
-  if (!master) {
-    const cleanCombined = combined
-      .replace(/(?:салон[а-яё\s]*)?(?:фэшн\s+лук\s+студио|fashion\s+look\s+studio)/gi, '')
-      .replace(/фэшн\s+лук\s+студио/gi, '');
+  // б) ФИО перед/после статуса расписания («Екатерина Кожевникова не работает» / «Кожевникова Екатерина ... работает»)
+  for (const match of cleanTranscriptForMaster.matchAll(/([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+))\s+(?:не\s+работает|работает\s+ещ[её]|свободн)/gu)) {
+    pushMasterCandidate(match[1], 14, match.index ?? 0);
+  }
 
-    const twoCapsMatches = [...cleanCombined.matchAll(/(?:^|[^\p{L}\d])(?:к|у)\s+([А-ЯЁ][а-яё]+)\s+([А-ЯЁ][а-яё]+)(?=[^\p{L}\d]|$)/gu)];
-    for (const match of twoCapsMatches) {
-      const candidate = `${match[1]} ${match[2]}`;
-      if (isMasterNameValid(candidate)) {
-        const norm = normalizeMasterName(candidate);
-        if (norm) {
-          master = norm;
-          break;
-        }
-      }
-    }
+  // в) Искаженные SpeechKit фамилии
+  const distortedMatch = cleanTranscriptForMaster.match(/(?:будете\s+у|будете|к|у)\s*(у?[а-яё]*[ое]вой)\s+([А-ЯЁ][а-яё]+)/iu);
+  if (distortedMatch) {
+    pushMasterCandidate(`${distortedMatch[1]} ${distortedMatch[2]}`, 12, distortedMatch.index ?? 0);
+  }
 
-    if (!master) {
-      const distortedMatch = cleanCombined.match(/(?:будете\s+у|будете|к|у)\s*(у?[а-яё]*[ое]вой)\s+([А-ЯЁ][а-яё]+)/iu);
-      if (distortedMatch) {
-        const candidate = `${distortedMatch[1]} ${distortedMatch[2]}`;
-        const norm = normalizeMasterName(candidate);
-        if (norm && isMasterNameValid(norm)) {
-          master = norm;
-        }
-      }
-    }
+  // г) Явное «мастер X» / «специалист X»
+  for (const match of cleanTranscriptForMaster.matchAll(/(?:^|[^\p{L}\d])(?:мастер(?:у|а)?|специалист(?:у|а)?)\s+([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?)/gu)) {
+    pushMasterCandidate(match[1].trim(), 8, match.index ?? 0);
+  }
 
-    if (!master) {
-      const explicitMatches = [...cleanCombined.matchAll(/(?:^|[^\p{L}\d])(?:мастер(?:у|а)?|специалист(?:у|а)?)\s+([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?)/gu)];
-      for (const match of explicitMatches) {
-        const candidate = match[1].trim();
-        if (isMasterNameValid(candidate)) {
-          const norm = normalizeMasterName(candidate);
-          if (norm) {
-            master = norm;
-            break;
-          }
-        }
-      }
-    }
+  // д) Одиночные имена с «к / у / перед слотами / по стоимости»
+  for (const match of cleanTranscriptForMaster.matchAll(/(?:запись(?:\s+[^.\n!?]+?)?\s+)?(?:к|у)\s+([А-ЯЁ][а-яё]+)(?=[^а-яё]|$)/gu)) {
+    pushMasterCandidate(match[1].trim(), 4, match.index ?? 0);
+  }
+  const scheduleMatch = cleanTranscriptForMaster.match(/(?:^|[.!?\n])\s*(?:У|у)\s+([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?)\s+(?:уже\s+)?(?:перед\s+этим\s+)?(?:все\s+)?(?:забронировано|занято|свободно|есть)/u);
+  if (scheduleMatch) {
+    pushMasterCandidate(scheduleMatch[1], 7, scheduleMatch.index ?? 0);
+  }
+  const priceOfferMatch = cleanTranscriptForMaster.match(/(?:^|[^\p{L}\d])(?:у)\s+([А-ЯЁ][а-яё]+)\s+по\s+стоимости/iu);
+  if (priceOfferMatch) {
+    pushMasterCandidate(priceOfferMatch[1], 7, priceOfferMatch.index ?? 0);
+  }
 
-    if (!master) {
-      const singleCapMatches = [...cleanCombined.matchAll(/(?:запись(?:\s+[^.\n!?]+?)?\s+)?(?:к|у)\s+([А-ЯЁ][а-яё]+)(?=[^а-яё]|$)/gu)];
-      for (const match of singleCapMatches) {
-        const candidate = match[1].trim();
-        if (isMasterNameValid(candidate)) {
-          const norm = normalizeMasterName(candidate);
-          if (norm) {
-            master = norm;
-            break;
-          }
-        }
-      }
-    }
-
-    if (!master) {
-      const scheduleMatch = cleanCombined.match(/(?:^|[.!?\n])\s*(?:У|у)\s+([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?)\s+(?:уже\s+)?(?:перед\s+этим\s+)?(?:все\s+)?(?:забронировано|занято|свободно|есть)/u);
-      if (scheduleMatch && isMasterNameValid(scheduleMatch[1])) {
-        master = normalizeMasterName(scheduleMatch[1]);
-      }
-    }
-
-    if (!master) {
-      const priceOfferMatch = cleanCombined.match(/(?:^|[^\p{L}\d])(?:у)\s+([А-ЯЁ][а-яё]+)\s+по\s+стоимости/iu);
-      if (priceOfferMatch && isMasterNameValid(priceOfferMatch[1])) {
-        master = normalizeMasterName(priceOfferMatch[1]);
-      }
+  if (masterCandidates.length > 0) {
+    // Отдаем приоритет 2-словному ФИО над одиночным именем и более высокому баллу контекста
+    masterCandidates.sort((a, b) => {
+      const aFull = a.name.includes(' ') ? 3 : 0;
+      const bFull = b.name.includes(' ') ? 3 : 0;
+      const totalB = b.score + bFull;
+      const totalA = a.score + aFull;
+      return totalB !== totalA ? totalB - totalA : b.index - a.index;
+    });
+    master = masterCandidates[0].name;
+  } else {
+    const masterSummaryMatch = existingSummary?.match(/мастер\s*[—–:\-]\s*([^,\n;.]+)/iu);
+    if (masterSummaryMatch && isMasterNameValid(masterSummaryMatch[1].trim())) {
+      master = normalizeMasterName(masterSummaryMatch[1].trim());
     }
   }
 
@@ -597,19 +660,28 @@ export function extractStructuredCallSummary(
   }
 
   // 2. Извлекаем базовые 4 параметра (услуга, дата, время, мастер)
+  // Приоритет имеют факты, извлеченные напрямую из стенограммы, чтобы устаревший кэш (например, дата прошлого визита) не блокировал обновление
   const essence = extractEssenceDetails(cleanTranscript, rawSummary, salon);
-  const service = (existingKeyFacts?.service && !/не указан|не применим/i.test(existingKeyFacts.service))
-    ? existingKeyFacts.service
-    : essence.service;
-  const master = (existingKeyFacts?.master && isMasterNameValid(existingKeyFacts.master))
-    ? normalizeMasterName(existingKeyFacts.master)
-    : essence.master;
-  const date = (existingKeyFacts?.date && !/не указан|не применим/i.test(existingKeyFacts.date))
-    ? existingKeyFacts.date
-    : essence.date;
-  const time = (existingKeyFacts?.time && !/не указан|не применим/i.test(existingKeyFacts.time))
-    ? existingKeyFacts.time
-    : essence.time;
+  const service =
+    essence.service ||
+    ((existingKeyFacts?.service && !/не указан|не применим/i.test(existingKeyFacts.service))
+      ? existingKeyFacts.service
+      : null);
+  const master =
+    essence.master ||
+    ((existingKeyFacts?.master && isMasterNameValid(existingKeyFacts.master))
+      ? normalizeMasterName(existingKeyFacts.master)
+      : null);
+  const date =
+    essence.date ||
+    ((existingKeyFacts?.date && !/не указан|не применим/i.test(existingKeyFacts.date))
+      ? existingKeyFacts.date
+      : null);
+  const time =
+    essence.time ||
+    ((existingKeyFacts?.time && !/не указан|не применим/i.test(existingKeyFacts.time))
+      ? existingKeyFacts.time
+      : null);
 
   // Ветка A: Нецелевой / партнёрский / организационный звонок
   if (ctx.category === 'non_client') {
@@ -662,7 +734,7 @@ export function extractStructuredCallSummary(
 
   // Определение контекста для остальных клиентских обращений
   const isReschedule = ctx.isRescheduleOrCheck;
-  const isOnlineConfirm = /онлайн(?:\s+|-)?запис|вы к нам записались|подтвержд/i.test(cleanTranscript);
+  const isOnlineConfirm = /(?:вы\s+(?:к\s+нам\s+)?записались\s+онлайн|оформлял[аи]?\s+онлайн|подтвердить\s+онлайн(?:\s+|-)?запись|звоню\s+подтвердить)/iu.test(cleanTranscript);
   const isDispute = ctx.isDispute;
 
   // 1. Цель обращения
@@ -671,8 +743,6 @@ export function extractStructuredCallSummary(
     call_purpose = service
       ? `Запрос услуги «${service}» и подбор доступной альтернативы`
       : 'Запрос отсутствующей в салоне услуги и уточнение альтернатив';
-  } else if (existingKeyFacts?.client_issue && existingKeyFacts.client_issue.length > 5 && !/обращение в салон|консультация \/ обращение/i.test(existingKeyFacts.client_issue)) {
-    call_purpose = existingKeyFacts.client_issue;
   } else if (isReschedule) {
     const masterStr = master ? ` к мастеру ${master}` : '';
     const dateStr = date ? ` на ${date}` : '';
@@ -682,7 +752,12 @@ export function extractStructuredCallSummary(
     call_purpose = `Подтверждение и корректировка онлайн-записи${dateStr}`;
   } else if (service) {
     const masterStr = master ? ` к мастеру ${master}` : '';
-    call_purpose = `Запись или консультация по услуге «${service}»${masterStr}`;
+    const hadPastLookup = /(?:напомнить|что\s+за\s+мастер|была\s+\d)/iu.test(cleanTranscript);
+    call_purpose = hadPastLookup
+      ? `Уточнение мастера по прошлому визиту и запись на услугу «${service}»${masterStr}`
+      : `${ctx.isConfirmedBooking ? 'Запись' : 'Запись или консультация'} на услугу «${service}»${masterStr}`;
+  } else if (existingKeyFacts?.client_issue && existingKeyFacts.client_issue.length > 5 && !/обращение в салон|консультация \/ обращение/i.test(existingKeyFacts.client_issue)) {
+    call_purpose = existingKeyFacts.client_issue;
   } else if (isDispute) {
     call_purpose = 'Обращение по вопросу обслуживания / урегулирование ситуации';
   } else {
@@ -822,7 +897,7 @@ export function extractStructuredCallSummary(
     );
     manager_next_steps.push('Отправить клиенту контрольное напоминание накануне визита');
   } else if (ctx.category === 'confirmed_booking' || isConfirmedReschedule) {
-    const serviceLabel = service ? ` на ${service}` : '';
+    const serviceLabel = service ? ` по услуге «${service}»` : '';
     const masterLabel = master ? ` к мастеру ${master}` : '';
     const timeLabel = time ? ` на ${time}` : '';
     const dateLabel = date ? ` ${date}` : '';

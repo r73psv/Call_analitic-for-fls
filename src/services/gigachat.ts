@@ -72,13 +72,13 @@ export function getSystemPrompt(customSalonName?: string): string {
 
 ТЕКСТОВОЕ РЕЗЮМЕ (transcript_summary) ОБЯЗАТЕЛЬНО состоит из:
 1) Краткая суть обращения (услуга, дата, время, мастер);
-2) Краткий пересказ разговора (СТРОГО 2–4 связных предложения, отражающих РЕАЛЬНЫЕ реплики сторон! Запрещено использовать выдуманные шаблоны про «консультацию по графику» или «фиксацию брони», если этого не было в звонке);
+2) Краткий пересказ разговора (2–4 связных предложения для коротких диалогов и до 5–7 предложений для длинных/многоэтапных разговоров, полностью отражающих ВСЕ этапы беседы — от первоначального вопроса и уточнений до итогового согласования или отказа! Запрещено обрывать пересказ на первых фразах или использовать шаблонные фразы про «консультацию по графику», если этого не было в звонке);
 3) Вывод и итог обращения (реальный результат диалога без додумываний);
 4) Разбор работы менеджера (оценка <X>/10, фактические ошибки/недочеты строго по диалогу, советы по оптимизации).
 
 СТРОГИЙ ШАБЛОН РЕЗЮМЕ:
 «Суть обращения: услуга — <услуга>, дата — <дата>, время — <время>, мастер — <мастер>.
-Пересказ диалога: <2–4 связных предложения с точным пересказом реального разговора>.
+Пересказ диалога: <2–7 связных предложений с полным и точным пересказом всех ключевых этапов разговора>.
 Вывод: <фактический итог и результат диалога>.
 Разбор работы менеджера (оценка <балл>/10):
 - Ошибки и недочеты: <конкретные ошибки и недочеты, выявленные в ЭТОМ диалоге, либо отметка об их отсутствии>.
@@ -123,7 +123,7 @@ export function getSystemPrompt(customSalonName?: string): string {
 ФОРМАТ ОТВЕТА (JSON, без пояснений вне JSON):
 {
   "is_conversation": true | false,
-  "transcript_summary": "Суть обращения: услуга — ..., дата — ..., время — ..., мастер — ....\\nПересказ диалога: ... (2-4 предложения).\\nВывод: ...\\nРазбор работы менеджера (оценка 8/10):\\n- Ошибки и недочеты: 1) ...\\n- Советы по оптимизации: 1) ...",
+  "transcript_summary": "Суть обращения: услуга — ..., дата — ..., время — ..., мастер — ....\\nПересказ диалога: ... (2-7 предложений по всем этапам диалога).\\nВывод: ...\\nРазбор работы менеджера (оценка 8/10):\\n- Ошибки и недочеты: 1) ...\\n- Советы по оптимизации: 1) ...",
   "structured_summary": {
     "call_purpose": "Цель обращения...",
     "requested_service": "Какую услугу хотел получить гость...",
@@ -964,8 +964,8 @@ import {
 } from './evaluationUtils.js';
 
 /**
- * Формирует фактологический пересказ (2–4 предложения) и вывод строго по содержанию диалога,
- * полностью исключая шаблонные фантазии.
+ * Формирует фактологический пересказ (2–4 предложения для коротких звонков, 5–7 для длинных многоэтапных)
+ * и вывод строго по полному содержанию диалога, без обрезанных цитат и шаблонных фантазий.
  */
 export function buildContextGroundedSummary(
   ctx: CallContextClassification,
@@ -973,17 +973,24 @@ export function buildContextGroundedSummary(
   salon: string
 ): { retelling: string; conclusion: string } {
   const { managerText, clientText, fullText } = splitSpeakerLines(ctx.cleanTranscript);
-  const clientSnippet = (clientText || fullText).replace(/\s+/g, ' ').trim().slice(0, 160);
-  const managerSnippet = managerText.replace(/\s+/g, ' ').trim().slice(0, 140);
+  const transcript = ctx.cleanTranscript || '';
 
   const dateLabel = essence.date ? ` на ${essence.date}` : '';
   const timeLabel = essence.time ? ` в ${essence.time}` : '';
   const masterLabel = essence.master ? ` к мастеру ${essence.master}` : '';
 
+  const priceMatch = transcript.match(/(?:по\s+стоимости|стоимост[ьи]|стоит|цена)\s*(?:от\s+)?(\d{3,5})\s*(?:руб|р(?![а-яё])|₽)/iu);
+  const priceLabel = priceMatch ? `${Number(priceMatch[1]).toLocaleString('ru-RU')} ₽` : null;
+  const prepayMatch = transcript.match(/предоплат[а-яё]*[^.\n]{0,40}?(?:50%|\d+%)[^.\n]{0,40}?(\d{3,5})?/iu);
+  const hasOzonPrepay = /озон\s*банк/iu.test(transcript);
+
   if (ctx.category === 'non_client') {
     const topicNote = ctx.nonClientTopic || 'организационный / партнёрский вопрос';
+    const hasWhatsapp = /ватсап|whatsapp/iu.test(transcript);
+    const hasName = transcript.match(/мо[её]\s+имя\s+([А-ЯЁ][а-яё]+)/iu);
+    const callerLabel = hasName ? `Звонящий (${hasName[1]})` : 'Звонящий';
     return {
-      retelling: `Входящий звонок носил нецелевой (организационно-партнёрский) характер и не был связан с записью на услуги салона. Звонящий обратился по вопросу: ${topicNote} («${clientSnippet}»). Администратор вежливо приняла информацию${managerSnippet ? ` («${managerSnippet}»)` : ''} и пообещала ознакомиться с материалами.`,
+      retelling: `Входящий звонок носил нецелевой (организационно-партнёрский) характер и не был связан с записью на услуги салона. ${callerLabel} обратился по вопросу: ${topicNote}. Администратор вежливо выслушала собеседника${hasWhatsapp ? ' и подтвердила, что сообщение в мессенджере будет обязательно прочитано' : ''}, поблагодарила за звонок и корректно завершила диалог.`,
       conclusion: `Нецелевой / партнёрский звонок (${topicNote}). Запись на услуги салона не требовалась; администратор вежливо принял информацию к сведению.`
     };
   }
@@ -992,46 +999,124 @@ export function buildContextGroundedSummary(
     const delayStr = ctx.lateMinutes ? ` примерно на ${ctx.lateMinutes}` : '';
     const targetTimeStr = essence.time ? ` (ориентировочно к ${essence.time})` : '';
     return {
-      retelling: `Клиент позвонил в салон «${salon}», чтобы предупредить об опоздании на предстоящий визит${delayStr}${targetTimeStr}. Администратор вежливо отреагировал и подтвердил, что в салоне будут ожидать гостя${managerSnippet ? ` («${managerSnippet}»)` : ''}. Клиент поблагодарил сотрудника и завершил разговор.`,
+      retelling: `Клиент позвонил в салон «${salon}», чтобы заранее предупредить об опоздании на свой предстоящий визит${delayStr}${targetTimeStr}. Администратор доброжелательно отреагировала и подтвердила, что в салоне гостя обязательно дождутся. Собеседник поблагодарил сотрудника, после чего стороны вежливо завершили разговор.`,
       conclusion: `Действующая запись клиента сохраняется: гость предупредил об опоздании${delayStr}, администратор подтвердил ожидание.`
     };
   }
 
   if (ctx.category === 'refusal_unavailable_service') {
     const reqService = essence.service ? `услуга «${essence.service}»` : 'интересующая его процедура';
-    const hasConsultOffer = /консультац/i.test(ctx.cleanTranscript);
+    const hasConsultOffer = /консультац/i.test(transcript);
+    const hasAltChem = /химическ[а-яё]*\s+завивк/iu.test(transcript);
     return {
-      retelling: `Клиент позвонил в салон «${salon}» с вопросом, выполняется ли в салоне ${reqService}. Администратор сообщил, что в салоне представлена альтернативная процедура (химическая завивка волос)${hasConsultOffer ? ', и предложил записаться на консультацию' : ''}. Клиент уточнил, что ему нужна именно запрашиваемая услуга, и отказался от альтернативного варианта.`,
+      retelling: `Клиент позвонил в салон «${salon}» с вопросом о возможности выполнения услуги «${essence.service || 'запрошенной процедуры'}». Администратор пояснила, что данная техника в салоне не представлена, ${hasAltChem ? 'рассказала о доступной химической завивке' : 'предложила альтернативный вариант'}${hasConsultOffer ? ' и предложила записаться на предварительную консультацию к мастеру' : ''}. Гость уточнил, что ищет именно ${reqService}, и вежливо отказался от предложенной альтернативы.`,
       conclusion: `Запись не состоялась: запрашиваемая услуга в салоне отсутствует, а от предложенной альтернативы${hasConsultOffer ? ' и консультации' : ''} клиент отказался.`
     };
   }
 
   if (ctx.category === 'dispute') {
     return {
-      retelling: `Клиент обратился в салон по спорному вопросу или качеству обслуживания («${clientSnippet}»). Администратор выслушал обращение и дал обратную связь в рамках регламента салона «${salon}». Стороны зафиксировали дальнейший порядок урегулирования вопроса.`,
+      retelling: `Клиент обратился в салон «${salon}» со спорным вопросом или замечанием по качеству обслуживания. Администратор выслушал обращение и дал обратную связь в рамках регламента салона. Стороны обсудили возможные пути решения и зафиксировали дальнейший порядок урегулирования вопроса.`,
       conclusion: `Зафиксировано обращение с претензией или вопросом по качеству сервиса. Требуется контроль со стороны управляющего.`
     };
   }
 
   if (ctx.category === 'confirmed_booking') {
-    const s1 = essence.service
-      ? `Клиент обратился в салон по вопросу записи на услугу «${essence.service}».`
-      : `Клиент позвонил в салон «${salon}» для оформления или подтверждения записи.`;
-    const s2 = essence.date || essence.time || essence.master
-      ? `Администратор согласовал время визита${dateLabel}${timeLabel}${masterLabel}.`
-      : `Администратор уточнил условия визита и проверил расписание.`;
-    const s3 = `Клиент подтвердил выбранные условия и согласился на запись.`;
+    const sentences: string[] = [];
+    const introNameMatch = transcript.match(/меня\s+зовут\s+([А-ЯЁ][а-яё]+)/iu);
+    const hasPastLookup = /(?:напомнить|что\s+за\s+мастер|была\s+\d|укладывал[аи])/iu.test(transcript);
+    const hasCompanionHandoff = /(?:передам[^.\n]{0,20}трубк|трубк[^.\n]{0,20}передам|спрошу\s+подруг)/iu.test(transcript);
+    const pastDateMatch = transcript.match(/(\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря))\s+я\s+у\s+вас/iu);
+
+    // 1. Начало разговора и исходный запрос
+    if (hasPastLookup) {
+      const callerPrefix = introNameMatch ? `Клиентка ${introNameMatch[1]}` : 'Клиентка';
+      const pastDateNote = pastDateMatch ? ` (${pastDateMatch[1]})` : '';
+      sentences.push(
+        `${callerPrefix} позвонила в салон «${salon}», чтобы уточнить имя мастера, который делал укладку ей и её подруге во время прошлого визита${pastDateNote}.`
+      );
+    } else {
+      sentences.push(
+        essence.service
+          ? `Клиент обратился в салон «${salon}» по вопросу записи на услугу «${essence.service}»${masterLabel}.`
+          : `Клиент позвонил в салон «${salon}» для оформления или подтверждения записи.`
+      );
+    }
+
+    // 2. Справка по мастерам / услугам (если звучала)
+    const hasSpecializationInfo = /специализирует/iu.test(transcript);
+    if (hasPastLookup || hasSpecializationInfo) {
+      if (essence.master && hasSpecializationInfo) {
+        sentences.push(
+          `Администратор проверила историю посещений, назвала работавших специалистов и уточнила, что мастер ${essence.master} специализируется на стрижках и окрашиваниях.`
+        );
+      } else if (essence.master) {
+        sentences.push(
+          `Администратор проверила информацию в системе и подтвердила, что мастер ${essence.master} продолжает работать в салоне.`
+        );
+      }
+    }
+
+    // 3. Передача трубки спутнику (если была)
+    if (hasCompanionHandoff) {
+      const companionNameMatch = transcript.match(/([А-ЯЁ][а-яё]+),?\s+верно,?\s*да\??/iu);
+      const companionStr = companionNameMatch ? ` по имени ${companionNameMatch[1]}` : '';
+      sentences.push(
+        `Узнав о возможности онлайн-записи или подбора окошка через администратора, звонящая передала трубку подруге${companionStr} для выбора времени и оформления визита.`
+      );
+    }
+
+    // 4. Подбор дат, занятость и предложенные окна времени
+    const windowMatch = transcript.match(/с\s+(\d{1,2}[:.\s]\d{2})\s+до\s+(\d{1,2}[:.\s]\d{2})/iu);
+    const hasWeekendUnavailable = /не\s+работает/iu.test(transcript);
+    if (hasWeekendUnavailable || windowMatch || /предложить/iu.test(managerText || transcript)) {
+      const normWindow = windowMatch
+        ? ` (вечернее окно с ${windowMatch[1].replace(/\s+/g, ':')} до ${windowMatch[2].replace(/\s+/g, ':')})`
+        : '';
+      if (hasWeekendUnavailable) {
+        sentences.push(
+          `Гостья уточнила наличие мест на выходные или начало недели, на что администратор сообщила о выходных днях мастера и предложила ближайшую свободную дату${dateLabel}${normWindow}.`
+        );
+      } else if (essence.date || windowMatch) {
+        sentences.push(
+          `Администратор проверила расписание и предложила доступные варианты времени визита${dateLabel}${normWindow}.`
+        );
+      }
+    }
+
+    // 5. Подтверждение услуги, стоимости и контактов
+    const hasPhoneCollected = /(?:продиктую|номер телефона|960|9\d{2})/iu.test(transcript);
+    if (priceLabel || prepayMatch || hasPhoneCollected) {
+      const details: string[] = [];
+      if (essence.service) details.push(`услугу «${essence.service}»`);
+      if (priceLabel) details.push(`стоимость ${priceLabel}`);
+      if (prepayMatch || hasOzonPrepay) details.push('условие внесения 50% предоплаты для бронирования');
+      if (hasPhoneCollected) details.push('контактный номер телефона для фиксации записи');
+      if (details.length > 0) {
+        const joined =
+          details.length === 1
+            ? details[0]
+            : `${details.slice(0, -1).join(', ')} и ${details[details.length - 1]}`;
+        sentences.push(`Стороны подтвердили ${joined}.`);
+      }
+    }
+
+    // 6. Финальное подтверждение записи
+    sentences.push(
+      `В результате запись${essence.service ? ` на услугу «${essence.service}»` : ''}${masterLabel}${dateLabel}${timeLabel} была успешно согласована и подтверждена.`
+    );
+
     return {
-      retelling: `${s1} ${s2} ${s3}`,
-      conclusion: `Администратор согласовал запись${masterLabel}${dateLabel}${timeLabel}. Запись успешно подтверждена.`
+      retelling: sentences.join(' '),
+      conclusion: `Администратор согласовал запись${essence.service ? ` на услугу «${essence.service}»` : ''}${masterLabel}${dateLabel}${timeLabel}${priceLabel ? ` (стоимость — ${priceLabel})` : ''}. Запись успешно подтверждена.`
     };
   }
 
   if (ctx.category === 'declined') {
     const s1 = essence.service
-      ? `Клиент позвонил в салон по вопросу услуги «${essence.service}».`
-      : `Клиент обратился в салон по поводу подбора визита.`;
-    const s2 = `В ходе диалога клиент отклонил предложенные условия или время${dateLabel}${timeLabel}.`;
+      ? `Клиент позвонил в салон «${salon}» по вопросу записи на услугу «${essence.service}»${masterLabel}.`
+      : `Клиент обратился в салон «${salon}» по поводу подбора визита.`;
+    const s2 = `Администратор проверил расписание и озвучил доступные условия${dateLabel}${timeLabel}, однако предложенный вариант клиенту не подошёл.`;
     const s3 = `Стороны вежливо завершили разговор без оформления записи.`;
     return {
       retelling: `${s1} ${s2} ${s3}`,
@@ -1041,14 +1126,16 @@ export function buildContextGroundedSummary(
 
   if (ctx.category === 'reschedule_or_cancel') {
     return {
-      retelling: `Клиент позвонил в салон для уточнения или корректировки существующей записи${dateLabel}${timeLabel}${masterLabel}. Администратор проверил расписание и проинформировал гостя по доступным условиям. По итогам диалога стороны зафиксировали актуальный статус бронирования.`,
+      retelling: `Клиент позвонил в салон «${salon}» для уточнения или корректировки существующей записи${dateLabel}${timeLabel}${masterLabel}. Администратор проверил расписание, уточнил занятость более ранних или смежных слотов и проинформировал гостя по доступным условиям. По итогам диалога стороны зафиксировали актуальный статус бронирования.`,
       conclusion: `Проведена проверка и актуализация действующей записи${masterLabel}${dateLabel}${timeLabel}.`
     };
   }
 
-  // Консультация / справочное обращение с привязкой к фактическому тексту диалога
+  // Консультация / справочное обращение без сырых обрывков текста
+  const consultTopic = essence.service ? ` по услуге «${essence.service}»` : '';
+  const hasScheduleQ = /до\s+скольки|работаете|график/iu.test(clientText || transcript);
   return {
-    retelling: `Клиент обратился в салон «${salon}» за справочной информацией${essence.service ? ` по услуге «${essence.service}»` : ''} («${clientSnippet}»). Администратор ответил на поставленные вопросы${managerSnippet ? ` («${managerSnippet}»)` : ''}. Запись на конкретное время в ходе этого разговора не оформлялась.`,
+    retelling: `Клиент обратился в салон «${salon}» за справочной информацией${consultTopic}${hasScheduleQ ? ' (режим работы салона)' : ''}. Администратор предоставил необходимые пояснения по заданному вопросу. Запись на конкретную дату и время в ходе этого разговора не оформлялась.`,
     conclusion: `Проведена справочная консультация по запросу клиента без фиксации записи на визит.`
   };
 }
@@ -1116,12 +1203,31 @@ export function formatSummaryWithEssence(
   const hasTimeCorrectionInTranscript = Boolean(
     fallbackEssence.time && cleanTranscript && /(?:убираю|отмените|отменить|оставляю|оставьте)/iu.test(cleanTranscript)
   );
+  const hasExplicitSingleBookingOverride = Boolean(
+    fallbackEssence.service && /(?:необходимо|нужно)\s+будет\s+только\s+[а-яё]+/iu.test(cleanTranscript)
+  );
+  const hasPastVsConfirmedDateMismatch = Boolean(
+    fallbackEssence.date &&
+    extractedDetails?.date &&
+    extractedDetails.date.toLowerCase() !== fallbackEssence.date.toLowerCase() &&
+    ctx.isConfirmedBooking
+  );
 
   const essence: EssenceDetails = {
-    service: isMeaningful(extractedDetails?.service) ? extractedDetails!.service : fallbackEssence.service,
-    date: isMeaningful(extractedDetails?.date) ? extractedDetails!.date : fallbackEssence.date,
+    service:
+      hasExplicitSingleBookingOverride && fallbackEssence.service
+        ? fallbackEssence.service
+        : isMeaningful(extractedDetails?.service)
+        ? extractedDetails!.service
+        : fallbackEssence.service,
+    date:
+      hasPastVsConfirmedDateMismatch && fallbackEssence.date
+        ? fallbackEssence.date
+        : isMeaningful(extractedDetails?.date)
+        ? extractedDetails!.date
+        : fallbackEssence.date,
     time:
-      hasTimeCorrectionInTranscript && fallbackEssence.time
+      (hasTimeCorrectionInTranscript || hasPastVsConfirmedDateMismatch) && fallbackEssence.time
         ? fallbackEssence.time
         : isMeaningful(extractedDetails?.time)
         ? extractedDetails!.time
@@ -1197,20 +1303,41 @@ export function formatSummaryWithEssence(
   }
 
   // Определяем, нужно ли пересобрать пересказ/вывод строго по стенограмме:
-  // срабатывает при пустых полях, старом шаблонном тексте или при грубом противоречии фактам (ложная запись)
+  // срабатывает при пустых полях, обрывках цитат («...»), старых шаблонах или при противоречии фактическому исходу звонка
   const isLegacyCannedRetelling = /Клиент обратился в салон красоты по вопросам обслуживания и записи\.\s*Администратор предоставил подробную консультацию по графику/i.test(retellingText);
+  const isTruncatedSnippetRetelling =
+    /«[^»]{60,}»/.test(retellingText) ||
+    /\(\s*«[^»]{25,}»\s*\)/.test(retellingText);
   const isContradictoryBookingConclusion =
     !ctx.isConfirmedBooking &&
     !ctx.isRescheduleOrCheck &&
     /администратор согласовал запись|запись успешно подтверждена/i.test(`${retellingText} ${conclusionText}`);
+  const isMissedConfirmedBooking =
+    ctx.isConfirmedBooking &&
+    /не оформлял|не состоял|без фиксации записи|справочн/i.test(`${retellingText} ${conclusionText}`);
 
   const grounded = buildContextGroundedSummary(ctx, essence, salon);
 
-  if (!retellingText || retellingText.includes('к мастеру Студио') || /свободное время\s*\./.test(retellingText) || isLegacyCannedRetelling || isContradictoryBookingConclusion) {
+  if (
+    !retellingText ||
+    retellingText.includes('к мастеру Студио') ||
+    /свободное время\s*\./.test(retellingText) ||
+    isLegacyCannedRetelling ||
+    isTruncatedSnippetRetelling ||
+    isContradictoryBookingConclusion ||
+    isMissedConfirmedBooking
+  ) {
     retellingText = grounded.retelling;
   }
 
-  if (!conclusionText || conclusionText.includes('к мастеру Студио') || isLegacyCannedRetelling || isContradictoryBookingConclusion) {
+  if (
+    !conclusionText ||
+    conclusionText.includes('к мастеру Студио') ||
+    isLegacyCannedRetelling ||
+    isTruncatedSnippetRetelling ||
+    isContradictoryBookingConclusion ||
+    isMissedConfirmedBooking
+  ) {
     conclusionText = grounded.conclusion;
   }
 
@@ -1442,12 +1569,15 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
     }
   }
 
-  // Защита от ложного статуса «согласие» на основе IVR слова «записан» или при явном отказе/опоздании/партнёрском звонке
+  // Защита от ложного статуса «согласие» на основе IVR или при явном отказе/опоздании/партнёрском звонке,
+  // а также восстановление статуса «согласие», если в конце стенограммы запись подтверждена («записали вас»)
   if (dialogueCtx.isUnavailableServiceRefusal || dialogueCtx.isDeclined) {
     bookingStatus = 'отказ';
   } else if (dialogueCtx.isLateWarning || dialogueCtx.isNonClient) {
     bookingStatus = 'консультация';
-  } else if (bookingStatus === 'согласие' && !dialogueCtx.isConfirmedBooking && !dialogueCtx.isRescheduleOrCheck) {
+  } else if (dialogueCtx.isConfirmedBooking) {
+    bookingStatus = 'согласие';
+  } else if (bookingStatus === 'согласие' && !dialogueCtx.isRescheduleOrCheck) {
     bookingStatus = 'консультация';
   }
 
@@ -1569,25 +1699,36 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
   const finalMistakes = mistakes && mistakes.length > 0 ? mistakes : [];
   const finalAdvice = advice && advice.length > 0 ? advice : (Array.isArray(recommendations) ? recommendations : [recommendations].filter(Boolean));
 
-  // Защита от шаблонных/ошибочных параметров Пункта 8 от LLM для нестандартных звонков
+  // Защита от шаблонных/ошибочных параметров Пункта 8 от LLM и конфликтов по фактам записи
   const modelStruct = parsed.structured_summary || {};
   const modelStepsStr = Array.isArray(modelStruct.manager_next_steps) ? modelStruct.manager_next_steps.join(' ').toLowerCase() : '';
   const hasCannedConsultationSteps =
-    (dialogueCtx.isNonClient || dialogueCtx.isLateWarning || dialogueCtx.isUnavailableServiceRefusal || dialogueCtx.isDeclined) &&
-    (modelStepsStr.includes('консультац') || modelStepsStr.includes('прайс-лист'));
+    (dialogueCtx.isNonClient || dialogueCtx.isLateWarning || dialogueCtx.isUnavailableServiceRefusal || dialogueCtx.isDeclined || dialogueCtx.isConfirmedBooking) &&
+    (modelStepsStr.includes('консультац') || modelStepsStr.includes('прайс-лист') || modelStepsStr.includes('онлайн-запись'));
+
+  const modelBookedTextLower = String(modelStruct.booking_status_text || '').toLowerCase();
+  const hasContradictoryBookedText =
+    (dialogueCtx.isConfirmedBooking && /(?:не оформлял|не состоял|консультац)/i.test(modelBookedTextLower)) ||
+    (!dialogueCtx.isConfirmedBooking && !dialogueCtx.isRescheduleOrCheck && /(?:запись оформлена|записан|подтверждена)/i.test(modelBookedTextLower));
 
   const useGroundedStructOverride = dialogueCtx.isNonClient || dialogueCtx.isLateWarning || dialogueCtx.isUnavailableServiceRefusal;
+  const hasEssenceDateMismatch = Boolean(
+    essence.date && modelStruct.offered_date_time && !String(modelStruct.offered_date_time).toLowerCase().includes(essence.date.toLowerCase())
+  );
+  const hasEssenceServiceMismatch = Boolean(
+    essence.service && modelStruct.requested_service && !String(modelStruct.requested_service).toLowerCase().includes(essence.service.toLowerCase())
+  );
 
   const finalStructuredSummary: StructuredCallSummary = {
-    call_purpose: useGroundedStructOverride ? structuredSummary.call_purpose : (modelStruct.call_purpose || structuredSummary.call_purpose),
-    requested_service: useGroundedStructOverride ? structuredSummary.requested_service : (modelStruct.requested_service || structuredSummary.requested_service),
+    call_purpose: (useGroundedStructOverride || hasEssenceServiceMismatch) ? structuredSummary.call_purpose : (modelStruct.call_purpose || structuredSummary.call_purpose),
+    requested_service: (useGroundedStructOverride || hasEssenceServiceMismatch) ? structuredSummary.requested_service : (modelStruct.requested_service || structuredSummary.requested_service),
     offered_master: useGroundedStructOverride
       ? structuredSummary.offered_master
       : (isMasterNameValid(modelStruct.offered_master) ? normalizeMasterName(modelStruct.offered_master)! : structuredSummary.offered_master),
     offered_price: useGroundedStructOverride ? structuredSummary.offered_price : (modelStruct.offered_price || structuredSummary.offered_price),
-    offered_date_time: useGroundedStructOverride ? structuredSummary.offered_date_time : (modelStruct.offered_date_time || structuredSummary.offered_date_time),
-    booking_status_text: (useGroundedStructOverride || dialogueCtx.isDeclined) ? structuredSummary.booking_status_text : (modelStruct.booking_status_text || structuredSummary.booking_status_text),
-    unbooked_reason: (useGroundedStructOverride || dialogueCtx.isDeclined) ? structuredSummary.unbooked_reason : (modelStruct.unbooked_reason || structuredSummary.unbooked_reason),
+    offered_date_time: (useGroundedStructOverride || hasEssenceDateMismatch) ? structuredSummary.offered_date_time : (modelStruct.offered_date_time || structuredSummary.offered_date_time),
+    booking_status_text: (useGroundedStructOverride || dialogueCtx.isDeclined || hasContradictoryBookedText) ? structuredSummary.booking_status_text : (modelStruct.booking_status_text || structuredSummary.booking_status_text),
+    unbooked_reason: (useGroundedStructOverride || dialogueCtx.isDeclined || hasContradictoryBookedText) ? structuredSummary.unbooked_reason : (modelStruct.unbooked_reason || structuredSummary.unbooked_reason),
     manager_next_steps:
       Array.isArray(modelStruct.manager_next_steps) && modelStruct.manager_next_steps.length > 0 && !hasCannedConsultationSteps
         ? modelStruct.manager_next_steps

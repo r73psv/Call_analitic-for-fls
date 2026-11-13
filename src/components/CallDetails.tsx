@@ -294,8 +294,11 @@ export function CallDetails({
     const savedStepsStr = Array.isArray(savedStructured?.manager_next_steps)
       ? savedStructured.manager_next_steps.join(' ').toLowerCase()
       : '';
+    const savedBookedLower = String(savedStructured?.booking_status_text || '').toLowerCase();
+    const computedBookedLower = String(computedStructured.booking_status_text || '').toLowerCase();
     const isSavedStructuredStale =
       !savedStructured ||
+      (computedBookedLower.includes('запись состоялась') && !savedBookedLower.includes('запись состоялась')) ||
       ((savedStepsStr.includes('консультац') || savedStepsStr.includes('прайс-лист') || savedStepsStr.includes('онлайн-запись')) &&
         !computedStructured.manager_next_steps.join(' ').toLowerCase().includes('прайс-лист'));
 

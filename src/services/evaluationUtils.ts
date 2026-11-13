@@ -230,6 +230,8 @@ export function extractCallEvaluation(
   if (existingEvaluation?.criteria && Array.isArray(existingEvaluation.criteria) && existingEvaluation.criteria.length >= 10) {
     const critMap = new Map(existingEvaluation.criteria.map(c => [c.id, c]));
     const crit6 = critMap.get('additional_services');
+    const critParallel = critMap.get('parallel_booking');
+    const critAlt = critMap.get('alternative_options');
     const critClosing = critMap.get('closing_booking');
     const critPrice = critMap.get('price_presentation');
     const critMaster = critMap.get('service_and_master_presentation');
@@ -242,6 +244,20 @@ export function extractCallEvaluation(
       critClosing &&
       critClosing.is_applicable !== false &&
       (critClosing.score ?? 0) >= 8;
+    const hasMissedConfirmedClosing =
+      ctx.isConfirmedBooking &&
+      critClosing &&
+      (critClosing.is_applicable === false || (critClosing.score ?? 0) < 8);
+    const hasFalseParallelForSingleBooking =
+      /(?:необходимо|нужно)\s+будет\s+только\s+[а-яё]+/iu.test(ctx.cleanTranscript) &&
+      critParallel &&
+      critParallel.is_applicable !== false;
+    const hasBadAltMistakeOrLowScore =
+      ctx.isConfirmedBooking &&
+      critAlt &&
+      critAlt.is_applicable !== false &&
+      (critAlt.score ?? 0) < 8 &&
+      /предложил альтернативн/i.test(critAlt.explanation || '');
     const hasSalesOnNonSalesCall =
       (ctx.isNonClient || ctx.isLateWarning) &&
       (critClosing?.is_applicable !== false || critPrice?.is_applicable !== false || critMaster?.is_applicable !== false);
@@ -250,8 +266,22 @@ export function extractCallEvaluation(
       critPrice.is_applicable !== false &&
       /прайс озвучен без детализации/i.test(critPrice.explanation || '') &&
       !/(?:стоить|рубл|₽|цена|прайс|стоит|стоимость|\d{3,5}\s*р)/iu.test(ctx.cleanTranscript);
+    const hasMissedPriceMention =
+      /(?:по\s+стоимости|стоит|цена)\s*\d{3,5}\s*(?:р|руб|₽)/iu.test(ctx.cleanTranscript) &&
+      critPrice &&
+      critPrice.is_applicable !== false &&
+      (critPrice.score ?? 0) < 8;
 
-    if (!hasCrossSellContradiction && !hasWrongClosing10 && !hasSalesOnNonSalesCall && !hasFakePriceExplanation) {
+    if (
+      !hasCrossSellContradiction &&
+      !hasWrongClosing10 &&
+      !hasMissedConfirmedClosing &&
+      !hasFalseParallelForSingleBooking &&
+      !hasBadAltMistakeOrLowScore &&
+      !hasSalesOnNonSalesCall &&
+      !hasFakePriceExplanation &&
+      !hasMissedPriceMention
+    ) {
       return buildCallEvaluation(existingEvaluation.criteria);
     }
   }
@@ -287,33 +317,39 @@ export function extractCallEvaluation(
   const hasGreeting = /(?:добрый день|здравствуйте|доброе утро|добрый вечер|приветствую|алло)/iu.test(openingManagerText);
   const hasManagerNameIntro = /(?:меня зовут|администратор(?:\s+салона[^.!?]{0,40})?\s+[А-ЯЁа-яё]+|это\s+[А-ЯЁа-яё]+)/iu.test(openingManagerText);
   const hasSalonName = /(?:студи|салон|fashion|фешен|фэшн|лик)/iu.test(openingManagerText);
+  const isClippedIntroInStt =
+    !hasGreeting &&
+    !hasManagerNameIntro &&
+    /^[А-ЯЁ][а-яё]+,\s+(?:здравствуйте|добрый)/u.test((clientText || '').trim());
 
   const greetingCriterion: CallEvaluationCriterion = {
     id: 'greeting_intro',
     name: 'Приветствие и представление',
-    is_applicable: true,
-    score:
-      hasGreeting && hasManagerNameIntro && hasSalonName
-        ? 10
-        : hasManagerNameIntro && hasSalonName
-        ? 9
-        : hasGreeting && (hasManagerNameIntro || hasSalonName)
-        ? 8
-        : hasGreeting
-        ? 7
-        : 4,
-    explanation:
-      hasGreeting && hasManagerNameIntro && hasSalonName
-        ? 'Приветствие по полному корпоративному стандарту: названы салон и имя администратора.'
-        : hasManagerNameIntro && hasSalonName
-        ? 'Администратор представился с названием салона и собственным именем.'
-        : hasGreeting && hasManagerNameIntro
-        ? 'Приветствие вежливое с указанием имени администратора.'
-        : hasGreeting && hasSalonName
-        ? 'Приветствие вежливое с названием салона, но администратор не назвал собственное имя.'
-        : hasGreeting
-        ? 'Приветствие озвучено вежливо, однако в расшифровке не зафиксированы название салона и имя администратора.'
-        : 'Приветствие скомкано или не соответствует корпоративному стандарту.'
+    is_applicable: !isClippedIntroInStt,
+    score: isClippedIntroInStt
+      ? null
+      : hasGreeting && hasManagerNameIntro && hasSalonName
+      ? 10
+      : hasManagerNameIntro && hasSalonName
+      ? 9
+      : hasGreeting && (hasManagerNameIntro || hasSalonName)
+      ? 8
+      : hasGreeting
+      ? 7
+      : 4,
+    explanation: isClippedIntroInStt
+      ? 'Начальное приветствие администратора не попало в расшифровку (звонящая сразу обращается к администратору по имени — критерий не снижает оценку).'
+      : hasGreeting && hasManagerNameIntro && hasSalonName
+      ? 'Приветствие по полному корпоративному стандарту: названы салон и имя администратора.'
+      : hasManagerNameIntro && hasSalonName
+      ? 'Администратор представился с названием салона и собственным именем.'
+      : hasGreeting && hasManagerNameIntro
+      ? 'Приветствие вежливое с указанием имени администратора.'
+      : hasGreeting && hasSalonName
+      ? 'Приветствие вежливое с названием салона, но администратор не назвал собственное имя.'
+      : hasGreeting
+      ? 'Приветствие озвучено вежливо, однако в расшифровке не зафиксированы название салона и имя администратора.'
+      : 'Приветствие скомкано или не соответствует корпоративному стандарту.'
   };
 
   // Спец-ветка 1: Нецелевой / партнёрский / организационный звонок (например, билеты в WhatsApp)
@@ -377,10 +413,10 @@ export function extractCallEvaluation(
   const isRescheduleOrCheck = ctx.isRescheduleOrCheck;
 
   // 2. Выявление потребности гостя
-  const hasNeedsQuestions = /(?:какую услугу|на какую|когда вам|в какое время|какой мастер|что именно|подскажите|хотели бы|планируете|на какое число|какой эффект|какие волосы|на что именно)/iu.test(managerEffective);
+  const hasNeedsQuestions = /(?:какую услугу|на какую|когда вам|в какое время|в какие дни|какой мастер|что именно|подскажите|хотели бы|планируете|на какое число|какой эффект|какие волосы|на что именно|необходимо будет|верно,?\s*да)/iu.test(managerEffective);
 
   // 3. Презентация услуги и мастера
-  const hasMasterPresented = /(?:мастер|специалист|квалификац|ведущий специалист|топ-мастер|опыт|елена|татьяна|арина|наталья|ольга|анна|кристина|ирина)/iu.test(managerEffective);
+  const hasMasterPresented = /(?:мастер|специалист|специализирует|квалификац|ведущий специалист|топ-мастер|опыт|продукци|выполняет|екатерин|лилия|елена|татьяна|арина|наталья|ольга|анна|кристина|ирина)/iu.test(managerEffective);
 
   // 4. Корректная презентация стоимости
   const hasPriceMention = /(?:стоить|рубл|₽|цена|прайс|стоит|стоимость|\d{3,5}\s*р(?![а-яё]))/iu.test(managerEffective);
@@ -394,7 +430,7 @@ export function extractCallEvaluation(
   const hasObjections =
     ctx.isUnavailableServiceRefusal ||
     /(?:дорого|не могу|не успе|не удобн|неудобно|отъезд|не получ|занят|пораньше нельзя|не подходит|почему отменили|издеваетесь|претензи|жалоб|(?:^|[^\p{L}])нет,\s+[^\n.!?]*(?:надо|нужно)(?:[^\p{L}]|$))/iu.test(clientEffective);
-  const handledObjectionWell = /(?:могу предложить|давайте посмотрим|лист ожидания|другой мастер|альтернатив|перенесем|в субботу|в воскресенье|скидк|компенсац|извините|понимаем вас|могли бы предложить запись на консультацию)/iu.test(managerEffective);
+  const handledObjectionWell = /(?:могу предложить|давайте посмотрим|лист ожидания|другой мастер|альтернатив|перенесем|в субботу|в воскресенье|скидк|компенсац|извините|понимаем вас|могли бы предложить)/iu.test(managerEffective);
 
   // 6. Предложение дополнительных услуг (допродажа / сопутствующие процедуры)
   const managerOfferedCrossSell =
@@ -411,20 +447,27 @@ export function extractCallEvaluation(
     ctx.category !== 'declined';
 
   // 7. Параллельная запись (в 4 руки / для двоих)
+  // Не учитываем воспоминания о прошлом визите ("была с подружкой на укладке и макияж") и передачу трубки, если в итоге бронируется одна процедура
+  const hasExplicitSingleServiceConfirm = /(?:необходимо|нужно)\s+будет\s+только\s+[а-яё]+/iu.test(ctx.cleanTranscript);
+  const activeMultiServiceText = ctx.cleanTranscript
+    .split('\n')
+    .filter(line => !/(?:была\s+(?:на|у)|укладывала|делала|передам\s+трубку|трубку\s+передам|спрошу\s+подруг)/iu.test(line))
+    .join(' ');
   const isMultipleServices =
     !ctx.isUnavailableServiceRefusal &&
-    /(?:маникюр\s+и\s+педикюр|педикюр\s+и\s+маникюр|макияж\s+и\s+укладка|укладка\s+и\s+макияж|2\s+макияжа|два\s+макияжа|вдвоем|подруг|сестр|вместе\s+с|для\s+двоих|2\s+человек)/iu.test(fullText);
+    !hasExplicitSingleServiceConfirm &&
+    /(?:маникюр\s+и\s+педикюр|педикюр\s+и\s+маникюр|макияж\s+и\s+укладк|укладк[а-яё]*\s+и\s+макияж|2\s+макияжа|два\s+макияжа|вдво[её]м|для\s+подруг[и]|и\s+подруг[у]\s+запис|на\s+двоих|для\s+двоих|2\s+человек)/iu.test(activeMultiServiceText);
   const hasParallelOffer = /(?:в\s+4\s+руки|в\s+четыре\s+руки|одновременно|параллельно|сразу\s+два\s+мастера)/iu.test(managerEffective);
 
   // 8. Предложение альтернативных вариантов
   const isSlotConflict =
     ctx.isUnavailableServiceRefusal ||
     ctx.category === 'declined' ||
-    /(?:занят|забронирован|нет мест|нет свободного|не могу|не успе|не подходит время|не получается|пораньше нельзя)/iu.test(fullText);
-  const hasAlternativesOffered = /(?:или\s+на|есть\s+еще|могу\s+предложить\s+на|а\s+если|в\s+\d{1,2}:\d{2}\s+или\s+в\s+\d{1,2}:\d{2}|на\s+субботу|на\s+воскресенье|к\s+другому\s+мастеру|лист\s+ожидания|химическ[а-яё]*\s+завивк|запись\s+на\s+консультацию|предложить\s+консультацию)/iu.test(managerEffective);
+    /(?:занят|забронирован|не\s+работает|нет\s+мест|нет\s+свободного|не\s+могу|не\s+успе|не\s+подходит\s+время|не\s+получается|пораньше\s+нельзя)/iu.test(fullText);
+  const hasAlternativesOffered = /(?:или\s+на|есть\s+ещ[её]|могу\s+предложить|могл[иа]\s+бы\s+предложить|можем\s+(?:сейчас\s+)?предложить|самое\s+ближайшее|дневн[а-яё]+\s+время\s+и\s+вечерн|с\s+\d{1,2}[:.]\d{2}\s+до\s+\d{1,2}[:.]\d{2}|любое\s+время\s+можно\s+выбрать|а\s+если|в\s+\d{1,2}:\d{2}\s+или\s+в\s+\d{1,2}:\d{2}|на\s+субботу|на\s+воскресенье|к\s+другому\s+мастеру|лист\s+ожидания|химическ[а-яё]*\s+завивк|запись\s+на\s+консультацию|предложить\s+консультацию)/iu.test(managerEffective);
 
   // 9. Закрытие на запись
-  const hasBookingAttempt = /(?:записываю вас|записала вас|запись\s+на\s+консультацию|могли бы предложить запись|подойд[её]т|записать вас|подберем время|ждем вас|запись подтверждаем|оставляем|зафиксировала)/iu.test(managerEffective);
+  const hasBookingAttempt = /(?:записываю\s+вас|записала\s+вас|записали\s+вас|запись\s+на\s+консультацию|могли\s+бы\s+предложить\s+запись|подойд[её]т|записать\s+вас|подберем\s+время|жд[её]м\s+вас|запись\s+подтверждаем|оставляем|зафиксировала|записывать\s+на\s+ваш\s+номер)/iu.test(managerEffective);
   const isBookingAgreed = ctx.isConfirmedBooking || (isRescheduleOrCheck && /оставляем|подтверждаем/iu.test(managerEffective));
 
   // 10. Качество коммуникации и завершение
@@ -533,10 +576,16 @@ export function extractCallEvaluation(
       id: 'alternative_options',
       name: 'Предложение альтернативных вариантов',
       is_applicable: isSlotConflict || !isBookingAgreed,
-      score: (isSlotConflict || !isBookingAgreed) ? (hasAlternativesOffered ? 7 : 4) : null,
+      score: (isSlotConflict || !isBookingAgreed)
+        ? (hasAlternativesOffered
+            ? (isBookingAgreed && !ctx.isUnavailableServiceRefusal ? 9 : 7)
+            : 4)
+        : null,
       explanation: (isSlotConflict || !isBookingAgreed)
         ? ctx.isUnavailableServiceRefusal && hasAlternativesOffered
           ? 'При отсутствии запрошенной техники администратор предложил альтернативную процедуру и консультацию, однако клиент не заинтересовался вариантом.'
+          : hasAlternativesOffered && isBookingAgreed
+          ? 'При занятости желаемых дат администратор предложил альтернативную дату и выбор слотов времени, успешно согласовав запись.'
           : hasAlternativesOffered
           ? 'Администратор предложил альтернативные варианты времени/услуги.'
           : 'При несовпадении условий администратор не предложил альтернативные дни, слоты, мастеров или смежные решения.'
@@ -639,6 +688,10 @@ export function harmonizeMistakesAndEvaluation(
       if (!m) return false;
       const lower = m.toLowerCase();
 
+      // Позитивные констатации (например, «Администратор предложил альтернативные варианты времени/услуги.») не являются ошибками
+      if (/^администратор\s+(?:предложил|уточнил|сориентировал|озвучил|подтвердил)/i.test(lower)) {
+        return false;
+      }
       if (isCrossSellNotApplicableOrHigh && (lower.includes('сопутствующ') || lower.includes('допродаж') || lower.includes('спа-уход') || lower.includes('снятие покрытия') || lower.includes('дополнительн'))) {
         return false;
       }
@@ -736,8 +789,10 @@ export function harmonizeMistakesAndEvaluation(
             derivedAdvice.push('Предлагать гостям параллельную запись в 4 руки для экономии времени.');
             break;
           case 'alternative_options':
-            derivedMistakes.push(c.explanation || 'Не предложены достаточные альтернативные варианты.');
-            derivedAdvice.push('Предлагать несколько альтернативных вариантов по времени, мастерам или смежным услугам.');
+            if (typeof c.score === 'number' && c.score <= 5) {
+              derivedMistakes.push(c.explanation || 'Не предложены альтернативные варианты времени, дат или мастеров.');
+              derivedAdvice.push('Предлагать несколько альтернативных вариантов по времени, мастерам или смежным услугам.');
+            }
             break;
           case 'closing_booking':
             derivedMistakes.push(c.explanation || 'Запись в рамках диалога не состоялась.');

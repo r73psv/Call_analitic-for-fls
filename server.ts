@@ -3464,11 +3464,19 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
       callCopy.key_facts.call_outcome = 'отказ';
       changed = true;
     }
-  } else if ((ctx.isNonClient || ctx.isLateWarning) && callCopy.booking_status === 'согласие') {
-    callCopy.booking_status = 'консультация';
+  } else if (ctx.isNonClient || ctx.isLateWarning) {
+    if (callCopy.booking_status === 'согласие') {
+      callCopy.booking_status = 'консультация';
+      if (!callCopy.key_facts) callCopy.key_facts = {};
+      callCopy.key_facts.booking_status = 'консультация';
+      callCopy.key_facts.call_outcome = 'консультация';
+      changed = true;
+    }
+  } else if (ctx.isConfirmedBooking && callCopy.booking_status !== 'согласие') {
+    callCopy.booking_status = 'согласие';
     if (!callCopy.key_facts) callCopy.key_facts = {};
-    callCopy.key_facts.booking_status = 'консультация';
-    callCopy.key_facts.call_outcome = 'консультация';
+    callCopy.key_facts.booking_status = 'согласие';
+    callCopy.key_facts.call_outcome = 'запись';
     changed = true;
   }
 
@@ -3519,23 +3527,33 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
     ? callCopy.structured_summary.manager_next_steps.join(' ').toLowerCase()
     : '';
   const hasBadStructuredSteps =
-    (ctx.isNonClient || ctx.isLateWarning || ctx.isUnavailableServiceRefusal || ctx.isDeclined) &&
+    (ctx.isNonClient || ctx.isLateWarning || ctx.isUnavailableServiceRefusal || ctx.isDeclined || ctx.isConfirmedBooking) &&
     (existingSteps.includes('консультац') || existingSteps.includes('прайс-лист') || existingSteps.includes('онлайн-запись'));
+  const bookedStatusStr = String(callCopy.structured_summary?.booking_status_text || '');
   const hasBadBookedText =
-    !ctx.isConfirmedBooking &&
-    !ctx.isRescheduleOrCheck &&
-    /запись оформлена|записан/i.test(String(callCopy.structured_summary?.booking_status_text || ''));
+    (!ctx.isConfirmedBooking && !ctx.isRescheduleOrCheck && /запись оформлена|записан/i.test(bookedStatusStr)) ||
+    (ctx.isConfirmedBooking && /не оформлял|не состоял|консультац/i.test(bookedStatusStr));
+
+  const transcriptEssence = extractEssenceDetails(callCopy.transcript || '', undefined, salonName);
+  const hasEssenceMismatch = Boolean(
+    (transcriptEssence.date && callCopy.key_facts?.date && transcriptEssence.date.toLowerCase() !== String(callCopy.key_facts.date).toLowerCase() && ctx.isConfirmedBooking) ||
+    (transcriptEssence.service && callCopy.key_facts?.service && /(?:необходимо|нужно)\s+будет\s+только/iu.test(callCopy.transcript || '') && transcriptEssence.service.toLowerCase() !== String(callCopy.key_facts.service).toLowerCase())
+  );
 
   const isLegacyCannedRetelling = /Клиент обратился в салон красоты по вопросам обслуживания и записи\.\s*Администратор предоставил подробную консультацию по графику/i.test(rawSummary);
+  const isTruncatedSnippetRetelling =
+    /«[^»]{60,}»/.test(rawSummary) ||
+    /\(\s*«[^»]{25,}»\s*\)/.test(rawSummary);
   const isContradictorySummary =
-    !ctx.isConfirmedBooking &&
-    !ctx.isRescheduleOrCheck &&
-    /администратор согласовал запись|запись успешно подтверждена/i.test(rawSummary);
+    (!ctx.isConfirmedBooking && !ctx.isRescheduleOrCheck && /администратор согласовал запись|запись успешно подтверждена/i.test(rawSummary)) ||
+    (ctx.isConfirmedBooking && /не оформлял|не состоял|без фиксации записи/i.test(rawSummary));
 
   const needsSummaryFormat = Boolean(
     rawSummary && (
       changed ||
+      hasEssenceMismatch ||
       isLegacyCannedRetelling ||
+      isTruncatedSnippetRetelling ||
       isContradictorySummary ||
       hasBadStructuredSteps ||
       hasBadBookedText ||
@@ -3547,14 +3565,14 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
     )
   );
 
-  if (needsSummaryFormat || !callCopy.structured_summary || !callCopy.key_facts?.structured_summary || hasBadStructuredSteps || hasBadBookedText) {
+  if (needsSummaryFormat || !callCopy.structured_summary || !callCopy.key_facts?.structured_summary || hasBadStructuredSteps || hasBadBookedText || hasEssenceMismatch) {
     const formatted = formatSummaryWithEssence(
       rawSummary,
       callCopy.transcript || '',
       {
-        service: callCopy.key_facts?.service || null,
-        date: callCopy.key_facts?.date || null,
-        time: callCopy.key_facts?.time || null,
+        service: hasEssenceMismatch ? null : (callCopy.key_facts?.service || null),
+        date: hasEssenceMismatch ? null : (callCopy.key_facts?.date || null),
+        time: hasEssenceMismatch ? null : (callCopy.key_facts?.time || null),
         master: isMasterNameValid(callCopy.key_facts?.master) ? callCopy.key_facts.master : null,
       },
       salonName,
@@ -3585,12 +3603,12 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
       changed = true;
     }
 
-    if (formatted.essence.date && (!callCopy.key_facts?.date || String(callCopy.key_facts.date).includes('не указан'))) {
+    if (formatted.essence.date && (!callCopy.key_facts?.date || String(callCopy.key_facts.date).includes('не указан') || hasEssenceMismatch)) {
       if (!callCopy.key_facts) callCopy.key_facts = {};
       callCopy.key_facts.date = formatted.essence.date;
       changed = true;
     }
-    if (formatted.essence.time && (!callCopy.key_facts?.time || String(callCopy.key_facts.time).includes('не указан'))) {
+    if (formatted.essence.time && (!callCopy.key_facts?.time || String(callCopy.key_facts.time).includes('не указан') || hasEssenceMismatch)) {
       if (!callCopy.key_facts) callCopy.key_facts = {};
       callCopy.key_facts.time = formatted.essence.time;
       changed = true;
@@ -3600,7 +3618,7 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
       callCopy.key_facts.master = formatted.essence.master;
       changed = true;
     }
-    if (formatted.essence.service && (!callCopy.key_facts?.service || String(callCopy.key_facts.service).includes('не указан'))) {
+    if (formatted.essence.service && (!callCopy.key_facts?.service || String(callCopy.key_facts.service).includes('не указан') || hasEssenceMismatch)) {
       if (!callCopy.key_facts) callCopy.key_facts = {};
       callCopy.key_facts.service = formatted.essence.service;
       changed = true;
