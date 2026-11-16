@@ -2,6 +2,19 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
+/**
+ * ЧЕЙНДЖЛОГ (сборка от 16.11.2026, правки согласованности и доказательности анализа):
+ * 1. getSystemPrompt: добавлены Этап 0 (сначала факты — потом выводы), правило разграничения
+ *    «предложение времени» vs «состоявшаяся запись», Шаг 7 (missed_opportunities с правилом
+ *    реальности), Шаг 8 (финальная самопроверка согласованности разделов), запрет шаблонных
+ *    советов про SMS/авто-подтверждение; поле missed_opportunities добавлено в JSON-схему ответа.
+ * 2. validateResult: расширенные проверки согласованности (call_outcome<->booking_status,
+ *    operator_score<->среднее применимых критериев, оценка в резюме<->operator_score,
+ *    фантомные ошибки допродаж при пустом missed_opportunities).
+ * 3. parseGigaChatJson: прокидывание missed_opportunities в AnalysisResult с нормализацией.
+ * ТРЕБУЕТСЯ В types.ts: добавить в AnalysisResult поле
+ *    missed_opportunities?: { type: string; evidence: string; what_to_say: string }[];
+ */
 
 import axios from 'axios';
 import https from 'https';
@@ -18,6 +31,17 @@ export function getSystemPrompt(customSalonName?: string): string {
 Проанализируй транскрипт телефонного разговора и верни ответ СТРОГО в формате JSON, без текста до и после JSON.
 
 ГЛАВНОЕ ПРАВИЛО: анализируй ТОЛЬКО то, что реально есть в транскрипте. Запрещено выдумывать реплики, факты, имена, услуги и обстоятельства, которых нет в тексте. Если данных нет — фиксируй это явно, а не додумывай.
+
+ЭТАП 0. СНАЧАЛА ФАКТЫ — ПОТОМ ВЫВОДЫ (обязательный внутренний этап перед любыми оценками)
+Прежде чем формировать любые поля ответа, мысленно пройди по стенограмме и выпиши факты:
+- реплики по ролям (Менеджер / Клиент / Автоинформатор);
+- все названия услуг, прозвучавшие в разговоре;
+- все озвученные суммы и условия предоплаты;
+- все даты и время («15 0 0» = 15:00, «в девять» = 09:00);
+- все имена мастеров, клиентов и третьих лиц;
+- все фразы согласия («давайте», «записывайте», «хорошо, на 15:00») и отказа («нет», «не подходит», «в другой раз»);
+- все предложения менеджера: время, мастер, допуслуга, параллельная запись, лист ожидания.
+Дальнейшие поля (transcript_summary, structured_summary, criteria_scores, key_facts, operator_mistakes, missed_opportunities) должны опираться ТОЛЬКО на этот список фактов. Для каждого утверждения в ответе ты обязан уметь указать реплику-основание из стенограммы. Если основание найти нельзя — убери утверждение или зафиксируй отсутствие данных.
 
 ПРАВИЛА ИЗВЛЕЧЕНИЯ ДАННЫХ (ФИО, УСЛУГИ, ДАТЫ, ВРЕМЯ):
 1. ФИО МАСТЕРОВ И КЛИЕНТОВ — СТРОГО С ЗАГЛАВНОЙ БУКВЫ:
@@ -59,6 +83,12 @@ export function getSystemPrompt(customSalonName?: string): string {
 - "консультация" — клиент получил справочную информацию без записи, предупредил об опоздании, либо звонок носит организационный/партнёрский характер (не клиентская запись);
 - "не применимо" — разговор не состоялся (диалог отсутствует).
 
+РАЗЛИЧЕНИЕ «ПРЕДЛОЖЕНИЕ ВРЕМЕНИ» И «СОСТОЯВШАЯСЯ ЗАПИСЬ» (критично для booking_status):
+- «есть окошко в 15:00», «вам удобно?», «могу предложить субботу» — это ПРЕДЛОЖЕНИЕ свободного времени, а НЕ запись;
+- запись считается состоявшейся ТОЛЬКО если клиент ЯВНО подтвердил конкретный слот («да, давайте», «записывайте», «отлично») и менеджер зафиксировал бронь («записала вас», «запись оформлена», «подтверждаем»);
+- молчание, «спасибо», «до свидания» без подтверждения конкретного слота — НЕ согласие на запись;
+- фразы автоинформатора («разговор может быть записан») НИКОГДА не означают согласие клиента на запись.
+
 ШАГ 4. РЕЗЮМЕ И СТРУКТУРИРОВАННЫЕ ПАРАМЕТРЫ ОБРАЩЕНИЯ:
 В резюме звонка ОБЯЗАТЕЛЬНО отдельно фиксируются 8 ключевых параметров СТРОГО ПО СОДЕРЖАНИЮ РАЗГОВОРА:
 1. Цель обращения (точная цель из диалога: первичная запись, перенос, предупреждение об опоздании, запрос отсутствующей услуги, партнёрский/организационный звонок и т.д.).
@@ -69,6 +99,7 @@ export function getSystemPrompt(customSalonName?: string): string {
 6. Состоялась ли запись (четкий фактический статус, например: «Запись состоялась (подтверждена)», «Действующая запись сохранена (клиент предупредил об опоздании)», «Запись не состоялась (отказ — нужная услуга отсутствует)», «Не применимо (партнёрский/организационный звонок)»).
 7. Если запись не состоялась — по какой причине (фактическая причина строго из текста разговора).
 8. Какие дальнейшие действия необходимо выполнить менеджеру (СТРОГО по итогам именно этого звонка! Например: при опоздании — отметить задержку в CRM и предупредить мастера; при предложении билетов в WhatsApp — проверить сообщение в WhatsApp и передать управляющему; при отказе из-за отсутствия услуги — зафиксировать спрос на услугу в журнале. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать шаблоны про «карточку Консультация» и «отправить прайс-лист», если разговор был не об этом!).
+   Также запрещено рекомендовать «подтвердить запись по SMS/email» и «отправить напоминание накануне», если из разговора видно, что запись уже внесена в систему онлайн-записи и подтверждение отправляется автоматически.
 
 ТЕКСТОВОЕ РЕЗЮМЕ (transcript_summary) ОБЯЗАТЕЛЬНО состоит из:
 1) Краткая суть обращения (услуга, дата, время, мастер);
@@ -115,6 +146,28 @@ export function getSystemPrompt(customSalonName?: string): string {
    - В блоке «Ошибки и недочеты» и «Советы» ЗАПРЕЩЕНО упоминать допродажи, прайс-лист или напоминания о визите накануне, если соответствующий критерий неприменим или это неуместно (например, при опоздании на 15 минут или партнёрском звонке).
    - Ошибки и недочеты в резюме должны СТРОГО соответствовать применимым критериям этого звонка с оценкой < 8.
    - Итоговый балл оператора (operator_score) рассчитывается строго как среднее арифметическое только по применимым критериям (is_applicable: true).
+
+ШАГ 7. АНАЛИЗ УПУЩЕННЫХ ВОЗМОЖНОСТЕЙ (missed_opportunities) — ОБЯЗАТЕЛЬНОЕ ПОЛЕ
+Определи, были ли в ЭТОМ разговоре реалистичные точки, где менеджер мог увеличить ценность звонка, но не сделал этого. Возможные типы:
+- "additional_service" — можно было предложить сопутствующую услугу (снятие, уход, дизайн, брови, спа);
+- "parallel_booking" — можно было предложить параллельную запись или услуги в 4 руки;
+- "alternative_master" — при отказе по времени или цене можно было предложить другого мастера;
+- "higher_category_master" — можно было предложить мастера более высокой категории;
+- "objection_recovery" — сомнения гостя не были отработаны, гость ушёл без записи;
+- "next_visit" — не предложена запись на следующий визит.
+КЛЮЧЕВОЕ ПРАВИЛО РЕАЛЬНОСТИ: возможность фиксируется ТОЛЬКО если в стенограмме есть реплика-основание — момент, где предложение было уместно и по сценарию звонка оно ещё могло прозвучать. Запрещено фиксировать упущенную возможность «по умолчанию»: если менеджер вёл разговор корректно и упустить было нечего — missed_opportunities = [].
+Для каждой возможности укажи: type; evidence — реплика или момент диалога, где возможность упущена; what_to_say — конкретная фраза, которую стоило произнести.
+Поле missed_opportunities ОБЯЗАТЕЛЬНО в ответе всегда, даже если в примерах ниже оно не показано; при отсутствии возможностей верни [].
+Если missed_opportunities пуст — запрещено писать в ошибках и советах формулировки вида «не предложил допуслугу», «не предложил параллельную запись», «не предложил альтернативу».
+
+ШАГ 8. ФИНАЛЬНАЯ САМОПРОВЕРКА (обязательно перед выводом JSON)
+Свери разделы ответа между собой и исправь противоречия:
+1) operator_score = среднее арифметическое score ТОЛЬКО по критериям с is_applicable: true (округлено до целого).
+2) Каждая ошибка в «Ошибки и недочеты» и operator_mistakes соответствует критерию с оценкой < 8. Если таких критериев нет — массив ошибок пуст, а в разборе пиши «Звонок проведён качественно».
+3) booking_status = key_facts.booking_status = вывод в transcript_summary; call_outcome согласован: «запись»<->«согласие», «отказ»<->«отказ», «консультация»/«перезвон»<->«консультация».
+4) Услуга, дата, время, мастер ОДИНАКОВЫ в transcript_summary, structured_summary и key_facts. Если в одном разделе «не указана», а в другом указано конкретное значение — используй значение, подтверждённое стенограммой.
+5) manager_next_steps и рекомендации не содержат шаблонов, не относящихся к этому звонку (запрещены «отправить прайс-лист», «подтвердить запись по SMS», «карточка Консультация» вне контекста).
+6) Все оценки в диапазоне 0–10; неприменимые критерии имеют score: null и is_applicable: false.
 
 РЕГЛАМЕНТ САЛОНА
 - Официальное название: «${salon}». Приветствие с этим названием — норма, оценку за него не снижай.
@@ -171,6 +224,9 @@ export function getSystemPrompt(customSalonName?: string): string {
   "operator_comment": "Подробный разбор работы менеджера с указанием причин снижения оценки...",
   "recommendations": [
     "Совет по оптимизации работы 1..."
+  ],
+  "missed_opportunities": [
+    { "type": "additional_service|parallel_booking|alternative_master|higher_category_master|objection_recovery|next_visit", "evidence": "реплика или момент диалога, где возможность упущена", "what_to_say": "конкретная фраза, которую стоило произнести" }
   ]
 }`;
 }
@@ -598,7 +654,12 @@ ${durationLine}${transcript}`;
 
 /**
  * Программная проверка согласованности ответа модели.
- * Ловит две основные ошибки: оценку при несостоявшемся звонке и статус «не состоялся» при реальном диалоге.
+ * Базовые проверки: оценка при несостоявшемся звонке и статус «не состоялся» при реальном диалоге.
+ * Дополнительные проверки согласованности разделов:
+ *  - call_outcome <-> booking_status;
+ *  - operator_score <-> среднее арифметическое применимых критериев (допуск ±1);
+ *  - оценка в transcript_summary <-> operator_score (допуск ±1);
+ *  - «фантомные» ошибки допродаж при пустом missed_opportunities.
  */
 export function validateResult(result: AnalysisResult): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
@@ -626,6 +687,59 @@ export function validateResult(result: AnalysisResult): { valid: boolean; errors
 
   if (result.booking_status !== result.key_facts.booking_status) {
     errors.push('booking_status не совпадает с key_facts.booking_status');
+  }
+
+  // 1. call_outcome <-> booking_status
+  const outcomeBookingMap: Record<string, string[]> = {
+    'запись': ['согласие'],
+    'отказ': ['отказ'],
+    'консультация': ['консультация'],
+    'перезвон': ['консультация'],
+    'отмена': ['отказ', 'согласие', 'консультация'],
+  };
+  if (!notHappened) {
+    const allowed = outcomeBookingMap[result.key_facts.call_outcome];
+    if (allowed && !allowed.includes(result.booking_status)) {
+      errors.push('call_outcome «' + result.key_facts.call_outcome + '» не согласован с booking_status «' + result.booking_status + '»');
+    }
+  }
+
+  // 2. operator_score <-> среднее применимых критериев (допуск ±1)
+  const rAny = result as any;
+  const criteria: any[] =
+    (Array.isArray(rAny.criteria_scores) ? rAny.criteria_scores : null) ||
+    (rAny.evaluation && Array.isArray(rAny.evaluation.criteria) ? rAny.evaluation.criteria : null) ||
+    [];
+  const applicableScores = criteria
+    .filter((c: any) => c && c.is_applicable === true && typeof c.score === 'number' && !isNaN(c.score))
+    .map((c: any) => c.score as number);
+  if (!notHappened && applicableScores.length > 0 && typeof result.operator_score === 'number') {
+    const avg = Math.round(applicableScores.reduce((s, v) => s + v, 0) / applicableScores.length);
+    if (Math.abs(result.operator_score - avg) > 1) {
+      errors.push('operator_score (' + result.operator_score + ') расходится со средним применимых критериев (' + avg + ')');
+    }
+  }
+
+  // 3. Оценка в тексте резюме <-> operator_score (допуск ±1)
+  if (!notHappened && typeof result.operator_score === 'number') {
+    const m = String(result.transcript_summary || '').match(/оценка\s*(\d{1,2})\s*\/\s*10/i);
+    if (m) {
+      const summaryScore = parseInt(m[1], 10);
+      if (!isNaN(summaryScore) && Math.abs(summaryScore - result.operator_score) > 1) {
+        errors.push('оценка в transcript_summary (' + summaryScore + '/10) расходится с operator_score (' + result.operator_score + ')');
+      }
+    }
+  }
+
+  // 4. Фантомные ошибки допродаж: missed_opportunities пуст — формулировок о несостоявшихся допродажах быть не должно
+  const missed = (result as any).missed_opportunities;
+  if (Array.isArray(missed) && missed.length === 0 && Array.isArray(result.operator_mistakes)) {
+    const phantom = result.operator_mistakes.filter((mm: string) =>
+      /не предложил\s+(?:сопутств|доп|альтернатив|параллель|другого специалиста|мастера другой)/i.test(String(mm))
+    );
+    if (phantom.length > 0) {
+      errors.push('missed_opportunities пуст, но в operator_mistakes есть формулировки о несостоявшихся допродажах');
+    }
   }
 
   return { valid: errors.length === 0, errors };
@@ -1772,6 +1886,29 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
     recommendations: advice && advice.length > 0 ? advice : recommendations,
   };
 
+  // Прокидывание упущенных возможностей из ответа модели (ШАГ 7 системного промпта)
+  let missedOpportunities: { type: string; evidence: string; what_to_say: string }[] = [];
+  const rawMissed = parsed.missed_opportunities;
+  if (Array.isArray(rawMissed)) {
+    missedOpportunities = rawMissed
+      .map((m: any) => {
+        if (m && typeof m === 'object') {
+          const item = {
+            type: String(m.type || m.category || '').trim(),
+            evidence: String(m.evidence || m.reason || '').trim(),
+            what_to_say: String(m.what_to_say || m.suggestion || '').trim(),
+          };
+          return item.type ? item : null;
+        }
+        if (typeof m === 'string' && m.trim()) {
+          return { type: m.trim(), evidence: '', what_to_say: '' };
+        }
+        return null;
+      })
+      .filter((m: any): m is { type: string; evidence: string; what_to_say: string } => m !== null);
+  }
+  (result as any).missed_opportunities = missedOpportunities;
+
   // Программная проверка согласованности — только логируем расхождения.
   const check = validateResult(result);
   if (!check.valid) {
@@ -2355,5 +2492,3 @@ export async function clarifyCallContextWithGigaChat({
     timestamp: now
   };
 }
-
-
