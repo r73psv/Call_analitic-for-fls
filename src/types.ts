@@ -463,6 +463,7 @@ export interface AnalysisResult {
     structured_summary?: StructuredCallSummary;
     evaluation?: CallEvaluation;
     criteria_scores?: CallEvaluationCriterion[];
+    missed_opportunities?: { type: string; evidence: string; what_to_say: string }[];
   };
   operator_score: number | null;
   operator_comment: string;
