@@ -1937,7 +1937,7 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
       })
       .filter((m: any): m is { type: string; evidence: string; what_to_say: string } => m !== null);
   }
-  (result as any).missed_opportunities = missedOpportunities;
+  result.missed_opportunities = missedOpportunities;
 
   // Программная проверка согласованности — только логируем расхождения.
   const check = validateResult(result);
