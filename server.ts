@@ -2679,21 +2679,44 @@ async function performS3Hydration(): Promise<boolean> {
 
 // S3 Storage Status & Sync endpoints
 app.get('/api/s3/status', async (req, res) => {
-  const status = await getSyncStatus();
-  res.json({
-    configured: status.connected,
-    bucket: status.bucket,
-    endpoint: status.endpoint,
-    key: status.key,
-    lastSync: status.synced_at,
-    lastError: status.error || null,
-    ...status
-  });
+  try {
+    const status = await getSyncStatus();
+    res.json({
+      configured: status.connected,
+      bucket: status.bucket,
+      endpoint: status.endpoint,
+      key: status.key,
+      lastSync: status.synced_at,
+      lastError: status.error || null,
+      ...status
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      configured: false,
+      connected: false,
+      bucket: '—',
+      endpoint: '',
+      key: 'app/data/data-store.enc',
+      synced_at: null,
+      error: err?.message || 'Ошибка получения статуса S3',
+    });
+  }
 });
 
 app.get('/api/sync/status', async (req, res) => {
-  const status = await getSyncStatus();
-  res.json(status);
+  try {
+    const status = await getSyncStatus();
+    res.json(status);
+  } catch (err: any) {
+    res.status(500).json({
+      bucket: '—',
+      key: 'app/data/data-store.enc',
+      endpoint: '',
+      connected: false,
+      synced_at: null,
+      error: err?.message || 'Ошибка получения статуса S3',
+    });
+  }
 });
 
 app.post('/api/s3/sync', async (req, res) => {
@@ -5292,6 +5315,11 @@ app.get('/api/stats', (req, res) => {
 
 // Serve Frontend Vite bundle in production / fallback routing
 async function startServer() {
+  // Never fall through unmatched /api/* routes to HTML SPA fallback
+  app.use('/api', (req, res) => {
+    res.status(404).json({ error: `API endpoint not found: ${req.method} ${req.originalUrl}` });
+  });
+
   // 1. Mount Vite dev server middleware (in development) or static files (in production) BEFORE listening
   if (process.env.NODE_ENV === 'production') {
     app.use(express.static(DIST_PATH));

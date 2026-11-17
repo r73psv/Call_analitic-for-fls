@@ -15,6 +15,32 @@ interface S3Status {
   error?: string | null;
 }
 
+async function parseJsonSafe(res: Response): Promise<{ ok: boolean; data: any; isHtml: boolean }> {
+  const contentType = res.headers.get('content-type') || '';
+  const text = await res.text();
+  const trimmed = text.trim();
+  const isHtml = contentType.includes('text/html') || trimmed.startsWith('<');
+  if (isHtml || !trimmed) {
+    return { ok: false, data: null, isHtml };
+  }
+  try {
+    return { ok: true, data: JSON.parse(trimmed), isHtml: false };
+  } catch {
+    return { ok: false, data: null, isHtml: false };
+  }
+}
+
+function buildAuthHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (typeof window !== 'undefined') {
+    const token = localStorage.getItem('callqa_auth_token');
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+  }
+  return headers;
+}
+
 export function S3SyncPanel() {
   const [status, setStatus] = useState<S3Status | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -23,13 +49,36 @@ export function S3SyncPanel() {
 
   const fetchStatus = async () => {
     try {
-      const res = await fetch('/api/sync/status');
-      if (res.ok) {
-        const data = await res.json();
-        setStatus(data);
+      const res = await fetch('/api/sync/status', {
+        headers: {
+          ...buildAuthHeaders(),
+          Accept: 'application/json',
+        },
+      });
+      const parsed = await parseJsonSafe(res);
+      if (res.ok && parsed.ok && parsed.data) {
+        setStatus(parsed.data);
+      } else if (parsed.isHtml) {
+        setStatus((prev) => ({
+          bucket: prev?.bucket || '—',
+          key: prev?.key || 'app/data/data-store.enc',
+          endpoint: prev?.endpoint || '',
+          connected: false,
+          synced_at: prev?.synced_at || null,
+          error: 'Сервер перезапускается — повторная проверка статуса S3...',
+        }));
+      } else if (parsed.data?.error) {
+        setStatus((prev) => ({
+          bucket: prev?.bucket || '—',
+          key: prev?.key || 'app/data/data-store.enc',
+          endpoint: prev?.endpoint || '',
+          connected: false,
+          synced_at: prev?.synced_at || null,
+          error: parsed.data.error,
+        }));
       }
     } catch (err: any) {
-      console.error('Ошибка получения статуса S3:', err);
+      console.warn('Не удалось обновить статус S3:', err?.message || err);
     } finally {
       setLoading(false);
     }
@@ -45,8 +94,25 @@ export function S3SyncPanel() {
     setSyncing(true);
     setMessage(null);
     try {
-      const res = await fetch('/api/sync', { method: 'POST' });
-      const data = await res.json();
+      const res = await fetch('/api/sync', {
+        method: 'POST',
+        headers: {
+          ...buildAuthHeaders(),
+          Accept: 'application/json',
+        },
+      });
+      const parsed = await parseJsonSafe(res);
+      if (!parsed.ok || !parsed.data) {
+        setMessage({
+          text: parsed.isHtml
+            ? 'Сервер временно недоступен (перезапуск). Повторите попытку через пару секунд.'
+            : `Ошибка ответа сервера (HTTP ${res.status})`,
+          type: 'error',
+        });
+        return;
+      }
+
+      const data = parsed.data;
       if (res.ok && data.ok) {
         setMessage({
           text: `Синхронизация успешна (${Math.round((data.size_bytes || 0) / 1024)} КБ зашифровано)`,
@@ -106,7 +172,7 @@ export function S3SyncPanel() {
             </>
           ) : (
             <>
-              <AlertCircle className="w-3.5 h-3.5 text-rose-600" /> {loading ? 'Проверка...' : 'Ошибка подключения'}
+              <AlertCircle className="w-3.5 h-3.5 text-rose-600" /> {loading ? 'Проверка...' : 'Не подключено'}
             </>
           )}
         </span>
@@ -147,7 +213,7 @@ export function S3SyncPanel() {
 
         <div className="flex justify-between py-1.5">
           <span className="text-slate-500">Последняя синхронизация:</span>
-          <span className="font-medium text-slate-800">{formatDateTime(status?.synced_at)}</span>
+          <span className="font-medium text-slate-800 tabular-nums">{formatDateTime(status?.synced_at)}</span>
         </div>
 
         {message && (
