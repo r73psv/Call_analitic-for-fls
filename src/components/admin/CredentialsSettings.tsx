@@ -9,10 +9,11 @@ import {
   HelpCircle, Calendar, RefreshCw, Clock, Globe, Zap, 
   CheckCircle2, AlertTriangle, Trash2, Cpu, Eye, EyeOff, Save, AlertCircle,
   Upload, FileCode, Folder, Copy, Check, FileCheck, ChevronDown, ChevronUp,
-  Building2, RotateCcw, Users, PhoneCall, Radio, Sparkles, FileText
+  Building2, RotateCcw, Users, PhoneCall, Radio, Sparkles, FileText, Mic
 } from 'lucide-react';
-import { GigaChatModel, MegafonApiVersion } from '../../types.js';
+import { GigaChatModel, MegafonApiVersion, SttProvider, GigaamModelVariant } from '../../types.js';
 import { S3SyncPanel } from '../S3SyncPanel.js';
+import { TranscriptionModelSelector } from '../TranscriptionModelSelector.js';
 
 interface CredentialsSettingsProps {
   authToken?: string | null;
@@ -74,6 +75,27 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
   const [testingYandex, setTestingYandex] = useState(false);
   const [yandexTestResult, setYandexTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [showAdvancedYandex, setShowAdvancedYandex] = useState(false);
+
+  // Выбор модели транскрибации речи (STT)
+  const [transcriptionModel, setTranscriptionModel] = useState<SttProvider>('yandex_speechkit');
+  const [yandexConfigured, setYandexConfigured] = useState(false);
+  const [savingSttOnly, setSavingSttOnly] = useState(false);
+  const [sttSaveMessage, setSttSaveMessage] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  // T-Bank VoiceKit (Тинькофф Облако STT)
+  const [tbankApiKey, setTbankApiKey] = useState('');
+  const [tbankSecretKey, setTbankSecretKey] = useState('');
+  const [tbankConfigured, setTbankConfigured] = useState(false);
+  const [testingTbank, setTestingTbank] = useState(false);
+  const [tbankTestResult, setTbankTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  // GigaAM v3 (SaluteDevices / Sber ASR)
+  const [gigaamApiUrl, setGigaamApiUrl] = useState('');
+  const [gigaamApiKey, setGigaamApiKey] = useState('');
+  const [gigaamVariant, setGigaamVariant] = useState<GigaamModelVariant>('e2e_rnnt');
+  const [gigaamConfigured, setGigaamConfigured] = useState(false);
+  const [testingGigaam, setTestingGigaam] = useState(false);
+  const [gigaamTestResult, setGigaamTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
   // Yandex Object Storage (для аудиозаписей SpeechKit >= 1MB)
   const [yandexStorageBucket, setYandexStorageBucket] = useState('');
@@ -187,6 +209,17 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
       if (data.yandexKeyInfo) {
         setYandexKeyInfo(data.yandexKeyInfo);
       }
+      setYandexConfigured(!!data.yandexConfigured);
+
+      // STT / T-Bank VoiceKit / GigaAM v3
+      setTranscriptionModel(data.transcriptionModel || 'yandex_speechkit');
+      setTbankApiKey(data.tbankApiKey || '');
+      setTbankSecretKey(data.tbankSecretKey || '');
+      setTbankConfigured(!!data.tbankConfigured);
+      setGigaamApiUrl(data.gigaamApiUrl || '');
+      setGigaamApiKey(data.gigaamApiKey || '');
+      setGigaamVariant(data.gigaamVariant || 'e2e_rnnt');
+      setGigaamConfigured(!!data.gigaamConfigured);
 
       // Yandex Object Storage
       setYandexStorageBucket(data.yandexStorageBucket || '');
@@ -274,6 +307,12 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
         yandexServiceAccountId,
         yandexServiceAccountKeyFile,
         yandexServiceAccountKeyJson,
+        transcriptionModel,
+        tbankApiKey,
+        tbankSecretKey,
+        gigaamApiUrl,
+        gigaamApiKey,
+        gigaamVariant,
         yandexStorageBucket,
         yandexStorageAccessKey,
         yandexStorageSecretKey,
@@ -326,6 +365,10 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
       if (storeEncryptionKey) {
         setStoreEncryptionKeyConfigured(true);
       }
+      setTbankConfigured(Boolean(tbankApiKey.trim() && tbankSecretKey.trim()));
+      const isCloudRuGiga = gigaamApiUrl.toLowerCase().includes('cloud.ru') || gigaamVariant === 'sber/GigaASR';
+      setGigaamConfigured(isCloudRuGiga ? Boolean(gigaamApiKey.trim()) : Boolean(gigaamApiUrl.trim()));
+      setYandexConfigured(Boolean(yandexApiKey.trim() || yandexKeyInfo.configured));
     } catch (err: any) {
       setSaveError(err.message);
     } finally {
@@ -510,6 +553,78 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
       setYandexTestResult({ ok: false, msg: err.message });
     } finally {
       setTestingYandex(false);
+    }
+  };
+
+  const handleSelectDefaultStt = async (newModel: SttProvider) => {
+    setTranscriptionModel(newModel);
+    setSavingSttOnly(true);
+    setSttSaveMessage(null);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: getHeaders(),
+        body: JSON.stringify({ transcriptionModel: newModel }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Не удалось обновить модель транскрибации');
+      setSttSaveMessage({ ok: true, msg: 'Активная модель транскрибации речи сохранена.' });
+      setTimeout(() => setSttSaveMessage(null), 3500);
+    } catch (err: any) {
+      setSttSaveMessage({ ok: false, msg: err.message || 'Ошибка сохранения модели' });
+    } finally {
+      setSavingSttOnly(false);
+    }
+  };
+
+  const handleTestTbank = async () => {
+    setTestingTbank(true);
+    setTbankTestResult(null);
+    try {
+      const res = await fetch('/api/admin/test/tbank', {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({
+          apiKey: tbankApiKey,
+          secretKey: tbankSecretKey,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setTbankTestResult({ ok: true, msg: data.message });
+      } else {
+        setTbankTestResult({ ok: false, msg: data.error || 'Ошибка проверки T-Bank VoiceKit' });
+      }
+    } catch (err: any) {
+      setTbankTestResult({ ok: false, msg: err.message });
+    } finally {
+      setTestingTbank(false);
+    }
+  };
+
+  const handleTestGigaAm = async () => {
+    setTestingGigaam(true);
+    setGigaamTestResult(null);
+    try {
+      const res = await fetch('/api/admin/test/gigaam', {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({
+          apiUrl: gigaamApiUrl,
+          apiKey: gigaamApiKey,
+          variant: gigaamVariant,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setGigaamTestResult({ ok: true, msg: data.message });
+      } else {
+        setGigaamTestResult({ ok: false, msg: data.error || 'Ошибка проверки сервера GigaAM v3' });
+      }
+    } catch (err: any) {
+      setGigaamTestResult({ ok: false, msg: err.message });
+    } finally {
+      setTestingGigaam(false);
     }
   };
 
@@ -1197,6 +1312,246 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
               <Save className="w-3.5 h-3.5" />
               {savingPromptOnly ? 'Сохранение...' : 'Сохранить системный промпт'}
             </button>
+          </div>
+        </div>
+
+        {/* 1.5. Выбор активной модели транскрибации речи (STT) */}
+        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs space-y-4 lg:col-span-2" id="stt-provider-selector-card">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 pb-3 border-b border-slate-100">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 bg-indigo-50 text-indigo-700 rounded-xl">
+                <Mic className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="font-bold text-slate-900 text-xs">Модель транскрибации речи (ASR / STT)</h4>
+                <p className="text-[11px] text-slate-500">
+                  Выбор движка распознавания для новых звонков и повторной расшифровки · 152-ФЗ
+                </p>
+              </div>
+            </div>
+            {sttSaveMessage && (
+              <span className={`text-[11px] font-semibold flex items-center gap-1 ${sttSaveMessage.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
+                {sttSaveMessage.ok ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertCircle className="w-3.5 h-3.5" />}
+                <span>{sttSaveMessage.msg}</span>
+              </span>
+            )}
+          </div>
+
+          <TranscriptionModelSelector
+            currentModel={transcriptionModel}
+            onSelectModel={handleSelectDefaultStt}
+            disabled={savingSttOnly}
+            statusMap={{
+              yandex_speechkit: yandexConfigured || Boolean(yandexApiKey.trim() || yandexKeyInfo.configured),
+              tbank_voicekit: tbankConfigured || Boolean(tbankApiKey.trim() && tbankSecretKey.trim()),
+              gigaam_v3:
+                gigaamConfigured ||
+                (gigaamApiUrl.toLowerCase().includes('cloud.ru') || gigaamVariant === 'sber/GigaASR'
+                  ? Boolean(gigaamApiKey.trim())
+                  : Boolean(gigaamApiUrl.trim())),
+            }}
+          />
+        </div>
+
+        {/* 1.6. T-Bank VoiceKit (Тинькофф Облако STT) */}
+        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs space-y-4" id="tbank-voicekit-card">
+          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 bg-amber-50 text-amber-700 rounded-xl">
+                <Radio className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="font-bold text-slate-900 text-xs">T-Bank VoiceKit (Т-Банк Облако STT)</h4>
+                <p className="text-[11px] text-slate-500">HS256 JWT авторизация · api.tbank.ru/v1/stt:recognize</p>
+              </div>
+            </div>
+            <span className="text-[11px] font-medium text-slate-500">152-ФЗ · РФ</span>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">
+              API Key (TBANK_VOICEKIT_API_KEY)*
+            </label>
+            <input
+              type={showKeys ? 'text' : 'password'}
+              value={tbankApiKey}
+              onChange={(e) => setTbankApiKey(e.target.value)}
+              placeholder="Вставьте публичный API Key из личного кабинета T-Bank VoiceKit..."
+              className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-hidden"
+              id="tbank-api-key-input"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">
+              Secret Key Base64 (TBANK_VOICEKIT_SECRET_KEY)*
+            </label>
+            <input
+              type={showKeys ? 'text' : 'password'}
+              value={tbankSecretKey}
+              onChange={(e) => setTbankSecretKey(e.target.value)}
+              placeholder="Секретный ключ для подписи JWT-токенов (HS256)..."
+              className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-hidden"
+              id="tbank-secret-key-input"
+            />
+            <p className="text-[10px] text-slate-500 mt-1">
+              Аудио автоматически конвертируется в PCM 16 кГц (LINEAR16) и при необходимости нарезается на сегменты по паузам.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 pt-1 flex-wrap">
+            <button
+              type="button"
+              onClick={handleTestTbank}
+              disabled={testingTbank}
+              className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5"
+              id="test-tbank-voicekit-btn"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${testingTbank ? 'animate-spin text-indigo-600' : ''}`} />
+              {testingTbank ? 'Проверка...' : 'Проверить T-Bank VoiceKit'}
+            </button>
+            {tbankTestResult && (
+              <span className={`text-[11px] font-medium ${tbankTestResult.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
+                {tbankTestResult.msg}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* 1.7. GigaASR (Cloud.ru Evolution) / GigaAM v3 (SaluteDevices / Сбер ASR) */}
+        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs space-y-4" id="gigaam-v3-card">
+          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 bg-indigo-50 text-indigo-700 rounded-xl">
+                <Cpu className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="font-bold text-slate-900 text-xs">GigaASR (Cloud.ru Evolution) / GigaAM v3</h4>
+                <p className="text-[11px] text-slate-500">Cloud.ru Foundation Models API или локальный сервер инференса</p>
+              </div>
+            </div>
+            <span className="text-[11px] font-medium text-slate-500">152-ФЗ · РФ</span>
+          </div>
+
+          <div className="flex items-center flex-wrap gap-2">
+            <span className="text-[11px] font-bold text-slate-600">Быстрый пресет:</span>
+            <button
+              type="button"
+              onClick={() => {
+                setGigaamApiUrl('https://foundation-models.api.cloud.ru/v1/audio/transcriptions');
+                setGigaamVariant('sber/GigaASR');
+              }}
+              id="preset-cloudru-gigaasr-btn"
+              className={`px-2.5 py-1 text-[11px] font-bold rounded-lg border transition-colors ${
+                gigaamApiUrl.toLowerCase().includes('cloud.ru') || gigaamVariant === 'sber/GigaASR'
+                  ? 'bg-indigo-600 text-white border-indigo-600'
+                  : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+              }`}
+            >
+              ★ Cloud.ru Evolution (sber/GigaASR)
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (gigaamApiUrl.toLowerCase().includes('cloud.ru')) {
+                  setGigaamApiUrl('');
+                }
+                if (gigaamVariant === 'sber/GigaASR') {
+                  setGigaamVariant('e2e_rnnt');
+                }
+              }}
+              id="preset-selfhosted-gigaam-btn"
+              className={`px-2.5 py-1 text-[11px] font-bold rounded-lg border transition-colors ${
+                !gigaamApiUrl.toLowerCase().includes('cloud.ru') && gigaamVariant !== 'sber/GigaASR'
+                  ? 'bg-slate-800 text-white border-slate-800'
+                  : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+              }`}
+            >
+              Свой сервер GigaAM v3
+            </button>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">
+              URL эндпоинта API (GIGAAM_API_URL)*
+            </label>
+            <input
+              type="text"
+              value={gigaamApiUrl}
+              onChange={(e) => setGigaamApiUrl(e.target.value)}
+              placeholder="https://foundation-models.api.cloud.ru/v1/audio/transcriptions"
+              className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-hidden"
+              id="gigaam-api-url-input"
+            />
+            <p className="text-[10px] text-slate-500 mt-1">
+              Для Cloud.ru Evolution нажмите пресет выше или укажите <code>https://foundation-models.api.cloud.ru/v1/audio/transcriptions</code>.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">
+              Модель / вариант весов
+            </label>
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+              {(
+                [
+                  { id: 'sber/GigaASR', label: 'sber/GigaASR' },
+                  { id: 'e2e_rnnt', label: 'e2e_rnnt' },
+                  { id: 'e2e_ctc', label: 'e2e_ctc' },
+                  { id: 'rnnt', label: 'rnnt' },
+                  { id: 'ctc', label: 'ctc' },
+                ] as { id: GigaamModelVariant; label: string }[]
+              ).map((v) => (
+                <button
+                  key={v.id}
+                  type="button"
+                  onClick={() => setGigaamVariant(v.id)}
+                  id={`gigaam-variant-btn-${v.id.replace('/', '_')}`}
+                  className={`py-1.5 px-2 text-[11px] font-mono font-bold rounded-xl border text-center transition-colors ${
+                    gigaamVariant === v.id
+                      ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                      : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                  }`}
+                >
+                  {v.label}
+                </button>
+              ))}
+            </div>
+            <p className="text-[10px] text-slate-500 mt-1">
+              <code>sber/GigaASR</code> — облачный API Cloud.ru Evolution; <code>e2e_*</code> / <code>rnnt</code> / <code>ctc</code> — self-hosted GigaAM v3.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">
+              API-ключ Cloud.ru Evolution / Bearer Token (GIGAAM_API_KEY)
+            </label>
+            <input
+              type={showKeys ? 'text' : 'password'}
+              value={gigaamApiKey}
+              onChange={(e) => setGigaamApiKey(e.target.value)}
+              placeholder="Обязательно для Cloud.ru Evolution (ключ сервисного аккаунта AI Factory)..."
+              className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-hidden"
+              id="gigaam-api-key-input"
+            />
+          </div>
+
+          <div className="flex items-center gap-2 pt-1 flex-wrap">
+            <button
+              type="button"
+              onClick={handleTestGigaAm}
+              disabled={testingGigaam}
+              className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5"
+              id="test-gigaam-btn"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${testingGigaam ? 'animate-spin text-indigo-600' : ''}`} />
+              {testingGigaam ? 'Проверка...' : 'Проверить GigaASR / GigaAM v3'}
+            </button>
+            {gigaamTestResult && (
+              <span className={`text-[11px] font-medium ${gigaamTestResult.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
+                {gigaamTestResult.msg}
+              </span>
+            )}
           </div>
         </div>
 

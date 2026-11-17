@@ -7,6 +7,10 @@ export type ModelType = 'GigaChat:Lite' | 'GigaChat:Pro' | 'GigaChat:Max' | 'Gig
 
 export type GigaChatModel = 'GigaChat:Lite' | 'GigaChat:Pro' | 'GigaChat:Max' | 'GigaChat:Ultra';
 
+export type SttProvider = 'yandex_speechkit' | 'tbank_voicekit' | 'gigaam_v3';
+
+export type GigaamModelVariant = 'sber/GigaASR' | 'e2e_rnnt' | 'e2e_ctc' | 'rnnt' | 'ctc';
+
 export type UserRole = 'admin' | 'manager' | 'operator' | 'viewer';
 
 export interface User {
@@ -45,6 +49,18 @@ export interface SystemCredentials {
   yandexServiceAccountId?: string;
   yandexServiceAccountKeyFile?: string;
   yandexServiceAccountKeyJson?: string;
+
+  // Выбор модели транскрибации речи (STT)
+  transcriptionModel?: SttProvider;
+
+  // T-Bank VoiceKit (Тинькофф Облако STT)
+  tbankApiKey?: string;
+  tbankSecretKey?: string;
+
+  // GigaAM v3 (SaluteDevices / Sber ASR HTTP Inference)
+  gigaamApiUrl?: string;
+  gigaamApiKey?: string;
+  gigaamVariant?: GigaamModelVariant;
 
   // Yandex Object Storage (для аудиозаписей SpeechKit >= 1MB)
   yandexStorageBucket?: string;
@@ -185,6 +201,7 @@ export interface CallRecord {
   consent_purposes?: string[];
   consent_method?: 'voice' | 'written' | 'digital';
   gigachat_model?: GigaChatModel;
+  transcription_engine?: SttProvider | 'speechkit' | 'none' | string;
   anonymized?: boolean;
   retry_count?: number;
   last_retry_at?: string;
@@ -361,11 +378,14 @@ export interface S3ArchiveStatus {
 export interface SystemConfig {
   activeModel: ModelType | GigaChatModel;
   default_gigachat_model: GigaChatModel;
+  transcriptionModel?: SttProvider;
   salonName?: string;
   megafon: MegafonConfig;
   vk: VkConfig;
   yclients: YclientsConfig;
   yandexSpeechKit?: { apiKey?: string; folderId?: string; configured?: boolean };
+  tbankVoiceKit?: { configured?: boolean };
+  gigaamV3?: { apiUrl?: string; variant?: GigaamModelVariant; configured?: boolean };
   yandexCloudConfigured?: boolean;
   gigachatConfigured?: boolean;
   encryptionActive?: boolean;

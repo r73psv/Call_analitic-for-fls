@@ -6,8 +6,12 @@
 import { Router, Request, Response } from 'express';
 import { readStore, writeStore } from '../store/store.js';
 import { requireRole, getCurrentUser, logAccess } from './auth.js';
-import { GigaChatModel } from '../types.js';
+import { GigaChatModel, SttProvider, GigaamModelVariant } from '../types.js';
 import { getDefaultSystemPrompt } from '../services/gigachat.js';
+import { resolveActiveSttProvider } from '../services/transcriptionService.js';
+import { isYandexAuthConfigured } from '../services/yandex-auth.js';
+import { isTbankVoiceKitConfigured } from '../services/tbank-voicekit.js';
+import { getGigaAmConfig, isGigaAmConfigured, normalizeGigaamVariant } from '../services/gigaam-asr.js';
 
 export const settingsRouter = Router();
 
@@ -18,14 +22,20 @@ settingsRouter.get('/', async (req: Request, res: Response) => {
     const defaultModel = store.config.default_gigachat_model || (process.env.GIGACHAT_DEFAULT_MODEL as GigaChatModel) || 'GigaChat:Lite';
     const salonName = store.config.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
     const defaultPrompt = getDefaultSystemPrompt(salonName);
+    const transcriptionModel = resolveActiveSttProvider();
+    const gigaamCfg = getGigaAmConfig();
     res.json({
       salonName,
       default_gigachat_model: defaultModel,
       activeModel: defaultModel,
+      transcriptionModel,
+      gigaamVariant: gigaamCfg.variant,
       encryption_active: true,
       customSystemPrompt: store.config.customSystemPrompt || store.config.credentials?.customSystemPrompt || '',
       defaultSystemPrompt: defaultPrompt,
-      yandex_speechkit_configured: !!process.env.YC_SERVICE_ACCOUNT_KEY_FILE,
+      yandex_speechkit_configured: isYandexAuthConfigured(),
+      tbank_voicekit_configured: isTbankVoiceKitConfigured(),
+      gigaam_v3_configured: isGigaAmConfigured(),
       gigachat_configured: !!process.env.GIGACHAT_AUTH_KEY,
     });
   } catch (err: any) {
@@ -140,17 +150,23 @@ settingsRouter.post('/system-prompt/reset', requireRole(['admin', 'manager']), a
 // PUT /api/settings (Admin & Manager for prompt and salonName; only admin for default_gigachat_model)
 settingsRouter.put('/', requireRole(['admin', 'manager']), async (req: Request, res: Response) => {
   try {
-    const { default_gigachat_model, salonName, customSystemPrompt } = req.body;
-    if (!default_gigachat_model && salonName === undefined && customSystemPrompt === undefined) {
-      return res.status(400).json({ error: 'Необходимо указать default_gigachat_model, salonName или customSystemPrompt' });
+    const { default_gigachat_model, transcriptionModel, gigaamVariant, salonName, customSystemPrompt } = req.body;
+    if (
+      !default_gigachat_model &&
+      !transcriptionModel &&
+      !gigaamVariant &&
+      salonName === undefined &&
+      customSystemPrompt === undefined
+    ) {
+      return res.status(400).json({ error: 'Необходимо указать параметры настроек для обновления' });
     }
 
     const currentUser = getCurrentUser(req);
     const userRole = currentUser?.role || 'operator';
 
     // Model change is restricted to admin
-    if (default_gigachat_model && userRole !== 'admin') {
-      return res.status(403).json({ error: 'Изменение модели нейросети разрешено только администратору' });
+    if ((default_gigachat_model || transcriptionModel || gigaamVariant) && userRole !== 'admin') {
+      return res.status(403).json({ error: 'Изменение моделей ИИ и транскрибации разрешено только администратору' });
     }
 
     const store = await readStore();
@@ -162,6 +178,27 @@ settingsRouter.put('/', requireRole(['admin', 'manager']), async (req: Request, 
       }
       store.config.default_gigachat_model = default_gigachat_model;
       store.config.activeModel = default_gigachat_model;
+    }
+
+    if (transcriptionModel) {
+      const validStt: SttProvider[] = ['yandex_speechkit', 'tbank_voicekit', 'gigaam_v3'];
+      if (!validStt.includes(transcriptionModel)) {
+        return res.status(400).json({ error: `Недопустимая модель транскрибации. Допустимые: ${validStt.join(', ')}` });
+      }
+      store.config.transcriptionModel = transcriptionModel;
+      if (!store.config.credentials) store.config.credentials = {};
+      store.config.credentials.transcriptionModel = transcriptionModel;
+      process.env.STT_PROVIDER = transcriptionModel;
+    }
+
+    if (gigaamVariant) {
+      const validVariants: GigaamModelVariant[] = ['sber/GigaASR', 'e2e_rnnt', 'e2e_ctc', 'rnnt', 'ctc'];
+      if (!validVariants.includes(gigaamVariant)) {
+        return res.status(400).json({ error: `Недопустимый вариант GigaASR / GigaAM v3. Допустимые: ${validVariants.join(', ')}` });
+      }
+      if (!store.config.credentials) store.config.credentials = {};
+      store.config.credentials.gigaamVariant = normalizeGigaamVariant(gigaamVariant);
+      process.env.GIGAAM_MODEL_VARIANT = store.config.credentials.gigaamVariant;
     }
 
     if (salonName !== undefined) {
@@ -202,6 +239,8 @@ settingsRouter.put('/', requireRole(['admin', 'manager']), async (req: Request, 
       success: true,
       salonName: store.config.salonName || 'Fashion Look Studio',
       default_gigachat_model: store.config.default_gigachat_model,
+      transcriptionModel: resolveActiveSttProvider(),
+      gigaamVariant: getGigaAmConfig().variant,
       customSystemPrompt: store.config.customSystemPrompt || '',
     });
   } catch (err: any) {

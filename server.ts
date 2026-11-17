@@ -11,9 +11,11 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import dotenv from 'dotenv';
-import { CallRecord, LogEntry, SystemConfig, ModelType, DashboardStats, KeyFacts, VkConfig, YclientsConfig, GigaChatModel, SystemNotification, NotificationType, UserRole, ContextClarification } from './src/types.js';
+import { CallRecord, LogEntry, SystemConfig, ModelType, DashboardStats, KeyFacts, VkConfig, YclientsConfig, GigaChatModel, SttProvider, SystemNotification, NotificationType, UserRole, ContextClarification } from './src/types.js';
 import { transcribeWithRetry, fixDuplicatedTranscript, refineTranscriptRoles } from './src/services/speechkit.js';
-import { transcribeAudio } from './src/services/transcriptionService.js';
+import { transcribeAudio, resolveActiveSttProvider, getSttProviderLabel, normalizeSttProvider } from './src/services/transcriptionService.js';
+import { isTbankVoiceKitConfigured } from './src/services/tbank-voicekit.js';
+import { getGigaAmConfig, isGigaAmConfigured } from './src/services/gigaam-asr.js';
 import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation, harmonizeMistakesAndEvaluation, generateLocalFallbackAnalysis } from './src/services/gigachat.js';
 import { classifyCallContext } from './src/services/summaryUtils.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
@@ -799,15 +801,17 @@ async function executeSingleModelAttempt(
   }
 }
 
-// Unified Yandex SpeechKit STT + Sber GigaChat LLM Calling Logic with 152-ФЗ Anonymization
+// Unified Multi-Provider STT (Yandex SpeechKit / T-Bank VoiceKit / GigaAM v3) + Sber GigaChat LLM Calling Logic with 152-ФЗ Anonymization
 async function analyzeCallTextOrAudio(
   requestedModel: string,
   transcriptInput: string,
   audioBase64?: { data: string; mimeType: string },
   audioDownloadFailed: boolean = false,
-  callDurationSeconds?: number
+  callDurationSeconds?: number,
+  sttProviderOverride?: SttProvider
 ): Promise<Partial<CallRecord>> {
   let cleanTranscript = (transcriptInput || '').trim();
+  let usedTranscriptionEngine: string | undefined;
 
   // 0. Strict check: calls under 10 seconds MUST NOT hallucinate dialogue or receive scores
   if (callDurationSeconds !== undefined && callDurationSeconds < 10) {
@@ -865,22 +869,30 @@ async function analyzeCallTextOrAudio(
   let sttErrorReason = '';
   const hasAudio = !!(audioBase64 && audioBase64.data);
 
-  // 1. If audio is available and transcript is missing, transcribe via Russian model Yandex SpeechKit
+  // 1. If audio is available and transcript is missing, transcribe via configured Russian STT model
   if (!cleanTranscript && hasAudio) {
+    const activeProvider = resolveActiveSttProvider(sttProviderOverride);
+    const activeProviderLabel = getSttProviderLabel(activeProvider);
     try {
       const audioBuffer = Buffer.from(audioBase64!.data, 'base64');
       const mime = audioBase64!.mimeType || 'audio/mp3';
-      const sttResult = await transcribeAudio(audioBuffer, mime, (type, msg) => appendLog(type, 'speechkit', msg));
+      const sttResult = await transcribeAudio(
+        audioBuffer,
+        mime,
+        (type, msg) => appendLog(type, 'speechkit', msg),
+        activeProvider
+      );
       if (sttResult.text && sttResult.text.trim()) {
         cleanTranscript = fixDuplicatedTranscript(sttResult.text.trim());
-        appendLog('success', 'speechkit', `Аудиозапись успешно расшифрована Yandex SpeechKit (${cleanTranscript.length} симв.)`);
+        usedTranscriptionEngine = sttResult.engine;
+        appendLog('success', 'speechkit', `Аудиозапись успешно расшифрована (${activeProviderLabel}, ${cleanTranscript.length} симв.)`);
       } else {
         sttErrorReason = sttResult.error || 'Распознавание речи вернуло пустой текст (в записи отсутствует разборчивая речь или тишина)';
         appendLog('warning', 'speechkit', sttErrorReason);
       }
     } catch (sttErr: any) {
       sttErrorReason = sttErr.message || String(sttErr);
-      appendLog('error', 'speechkit', `Ошибка распознавания речи: ${sttErrorReason}`);
+      appendLog('error', 'speechkit', `Ошибка распознавания речи (${activeProviderLabel}): ${sttErrorReason}`);
     }
   }
 
@@ -983,7 +995,8 @@ async function analyzeCallTextOrAudio(
       operator_score: analysis.operator_score,
       operator_mistakes: analysis.operator_mistakes || [],
       operator_comment: analysis.operator_comment,
-      model_used: modelToUse
+      model_used: modelToUse,
+      ...(usedTranscriptionEngine ? { transcription_engine: usedTranscriptionEngine } : {}),
     };
   } catch (llmErr: any) {
     appendLog('error', 'gigachat', `Ошибка анализа через GigaChat: ${llmErr.message || llmErr}`);
@@ -4276,9 +4289,13 @@ app.post('/api/calls/:id/reanalyze', async (req, res) => {
     return res.status(403).json({ error: 'Недостаточно прав для переанализа (доступно только Администраторам и Управляющим)' });
   }
 
-  const modelOverride = req.body?.model;
+  const { model: modelOverride, sttProvider, forceRetranscribe } = req.body || {};
+  const normalizedStt = sttProvider ? normalizeSttProvider(String(sttProvider)) : undefined;
   try {
-    const updatedCall = await performCallReanalysis(id, modelOverride);
+    const updatedCall = await performCallReanalysis(id, modelOverride, {
+      sttProvider: normalizedStt,
+      forceRetranscribe: Boolean(forceRetranscribe || sttProvider),
+    });
     res.json(updatedCall);
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Внутренняя ошибка переанализа звонка' });
@@ -4497,12 +4514,14 @@ app.post('/api/calls/analyze', async (req, res) => {
   writeDb(db);
 
   try {
+    const sttOverride = req.body?.transcription_model ? normalizeSttProvider(String(req.body.transcription_model)) : undefined;
     const analysisResult = await analyzeCallTextOrAudio(
       selectedModel,
       transcript || '',
       audioBase64,
       false,
-      durationSec
+      durationSec,
+      sttOverride
     );
 
     // Update in Db
@@ -4551,7 +4570,11 @@ app.post('/api/calls/analyze', async (req, res) => {
 });
 
 // Core reanalysis logic for a call (reusable by API and background worker)
-async function performCallReanalysis(callId: string, modelOverride?: string): Promise<any> {
+async function performCallReanalysis(
+  callId: string,
+  modelOverride?: string,
+  options?: { sttProvider?: SttProvider; forceRetranscribe?: boolean }
+): Promise<any> {
   const db = readDb();
   const callIdx = db.calls.findIndex((c: any) => c.call_id === callId);
   if (callIdx === -1) {
@@ -4681,12 +4704,14 @@ async function performCallReanalysis(callId: string, modelOverride?: string): Pr
       audioDownloadFailed = true;
     }
 
+    const shouldRetranscribeFromAudio = Boolean(options?.forceRetranscribe && audioBase64 && !audioDownloadFailed);
     const analysisResult = await analyzeCallTextOrAudio(
       selectedModel,
-      existingTranscript,
+      shouldRetranscribeFromAudio ? '' : existingTranscript,
       audioBase64 || undefined,
       audioDownloadFailed,
-      call.duration_seconds
+      call.duration_seconds,
+      options?.sttProvider
     );
 
     const finalDb = readDb();
@@ -4830,10 +4855,31 @@ app.post('/api/logs/clear', (req, res) => {
 app.get('/api/config', (req, res) => {
   const db = readDb();
   const userRole = getCurrentUserRole(req);
+  const transcriptionModel = resolveActiveSttProvider();
+  const yandexConfigured = isYandexAuthConfigured();
+  const tbankConfigured = isTbankVoiceKitConfigured();
+  const gigaamCfg = getGigaAmConfig();
+
+  const sttMeta = {
+    transcriptionModel,
+    yandexSpeechKit: {
+      ...(db.config.yandexSpeechKit || {}),
+      configured: yandexConfigured,
+    },
+    tbankVoiceKit: {
+      configured: tbankConfigured,
+    },
+    gigaamV3: {
+      apiUrl: gigaamCfg.apiUrl,
+      variant: gigaamCfg.variant,
+      configured: isGigaAmConfigured(),
+    },
+  };
 
   if (userRole === 'admin') {
     return res.json({
       ...db.config,
+      ...sttMeta,
       salonName: getEffectiveSalonName(db.config),
     });
   }
@@ -4841,6 +4887,7 @@ app.get('/api/config', (req, res) => {
   // Sanitize config for non-admin roles
   const safeConfig = {
     ...db.config,
+    ...sttMeta,
     salonName: getEffectiveSalonName(db.config),
     credentials: undefined, // strip credentials
     megafon: {

@@ -41,6 +41,10 @@ export function getDefaultConfig(): SystemConfig {
   return {
     activeModel: (process.env.GIGACHAT_MODEL as any) || 'GigaChat:Lite',
     default_gigachat_model: (process.env.GIGACHAT_MODEL as any) || 'GigaChat:Lite',
+    transcriptionModel:
+      process.env.STT_PROVIDER === 'tbank_voicekit' || process.env.STT_PROVIDER === 'gigaam_v3'
+        ? process.env.STT_PROVIDER
+        : 'yandex_speechkit',
     salonName: (process.env.SALON_NAME || 'Лик 28').trim(),
     megafon: {
       apiVersion: megafonApiVersion,

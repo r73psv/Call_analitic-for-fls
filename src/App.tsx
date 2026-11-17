@@ -18,6 +18,7 @@ import { CallDetails } from './components/CallDetails.js';
 import { RecordingNotice } from './components/RecordingNotice.js';
 import { ConsentsTable } from './components/ConsentsTable.js';
 import { ModelSelector } from './components/ModelSelector.js';
+import { TranscriptionModelSelector, getSttEngineDisplayName } from './components/TranscriptionModelSelector.js';
 import { LoginModal } from './components/LoginModal.js';
 import { UserPasswordChangeModal } from './components/UserPasswordChangeModal.js';
 import { AdminPasswordPromptModal } from './components/AdminPasswordPromptModal.js';
@@ -31,7 +32,7 @@ import { NextStepsReminderToast } from './components/NextStepsReminderToast.js';
 import { SystemPromptEditor } from './components/SystemPromptEditor.js';
 import { UsersManagement } from './components/admin/UsersManagement.js';
 
-import { CallRecord, DashboardStats, SystemConfig, LogEntry, GigaChatModel, UserRole } from './types.js';
+import { CallRecord, DashboardStats, SystemConfig, LogEntry, GigaChatModel, SttProvider, UserRole } from './types.js';
 import { deduplicateCalls } from './services/callUtils.js';
 
 interface CurrentUserInfo {
@@ -441,6 +442,27 @@ export default function App() {
     }
   };
 
+  const handleTranscriptionModelChange = async (newStt: SttProvider) => {
+    if (userRole !== 'admin') return;
+    try {
+      await safeFetchJson('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcriptionModel: newStt }),
+      }, authToken, userRole);
+      if (config) {
+        setConfig({
+          ...config,
+          transcriptionModel: newStt,
+        });
+      }
+      await loadData(true);
+    } catch (err: any) {
+      console.error('Failed to update transcription model:', err);
+      setError(err?.message || 'Не удалось обновить модель транскрибации речи');
+    }
+  };
+
   const handleSaveSalonName = async (newName: string): Promise<boolean> => {
     try {
       await safeFetchJson('/api/settings', {
@@ -625,15 +647,31 @@ export default function App() {
                 </button>
               </div>
               <p className="text-[11px] text-slate-500">
-                SpeechKit ролевой + GigaChat (Сбер) + Шифрование AES-256-GCM + RBAC доступ
+                {getSttEngineDisplayName(config?.transcriptionModel)} + GigaChat (Сбер) + Шифрование AES-256-GCM + RBAC доступ
               </p>
             </div>
           </div>
 
           <div className="flex items-center flex-wrap gap-2.5">
+            {/* Active STT Transcription Engine Selector (compact) */}
+            <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs">
+              <span className="text-[11px] text-slate-500 font-medium whitespace-nowrap">Речь:</span>
+              <TranscriptionModelSelector
+                currentModel={config?.transcriptionModel || 'yandex_speechkit'}
+                onSelectModel={handleTranscriptionModelChange}
+                disabled={userRole !== 'admin'}
+                compact
+                statusMap={{
+                  yandex_speechkit: config?.yandexSpeechKit?.configured,
+                  tbank_voicekit: config?.tbankVoiceKit?.configured,
+                  gigaam_v3: config?.gigaamV3?.configured,
+                }}
+              />
+            </div>
+
             {/* Active GigaChat Model Selector (compact) */}
             <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs">
-              <span className="text-[11px] text-slate-500 font-medium">Модель:</span>
+              <span className="text-[11px] text-slate-500 font-medium whitespace-nowrap">ИИ:</span>
               <ModelSelector
                 currentModel={config?.default_gigachat_model || 'GigaChat:Lite'}
                 onSelectModel={handleModelChange}
@@ -1165,7 +1203,7 @@ export default function App() {
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> AES-256-GCM
             </span>
             <span>•</span>
-            <span>SpeechKit + GigaChat</span>
+            <span>{getSttEngineDisplayName(config?.transcriptionModel)} + GigaChat</span>
             <span>•</span>
             <span className="text-amber-700">Admin RBAC Gate</span>
           </div>

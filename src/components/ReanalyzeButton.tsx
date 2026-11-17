@@ -4,12 +4,15 @@
  */
 
 import React, { useState } from 'react';
-import { RefreshCw, Bot, ChevronDown, Check } from 'lucide-react';
-import { GigaChatModel, CallRecord } from '../types.js';
+import { RefreshCw, ChevronDown, Check, Mic } from 'lucide-react';
+import { GigaChatModel, CallRecord, SttProvider } from '../types.js';
+import { STT_MODELS, getSttEngineDisplayName } from './TranscriptionModelSelector.js';
 
 interface ReanalyzeButtonProps {
   callId: string;
   currentModel?: string;
+  currentSttEngine?: string;
+  hasAudio?: boolean;
   onReanalyzed: (updatedCall: CallRecord) => void;
   userRole?: string;
 }
@@ -17,6 +20,8 @@ interface ReanalyzeButtonProps {
 export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
   callId,
   currentModel = 'GigaChat:Lite',
+  currentSttEngine,
+  hasAudio = false,
   onReanalyzed,
   userRole = 'admin',
 }) => {
@@ -25,6 +30,7 @@ export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
     (currentModel.startsWith('GigaChat:') ? currentModel : 'GigaChat:Lite') as GigaChatModel
   );
   const [loading, setLoading] = useState(false);
+  const [loadingLabel, setLoadingLabel] = useState('Анализ...');
   const [error, setError] = useState<string | null>(null);
 
   const models: { id: GigaChatModel; label: string; desc: string }[] = [
@@ -34,19 +40,29 @@ export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
     { id: 'GigaChat:Ultra', label: 'Ultra (Reasoning)', desc: 'Глубокое рассуждение и аналитика' },
   ];
 
-  const handleReanalyze = async (modelToUse: GigaChatModel) => {
+  const handleReanalyze = async (modelToUse: GigaChatModel, sttProvider?: SttProvider) => {
     setLoading(true);
+    setLoadingLabel(sttProvider ? `Транскрибация (${getSttEngineDisplayName(sttProvider)})...` : 'Анализ...');
     setError(null);
     setIsOpen(false);
 
     try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('callqa_auth_token') : null;
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'x-user-role': userRole,
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
       const res = await fetch(`/api/calls/${callId}/reanalyze`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-user-role': userRole,
-        },
-        body: JSON.stringify({ model: modelToUse }),
+        headers,
+        body: JSON.stringify({
+          model: modelToUse,
+          ...(sttProvider ? { sttProvider, forceRetranscribe: true } : {}),
+        }),
       });
 
       if (!res.ok) {
@@ -63,7 +79,7 @@ export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
     }
   };
 
-  if (userRole === 'viewer') {
+  if (userRole === 'viewer' || userRole === 'operator') {
     return null;
   }
 
@@ -74,10 +90,10 @@ export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
           type="button"
           onClick={() => handleReanalyze(selectedModel)}
           disabled={loading}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-l-lg transition-colors disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-l-lg transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-          {loading ? 'Анализ...' : `Пересчитать (${selectedModel.replace('GigaChat:', '')})`}
+          {loading ? loadingLabel : `Пересчитать (${selectedModel.replace('GigaChat:', '')})`}
         </button>
 
         <button
@@ -85,7 +101,8 @@ export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
           onClick={() => setIsOpen(!isOpen)}
           disabled={loading}
           className="px-2 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-r-lg border-l border-emerald-500 transition-colors disabled:opacity-50"
-          title="Выбрать модель GigaChat"
+          title="Выбрать модель GigaChat или транскрибацию"
+          id="reanalyze-dropdown-toggle-btn"
         >
           <ChevronDown className="w-3.5 h-3.5" />
         </button>
@@ -97,8 +114,8 @@ export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
             className="fixed inset-0 z-20"
             onClick={() => setIsOpen(false)}
           />
-          <div className="absolute right-0 mt-1.5 w-60 bg-white rounded-xl shadow-xl border border-slate-200 z-30 py-1.5 overflow-hidden">
-            <div className="px-3 py-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100">
+          <div className="absolute right-0 mt-1.5 w-68 bg-white rounded-xl shadow-xl border border-slate-200 z-30 py-1.5 overflow-hidden">
+            <div className="px-3 py-1.5 text-[11px] font-semibold text-slate-400 border-b border-slate-100">
               Модель анализа GigaChat
             </div>
             {models.map((m) => {
@@ -123,6 +140,37 @@ export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
                 </button>
               );
             })}
+
+            {hasAudio && (
+              <>
+                <div className="px-3 py-1.5 text-[11px] font-semibold text-indigo-600 border-t border-b border-slate-100 bg-indigo-50/40 flex items-center gap-1.5 mt-1">
+                  <Mic className="w-3 h-3" />
+                  <span>Перетранскрибировать аудиозапись</span>
+                </div>
+                {STT_MODELS.map((stt) => {
+                  const isUsedEngine =
+                    currentSttEngine === stt.id ||
+                    (stt.id === 'yandex_speechkit' && currentSttEngine === 'speechkit');
+                  return (
+                    <button
+                      key={stt.id}
+                      type="button"
+                      onClick={() => handleReanalyze(selectedModel, stt.id)}
+                      id={`retranscribe-btn-${stt.id}`}
+                      className="w-full text-left px-3 py-2 text-xs hover:bg-indigo-50/60 flex items-start justify-between gap-2 transition-colors"
+                    >
+                      <div>
+                        <div className="font-semibold text-slate-800 flex items-center gap-1.5">
+                          <span>{stt.label}</span>
+                          {isUsedEngine && <Check className="w-3.5 h-3.5 text-indigo-600" />}
+                        </div>
+                        <div className="text-[10px] text-slate-500 mt-0.5">{stt.vendor}</div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </>
+            )}
           </div>
         </>
       )}

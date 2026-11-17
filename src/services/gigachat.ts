@@ -1913,7 +1913,7 @@ function parseGigaChatJson(text: string, customSalonName?: string, originalTrans
     operator_mistakes: finalMistakes,
     operator_comment: comment,
     recommendations: advice && advice.length > 0 ? advice : recommendations,
-    missed_opportunities?: { type: string; evidence: string; what_to_say: string }[];
+    missed_opportunities: [],
   };
    
   // Прокидывание упущенных возможностей из ответа модели (ШАГ 7 системного промпта)

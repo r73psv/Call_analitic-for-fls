@@ -19,6 +19,9 @@ import { setStoreEncryptionKey, isStoreEncryptionKeyConfigured } from '../store/
 import { scanTempFiles, cleanTempFiles, runCleanupNow } from '../store/cleanup.js';
 import { getDefaultSystemPrompt } from '../services/gigachat.js';
 import { archiveCallsToS3, getS3ArchiveStatus, listS3Archives } from '../services/s3-archive.js';
+import { testTbankVoiceKitConnection, isTbankVoiceKitConfigured } from '../services/tbank-voicekit.js';
+import { testGigaAmConnection, getGigaAmConfig, isGigaAmConfigured, normalizeGigaamVariant } from '../services/gigaam-asr.js';
+import { resolveActiveSttProvider, normalizeSttProvider } from '../services/transcriptionService.js';
 import { SystemCredentials, GigaChatModel, AutoCleanupSettings, LogEntry } from '../types.js';
 
 export const adminRouter = Router();
@@ -62,6 +65,20 @@ adminRouter.get('/credentials', async (req: Request, res: Response) => {
       yandexKeyInfo: keyInfo,
       yandexConfigured: !!(keyInfo.configured || creds.yandexApiKey || process.env.YC_API_KEY),
       geminiConfigured: !!process.env.GEMINI_API_KEY,
+
+      // Модель транскрибации речи (STT)
+      transcriptionModel: resolveActiveSttProvider(),
+
+      // T-Bank VoiceKit (Тинькофф Облако STT)
+      tbankApiKey: creds.tbankApiKey || process.env.TBANK_VOICEKIT_API_KEY || '',
+      tbankSecretKey: creds.tbankSecretKey || process.env.TBANK_VOICEKIT_SECRET_KEY || '',
+      tbankConfigured: isTbankVoiceKitConfigured(),
+
+      // GigaAM v3 (SaluteDevices / Sber ASR)
+      gigaamApiUrl: creds.gigaamApiUrl || process.env.GIGAAM_API_URL || '',
+      gigaamApiKey: creds.gigaamApiKey || process.env.GIGAAM_API_KEY || '',
+      gigaamVariant: getGigaAmConfig().variant,
+      gigaamConfigured: isGigaAmConfigured(),
 
       // 152-ФЗ Ключ шифрования БД и ПДн
       storeEncryptionKey: creds.storeEncryptionKey || process.env.STORE_ENCRYPTION_KEY || '',
@@ -266,6 +283,34 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
       creds.yandexServiceAccountKeyJson = String(body.yandexServiceAccountKeyJson).trim();
       process.env.YC_SERVICE_ACCOUNT_KEY_JSON = creds.yandexServiceAccountKeyJson;
       invalidateAuthorizedKeyCache();
+    }
+
+    // 2.1. Модель транскрибации и провайдеры T-Bank VoiceKit / GigaAM v3
+    if (body.transcriptionModel !== undefined) {
+      const normalized = normalizeSttProvider(String(body.transcriptionModel));
+      store.config.transcriptionModel = normalized;
+      creds.transcriptionModel = normalized;
+      process.env.STT_PROVIDER = normalized;
+    }
+    if (body.tbankApiKey !== undefined) {
+      creds.tbankApiKey = String(body.tbankApiKey).trim();
+      process.env.TBANK_VOICEKIT_API_KEY = creds.tbankApiKey;
+    }
+    if (body.tbankSecretKey !== undefined) {
+      creds.tbankSecretKey = String(body.tbankSecretKey).trim();
+      process.env.TBANK_VOICEKIT_SECRET_KEY = creds.tbankSecretKey;
+    }
+    if (body.gigaamApiUrl !== undefined) {
+      creds.gigaamApiUrl = String(body.gigaamApiUrl).trim();
+      process.env.GIGAAM_API_URL = creds.gigaamApiUrl;
+    }
+    if (body.gigaamApiKey !== undefined) {
+      creds.gigaamApiKey = String(body.gigaamApiKey).trim();
+      process.env.GIGAAM_API_KEY = creds.gigaamApiKey;
+    }
+    if (body.gigaamVariant !== undefined) {
+      creds.gigaamVariant = normalizeGigaamVariant(String(body.gigaamVariant));
+      process.env.GIGAAM_MODEL_VARIANT = creds.gigaamVariant;
     }
 
     // 152-ФЗ Ключ шифрования БД и ПДн (STORE_ENCRYPTION_KEY)
@@ -579,6 +624,57 @@ adminRouter.post('/test/yandex', async (req: Request, res: Response) => {
     return res.status(400).json({
       success: false,
       error: `Ошибка проверки SpeechKit: ${err.message}`,
+    });
+  }
+});
+
+/**
+ * POST /api/admin/test/tbank
+ * Проверка ключей и JWT-авторизации T-Bank VoiceKit
+ */
+adminRouter.post('/test/tbank', async (req: Request, res: Response) => {
+  try {
+    const store = await readStore();
+    const creds = store.config.credentials || {};
+    const apiKey = req.body.apiKey !== undefined && req.body.apiKey !== ''
+      ? String(req.body.apiKey).trim()
+      : (creds.tbankApiKey || process.env.TBANK_VOICEKIT_API_KEY);
+    const secretKey = req.body.secretKey !== undefined && req.body.secretKey !== ''
+      ? String(req.body.secretKey).trim()
+      : (creds.tbankSecretKey || process.env.TBANK_VOICEKIT_SECRET_KEY);
+
+    const testRes = await testTbankVoiceKitConnection(apiKey, secretKey);
+    return res.json(testRes);
+  } catch (err: any) {
+    return res.status(400).json({
+      success: false,
+      error: err.message || 'Ошибка проверки T-Bank VoiceKit',
+    });
+  }
+});
+
+/**
+ * POST /api/admin/test/gigaam
+ * Проверка доступности сервера инференса GigaAM v3
+ */
+adminRouter.post('/test/gigaam', async (req: Request, res: Response) => {
+  try {
+    const store = await readStore();
+    const creds = store.config.credentials || {};
+    const apiUrl = req.body.apiUrl !== undefined && req.body.apiUrl !== ''
+      ? String(req.body.apiUrl).trim()
+      : (creds.gigaamApiUrl || process.env.GIGAAM_API_URL);
+    const apiKey = req.body.apiKey !== undefined && req.body.apiKey !== ''
+      ? String(req.body.apiKey).trim()
+      : (creds.gigaamApiKey || process.env.GIGAAM_API_KEY);
+    const variant = req.body.variant || creds.gigaamVariant || process.env.GIGAAM_MODEL_VARIANT;
+
+    const testRes = await testGigaAmConnection(apiUrl, apiKey, variant);
+    return res.json(testRes);
+  } catch (err: any) {
+    return res.status(400).json({
+      success: false,
+      error: err.message || 'Ошибка проверки сервера GigaAM v3',
     });
   }
 });

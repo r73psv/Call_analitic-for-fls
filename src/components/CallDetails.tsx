@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { CallRecord, NextStepItem, ContextClarification, StructuredCallSummary, CallEvaluation, CallEvaluationCriterion } from '../types.js';
 import { ReanalyzeButton } from './ReanalyzeButton.js';
+import { getSttEngineDisplayName } from './TranscriptionModelSelector.js';
 import { refineTranscriptRoles } from '../services/transcriptUtils.js';
 import { extractStructuredCallSummary } from '../services/summaryUtils.js';
 import { extractCallEvaluation, EVALUATION_CRITERIA_DEFINITIONS, harmonizeMistakesAndEvaluation } from '../services/evaluationUtils.js';
@@ -988,6 +989,8 @@ export function CallDetails({
           <ReanalyzeButton
             callId={call.call_id}
             currentModel={call.model_used}
+            currentSttEngine={call.transcription_engine}
+            hasAudio={Boolean(call.audio_url && !call.audio_deleted)}
             onReanalyzed={(updated) => {
               if (onCallUpdated) onCallUpdated(updated);
             }}
@@ -2528,8 +2531,8 @@ export function CallDetails({
               <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
                 <MessageSquare className="w-4 h-4 text-slate-400" /> Стенограмма разговора
               </h3>
-              <span className="text-[10px] font-mono font-semibold bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-sm">
-                SpeechKit ролевой
+              <span className="text-[11px] font-mono font-semibold text-slate-500">
+                {getSttEngineDisplayName(call.transcription_engine)}
               </span>
             </div>
 
