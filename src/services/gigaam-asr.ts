@@ -23,6 +23,9 @@ const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 2000;
 const VALID_VARIANTS: GigaamModelVariant[] = ['sber/GigaASR', 'e2e_rnnt', 'e2e_ctc', 'rnnt', 'ctc'];
 
+// Кэш URL-адресов, для которых /v1/audio/transcriptions вернул 404/405, но сработал /v1/chat/completions
+const chatCompletionsFallbackUrls = new Set<string>();
+
 export interface GigaAmConfig {
   apiUrl: string;
   apiKey: string;
@@ -182,10 +185,17 @@ export function extractTextFromGigaAmResponse(data: any): string {
   }
 
   if (Array.isArray(data.choices) && data.choices.length > 0) {
-    const choiceText =
-      data.choices[0]?.message?.content ||
-      data.choices[0]?.text ||
-      '';
+    const msgContent = data.choices[0]?.message?.content;
+    if (typeof msgContent === 'string' && msgContent.trim()) return msgContent.trim();
+    if (Array.isArray(msgContent)) {
+      const joined = msgContent
+        .map((p: any) => (typeof p === 'string' ? p : p?.text || ''))
+        .filter(Boolean)
+        .join('\n')
+        .trim();
+      if (joined) return joined;
+    }
+    const choiceText = data.choices[0]?.text;
     if (typeof choiceText === 'string' && choiceText.trim()) return choiceText.trim();
   }
 
@@ -257,6 +267,145 @@ async function sendMultipartOnce(
   };
 }
 
+function getChatCompletionsUrlFromConfig(apiUrl: string): string {
+  try {
+    const u = new URL(apiUrl);
+    if (u.pathname.endsWith('/chat/completions')) return apiUrl;
+    return `${u.origin}/v1/chat/completions`;
+  } catch {
+    return 'https://foundation-models.api.cloud.ru/v1/chat/completions';
+  }
+}
+
+async function sendChatAudioOnce(
+  audioBuffer: Buffer,
+  meta: { ext: string; mime: string },
+  config: GigaAmConfig,
+  mode: 'input_audio' | 'audio_url'
+): Promise<{ status: number; ok: boolean; statusText: string; rawBody: string }> {
+  const chatUrl = getChatCompletionsUrlFromConfig(config.apiUrl);
+  const modelParam =
+    config.variant === 'sber/GigaASR' || config.apiUrl.includes('cloud.ru')
+      ? 'sber/GigaASR'
+      : `gigaam-v3-${config.variant}`;
+
+  const b64 = audioBuffer.toString('base64');
+  const audioPart =
+    mode === 'input_audio'
+      ? {
+          type: 'input_audio',
+          input_audio: {
+            data: b64,
+            format: meta.ext === 'wav' ? 'wav' : meta.ext === 'mp3' ? 'mp3' : meta.ext,
+          },
+        }
+      : {
+          type: 'audio_url',
+          audio_url: {
+            url: `data:${meta.mime};base64,${b64}`,
+          },
+        };
+
+  const payload = {
+    model: modelParam,
+    temperature: 0,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: 'Расшифруй аудиозапись телефонного разговора дословно на русском языке. Выведи только текст стенограммы без пояснений.',
+          },
+          audioPart,
+        ],
+      },
+    ],
+  };
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (config.apiKey) {
+    headers['Authorization'] = config.apiKey.startsWith('Bearer ') ? config.apiKey : `Bearer ${config.apiKey}`;
+  }
+
+  const response = await fetch(chatUrl, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(120000),
+  });
+
+  const rawBody = await response.text().catch(() => '');
+  return {
+    status: response.status,
+    ok: response.ok,
+    statusText: response.statusText,
+    rawBody,
+  };
+}
+
+async function tryChatAudioFallback(
+  audioBuffer: Buffer,
+  meta: { ext: string; mime: string },
+  config: GigaAmConfig,
+  label: string
+): Promise<{ ok: boolean; status: number; statusText: string; rawBody: string; text: string }> {
+  // Для OpenAI-совместимого input_audio гарантированно принимаются wav/mp3
+  let effectiveBuf = audioBuffer;
+  let effectiveMeta = meta;
+  if (meta.ext !== 'wav' && meta.ext !== 'mp3') {
+    const wavBuf = convertToWav16kMono(audioBuffer);
+    if (wavBuf && wavBuf.length > 44) {
+      effectiveBuf = wavBuf;
+      effectiveMeta = { ext: 'wav', mime: 'audio/wav' };
+    }
+  }
+
+  const modes: Array<'input_audio' | 'audio_url'> = ['input_audio', 'audio_url'];
+  let lastRes: { status: number; ok: boolean; statusText: string; rawBody: string } | null = null;
+
+  for (const mode of modes) {
+    const res = await sendChatAudioOnce(effectiveBuf, effectiveMeta, config, mode);
+    lastRes = res;
+    if (res.ok) {
+      return {
+        ...res,
+        text: parseTranscriptionBody(res.rawBody, label),
+      };
+    }
+    if (res.status === 401 || res.status === 403) {
+      break;
+    }
+  }
+
+  // Если первый формат (например mp3) отклонён, пробуем WAV 16kHz PCM
+  if (effectiveMeta.ext !== 'wav' && lastRes && (lastRes.status === 400 || lastRes.status === 415 || lastRes.status === 422)) {
+    const wavBuf = convertToWav16kMono(audioBuffer);
+    if (wavBuf && wavBuf.length > 44) {
+      for (const mode of modes) {
+        const res = await sendChatAudioOnce(wavBuf, { ext: 'wav', mime: 'audio/wav' }, config, mode);
+        lastRes = res;
+        if (res.ok) {
+          return {
+            ...res,
+            text: parseTranscriptionBody(res.rawBody, label),
+          };
+        }
+      }
+    }
+  }
+
+  return {
+    ok: false,
+    status: lastRes?.status || 500,
+    statusText: lastRes?.statusText || 'Error',
+    rawBody: lastRes?.rawBody || '',
+    text: '',
+  };
+}
+
 function parseTranscriptionBody(rawBody: string, label: string): string {
   if (!rawBody || !rawBody.trim()) return '';
   try {
@@ -283,6 +432,21 @@ async function postAudioToGigaAm(
   const label = config.isCloudRu ? 'GigaASR (Cloud.ru)' : 'GigaAM v3';
 
   if (config.isCloudRu) {
+    const isDirectChatUrl = config.apiUrl.toLowerCase().endsWith('/chat/completions');
+    if (isDirectChatUrl || chatCompletionsFallbackUrls.has(config.apiUrl)) {
+      const chatRes = await tryChatAudioFallback(audioBuffer, meta, config, label);
+      if (chatRes.ok) {
+        return chatRes.text;
+      }
+      const err: any = new Error(
+        `${label} /chat/completions HTTP ${chatRes.status}: ${
+          chatRes.rawBody.slice(0, 300) || chatRes.statusText
+        }`
+      );
+      err.status = chatRes.status;
+      throw err;
+    }
+
     const paramProfiles: CloudRuAttemptOpts[] = [
       { responseFormat: 'json', includeLanguage: true },
       { responseFormat: 'verbose_json', includeLanguage: true },
@@ -301,8 +465,8 @@ async function postAudioToGigaAm(
         continue;
       }
 
-      // Ошибки авторизации / лимитов не исправятся сменой параметров
-      if (res.status === 401 || res.status === 403 || res.status === 429) {
+      // Ошибки авторизации, лимитов или отсутствия маршрута (404/405) не исправятся сменой полей multipart
+      if (res.status === 401 || res.status === 403 || res.status === 404 || res.status === 405 || res.status === 429) {
         break;
       }
 
@@ -310,6 +474,25 @@ async function postAudioToGigaAm(
       if (res.status !== 400 && res.status !== 415 && res.status !== 422 && res.status !== 500) {
         break;
       }
+    }
+
+    // Если /v1/audio/transcriptions вернул 404 или 405, пробуем Cloud.ru /v1/chat/completions (input_audio / audio_url)
+    if (lastRes && (lastRes.status === 404 || lastRes.status === 405)) {
+      console.warn(
+        `[${label}] ${config.apiUrl} вернул HTTP ${lastRes.status}, переключение на ${getChatCompletionsUrlFromConfig(config.apiUrl)}...`
+      );
+      const chatRes = await tryChatAudioFallback(audioBuffer, meta, config, label);
+      if (chatRes.ok) {
+        chatCompletionsFallbackUrls.add(config.apiUrl);
+        return chatRes.text;
+      }
+      const err: any = new Error(
+        `${label}: ${config.apiUrl} вернул HTTP ${lastRes.status} (${lastRes.statusText}), а ${getChatCompletionsUrlFromConfig(config.apiUrl)} вернул HTTP ${chatRes.status}: ${
+          chatRes.rawBody.slice(0, 220) || chatRes.statusText
+        }`
+      );
+      err.status = chatRes.status;
+      throw err;
     }
 
     // Если запрос прошёл (200 OK), но текст пустой — не считаем это HTTP-ошибкой
@@ -509,7 +692,7 @@ export async function transcribeWithGigaAmRetry(
 
 /**
  * Генерирует минимальный валидный WAV-файл (0.2 сек тишины, 16 кГц моно 16-bit PCM)
- * для реальной проверки эндпоинта POST /v1/audio/transcriptions.
+ * для реальной проверки эндпоинта транскрибации.
  */
 function createSilentWavProbeBuffer(): Buffer {
   const sampleRate = 16000;
@@ -562,9 +745,10 @@ export async function testGigaAmConnection(
     headers['Authorization'] = cfg.apiKey.startsWith('Bearer ') ? cfg.apiKey : `Bearer ${cfg.apiKey}`;
   }
 
-  // 1. Для Cloud.ru Evolution / OpenAI-compatible API проверяем GET /v1/models и тестовый POST /v1/audio/transcriptions
+  // 1. Для Cloud.ru Evolution / OpenAI-compatible API проверяем /v1/models и тестовую транскрибацию
   if (cfg.isCloudRu) {
     let hasGigaAsr = false;
+    let audioModelsList: string[] = [];
     const modelsUrl = `${parsedUrl.origin}/v1/models`;
     try {
       const res = await fetch(modelsUrl, { headers, signal: AbortSignal.timeout(10000) });
@@ -575,14 +759,22 @@ export async function testGigaAmConnection(
         const data: any = await res.json().catch(() => ({}));
         const models: any[] = Array.isArray(data?.data) ? data.data : [];
         hasGigaAsr = models.some((m) => String(m?.id || '').toLowerCase().includes('gigaasr'));
+        audioModelsList = models
+          .map((m) => String(m?.id || ''))
+          .filter((id) => /asr|whisper|audio|speech|gigaasr/i.test(id));
       }
     } catch (err: any) {
       if (/авторизац/i.test(err.message)) throw err;
     }
 
+    const probeWav = createSilentWavProbeBuffer();
+    const isDirectChatUrl = cfg.apiUrl.toLowerCase().endsWith('/chat/completions');
+
     // Реальная проверка инференса эндпоинта транскрибации коротким тихим WAV
-    try {
-      const probeWav = createSilentWavProbeBuffer();
+    let transcriptionsStatus: number | null = null;
+    let transcriptionsErrBody = '';
+
+    if (!isDirectChatUrl) {
       const probeRes = await sendMultipartOnce(
         probeWav,
         { ext: 'wav', mime: 'audio/wav' },
@@ -597,34 +789,71 @@ export async function testGigaAmConnection(
         return {
           success: true,
           message: hasGigaAsr
-            ? `Подключение к Cloud.ru Evolution установлено! Модель sber/GigaASR доступна и эндпоинт транскрибации отвечает.`
+            ? `Подключение к Cloud.ru Evolution установлено! Модель sber/GigaASR доступна и /v1/audio/transcriptions отвечает.`
             : `Подключение к Cloud.ru Evolution (${parsedUrl.host}) и эндпоинт транскрибации работают корректно.`,
         };
       }
-      // Если 400/422 с параметрами — пробуем минимальный запрос без language/response_format
-      const minimalProbe = await sendMultipartOnce(
+
+      if (probeRes.status !== 404 && probeRes.status !== 405) {
+        const minimalProbe = await sendMultipartOnce(
+          probeWav,
+          { ext: 'wav', mime: 'audio/wav' },
+          cfg,
+          'file',
+          { includeLanguage: false }
+        );
+        if (minimalProbe.ok) {
+          return {
+            success: true,
+            message: hasGigaAsr
+              ? `Подключение к Cloud.ru Evolution установлено! Модель sber/GigaASR готова к транскрибации.`
+              : `Эндпоинт транскрибации Cloud.ru Evolution (${parsedUrl.host}) работает корректно.`,
+          };
+        }
+        transcriptionsStatus = minimalProbe.status;
+        transcriptionsErrBody = minimalProbe.rawBody.slice(0, 180) || minimalProbe.statusText;
+      } else {
+        transcriptionsStatus = probeRes.status;
+        transcriptionsErrBody = probeRes.rawBody.slice(0, 180) || probeRes.statusText;
+      }
+    }
+
+    // Если /v1/audio/transcriptions вернул 404/405 или указан /v1/chat/completions — проверяем аудио-режим через /v1/chat/completions
+    if (isDirectChatUrl || transcriptionsStatus === 404 || transcriptionsStatus === 405) {
+      const chatProbe = await tryChatAudioFallback(
         probeWav,
         { ext: 'wav', mime: 'audio/wav' },
         cfg,
-        'file',
-        { includeLanguage: false }
+        'GigaASR Probe'
       );
-      if (minimalProbe.ok) {
+      if (chatProbe.ok) {
+        if (!isDirectChatUrl) {
+          chatCompletionsFallbackUrls.add(cfg.apiUrl);
+        }
         return {
           success: true,
           message: hasGigaAsr
-            ? `Подключение к Cloud.ru Evolution установлено! Модель sber/GigaASR готова к транскрибации.`
-            : `Эндпоинт транскрибации Cloud.ru Evolution (${parsedUrl.host}) работает корректно.`,
+            ? `Подключение к Cloud.ru Evolution установлено! Модель sber/GigaASR работает через /v1/chat/completions (аудио-режим).`
+            : `Подключение к Cloud.ru Evolution (${parsedUrl.host}) через /v1/chat/completions установлено.`,
         };
       }
+
+      const audioHint = audioModelsList.length > 0
+        ? ` Аудио-модели в каталоге: ${audioModelsList.join(', ')}.`
+        : '';
+      const txPart = transcriptionsStatus
+        ? `${cfg.apiUrl} -> HTTP ${transcriptionsStatus} (${transcriptionsErrBody}); `
+        : '';
       throw new Error(
-        `Модель видна в /v1/models, но эндпоинт транскрибации ${cfg.apiUrl} вернул HTTP ${minimalProbe.status}: ${
-          minimalProbe.rawBody.slice(0, 220) || minimalProbe.statusText
-        }`
+        `Модель видна в /v1/models, но транскрибация недоступна: ${txPart}${getChatCompletionsUrlFromConfig(cfg.apiUrl)} -> HTTP ${chatProbe.status} (${
+          chatProbe.rawBody.slice(0, 180) || chatProbe.statusText
+        }).${audioHint}`
       );
-    } catch (probeErr: any) {
-      throw new Error(probeErr.message || `Ошибка проверки эндпоинта транскрибации ${cfg.apiUrl}`);
     }
+
+    throw new Error(
+      `Модель видна в /v1/models, но эндпоинт транскрибации ${cfg.apiUrl} вернул HTTP ${transcriptionsStatus}: ${transcriptionsErrBody}`
+    );
   }
 
   // 2. Попытка проверить /health на том же хосте (self-hosted GigaAM v3)
