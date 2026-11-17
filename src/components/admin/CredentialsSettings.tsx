@@ -17,9 +17,10 @@ import { TranscriptionModelSelector } from '../TranscriptionModelSelector.js';
 
 interface CredentialsSettingsProps {
   authToken?: string | null;
+  onConfigUpdated?: () => void;
 }
 
-export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
+export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsSettingsProps) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
@@ -95,6 +96,7 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
   const [gigaamVariant, setGigaamVariant] = useState<GigaamModelVariant>('e2e_rnnt');
   const [gigaamConfigured, setGigaamConfigured] = useState(false);
   const [testingGigaam, setTestingGigaam] = useState(false);
+  const [savingGigaamOnly, setSavingGigaamOnly] = useState(false);
   const [gigaamTestResult, setGigaamTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
   // Yandex Object Storage (для аудиозаписей SpeechKit >= 1MB)
@@ -369,6 +371,7 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
       const isCloudRuGiga = gigaamApiUrl.toLowerCase().includes('cloud.ru') || gigaamVariant === 'sber/GigaASR';
       setGigaamConfigured(isCloudRuGiga ? Boolean(gigaamApiKey.trim()) : Boolean(gigaamApiUrl.trim()));
       setYandexConfigured(Boolean(yandexApiKey.trim() || yandexKeyInfo.configured));
+      onConfigUpdated?.();
     } catch (err: any) {
       setSaveError(err.message);
     } finally {
@@ -569,6 +572,7 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Не удалось обновить модель транскрибации');
       setSttSaveMessage({ ok: true, msg: 'Активная модель транскрибации речи сохранена.' });
+      onConfigUpdated?.();
       setTimeout(() => setSttSaveMessage(null), 3500);
     } catch (err: any) {
       setSttSaveMessage({ ok: false, msg: err.message || 'Ошибка сохранения модели' });
@@ -599,6 +603,45 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
       setTbankTestResult({ ok: false, msg: err.message });
     } finally {
       setTestingTbank(false);
+    }
+  };
+
+  const handleSaveGigaAmOnly = async (activateAsDefault: boolean = false) => {
+    setSavingGigaamOnly(true);
+    setGigaamTestResult(null);
+    try {
+      const payload: Record<string, any> = {
+        gigaamApiUrl: gigaamApiUrl.trim(),
+        gigaamApiKey: gigaamApiKey.trim(),
+        gigaamVariant,
+      };
+      if (activateAsDefault) {
+        payload.transcriptionModel = 'gigaam_v3';
+      }
+      const res = await fetch('/api/admin/credentials', {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Ошибка сохранения настроек GigaASR');
+
+      const isCloudRuGiga = gigaamApiUrl.toLowerCase().includes('cloud.ru') || gigaamVariant === 'sber/GigaASR';
+      setGigaamConfigured(isCloudRuGiga ? Boolean(gigaamApiKey.trim()) : Boolean(gigaamApiUrl.trim()));
+      if (activateAsDefault) {
+        setTranscriptionModel('gigaam_v3');
+      }
+      setGigaamTestResult({
+        ok: true,
+        msg: activateAsDefault
+          ? 'Настройки GigaASR сохранены и выбраны как активная модель транскрибации речи.'
+          : 'Настройки GigaASR / GigaAM v3 сохранены в зашифрованное хранилище.',
+      });
+      onConfigUpdated?.();
+    } catch (err: any) {
+      setGigaamTestResult({ ok: false, msg: err.message || 'Ошибка сохранения GigaASR' });
+    } finally {
+      setSavingGigaamOnly(false);
     }
   };
 
@@ -1540,12 +1583,32 @@ export function CredentialsSettings({ authToken }: CredentialsSettingsProps) {
             <button
               type="button"
               onClick={handleTestGigaAm}
-              disabled={testingGigaam}
+              disabled={testingGigaam || savingGigaamOnly}
               className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5"
               id="test-gigaam-btn"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${testingGigaam ? 'animate-spin text-indigo-600' : ''}`} />
               {testingGigaam ? 'Проверка...' : 'Проверить GigaASR / GigaAM v3'}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSaveGigaAmOnly(false)}
+              disabled={savingGigaamOnly || testingGigaam}
+              className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5"
+              id="save-gigaam-only-btn"
+            >
+              <Save className="w-3.5 h-3.5" />
+              {savingGigaamOnly ? 'Сохранение...' : 'Сохранить'}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSaveGigaAmOnly(true)}
+              disabled={savingGigaamOnly || testingGigaam}
+              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5"
+              id="save-and-activate-gigaam-btn"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              Сохранить и активировать
             </button>
             {gigaamTestResult && (
               <span className={`text-[11px] font-medium ${gigaamTestResult.ok ? 'text-emerald-700' : 'text-rose-700'}`}>

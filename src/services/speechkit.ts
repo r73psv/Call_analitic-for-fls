@@ -133,6 +133,31 @@ export function convertToOggOpus(buffer: Buffer): Buffer | null {
 }
 
 /**
+ * Преобразование аудиозаписи в стандартный моно WAV (16 кГц, 16-bit PCM).
+ * Универсальный формат, нативно поддерживаемый всеми российскими ASR-моделями (включая sber/GigaASR и GigaAM v3).
+ */
+export function convertToWav16kMono(buffer: Buffer): Buffer | null {
+  try {
+    const tempDir = path.join(process.cwd(), 'temp');
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+    const inPath = path.join(tempDir, `wav-in-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`);
+    const outPath = path.join(tempDir, `wav-out-${Date.now()}-${Math.random().toString(36).slice(2)}.wav`);
+    fs.writeFileSync(inPath, buffer);
+    execSync(`ffmpeg -y -i "${inPath}" -vn -acodec pcm_s16le -ar 16000 -ac 1 "${outPath}" 2>/dev/null`, { timeout: 45000 });
+    if (fs.existsSync(outPath)) {
+      const result = fs.readFileSync(outPath);
+      try { fs.unlinkSync(inPath); } catch {}
+      try { fs.unlinkSync(outPath); } catch {}
+      return result;
+    }
+    try { fs.unlinkSync(inPath); } catch {}
+  } catch (err: any) {
+    console.warn('[Audio] Ошибка ffmpeg конвертации в WAV 16kHz mono:', err.message);
+  }
+  return null;
+}
+
+/**
  * П. 3.6 ТЗ: детекция пауз в аудио через ffmpeg silencedetect.
  * Возвращает список времён (в секундах) середин обнаруженных пауз.
  */
@@ -237,6 +262,52 @@ export function splitAudioIntoOpusChunks(buffer: Buffer, chunkSeconds: number = 
     }
   } catch (err: any) {
     console.warn('[SpeechKit] Ошибка ffmpeg разбиения аудио на Opus-сегменты:', err.message);
+  } finally {
+    if (tempDir) {
+      try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+    }
+  }
+  return chunks;
+}
+
+/**
+ * Разбиение аудиозаписи на WAV-сегменты (16 кГц моно 16-bit PCM) по паузам.
+ * Используется для sber/GigaASR и GigaAM v3, где WAV PCM поддерживается без ограничений кодеков.
+ */
+export function splitAudioIntoWavChunks(buffer: Buffer, chunkSeconds: number = SEGMENT_SECONDS): Buffer[] {
+  const chunks: Buffer[] = [];
+  let tempDir = '';
+  try {
+    tempDir = path.join(process.cwd(), 'temp', `wav-chunks-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    fs.mkdirSync(tempDir, { recursive: true });
+    const inPath = path.join(tempDir, 'source.tmp');
+    fs.writeFileSync(inPath, buffer);
+
+    const duration = getAudioDuration(buffer);
+    const midpoints = duration > 0 ? detectSilenceMidpoints(buffer) : [];
+    const cutPoints = midpoints.length > 0 ? computeSilenceCutPoints(midpoints, duration) : [];
+    const timesArg = cutPoints.length > 0 ? cutPoints.join(',') : null;
+
+    if (timesArg) {
+      console.log(`[Audio] Нарезка WAV 16кГц по паузам: ${cutPoints.length} границ (${timesArg})`);
+      execSync(
+        `ffmpeg -y -i "${inPath}" -vn -acodec pcm_s16le -ar 16000 -ac 1 -f segment -segment_times ${timesArg} "${path.join(tempDir, 'chunk_%03d.wav')}" 2>/dev/null`,
+        { timeout: 60000 }
+      );
+    } else {
+      console.log(`[Audio] Нарезка WAV 16кГц по таймеру (${chunkSeconds}с)`);
+      execSync(
+        `ffmpeg -y -i "${inPath}" -vn -acodec pcm_s16le -ar 16000 -ac 1 -f segment -segment_time ${chunkSeconds} "${path.join(tempDir, 'chunk_%03d.wav')}" 2>/dev/null`,
+        { timeout: 60000 }
+      );
+    }
+
+    const files = fs.readdirSync(tempDir).filter(f => f.startsWith('chunk_') && f.endsWith('.wav')).sort();
+    for (const f of files) {
+      chunks.push(fs.readFileSync(path.join(tempDir, f)));
+    }
+  } catch (err: any) {
+    console.warn('[Audio] Ошибка ffmpeg разбиения аудио на WAV-сегменты:', err.message);
   } finally {
     if (tempDir) {
       try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}

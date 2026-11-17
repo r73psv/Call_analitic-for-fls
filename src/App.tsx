@@ -1128,6 +1128,7 @@ export default function App() {
                       setSelectedCallId(callId);
                       setActiveTab('details');
                     }}
+                    onConfigUpdated={() => loadData(true)}
                   />
                 </motion.div>
               )}

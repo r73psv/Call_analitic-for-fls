@@ -70,8 +70,13 @@ export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
         throw new Error(data.error || `Ошибка сервера: HTTP ${res.status}`);
       }
 
-      const updated = await res.json();
+      const updated: CallRecord = await res.json();
       onReanalyzed(updated);
+      if (updated.error_message) {
+        setError(updated.error_message);
+      } else if (sttProvider && updated.transcription_engine === 'none') {
+        setError(`Не удалось выполнить транскрибацию (${getSttEngineDisplayName(sttProvider)}). Проверьте настройки и журнал логов.`);
+      }
     } catch (err: any) {
       setError(err.message || 'Ошибка повторного анализа');
     } finally {

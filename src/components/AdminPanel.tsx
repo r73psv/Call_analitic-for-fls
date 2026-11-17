@@ -24,6 +24,7 @@ interface AdminPanelProps {
   logs?: LogEntry[];
   onClearLogs?: () => Promise<void>;
   onSelectCall?: (callId: string) => void;
+  onConfigUpdated?: () => void;
 }
 
 export function AdminPanel({
@@ -33,6 +34,7 @@ export function AdminPanel({
   logs = [],
   onClearLogs,
   onSelectCall,
+  onConfigUpdated,
 }: AdminPanelProps) {
   const [adminTab, setAdminTab] = useState<'credentials' | 'cleanup' | 'staff' | 'users' | 'audit' | 'password' | 'logs'>('credentials');
 
@@ -163,7 +165,7 @@ export function AdminPanel({
       {/* Tab Panels */}
       <div>
         {adminTab === 'credentials' && (
-          <CredentialsSettings authToken={authToken} />
+          <CredentialsSettings authToken={authToken} onConfigUpdated={onConfigUpdated} />
         )}
 
         {adminTab === 'cleanup' && (

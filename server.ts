@@ -721,6 +721,9 @@ function isTechnicalFailedCall(call: any): boolean {
 // Helper to inspect parsed result for technical failure markers
 function isTechnicalErrorResult(res: Partial<CallRecord>): boolean {
   if (!res) return true;
+  if (res.error_message && String(res.error_message).trim().length > 0) {
+    return true;
+  }
   const transcript = (res.transcript || '').toLowerCase();
   const summary = (res.summary || '').toLowerCase();
   const comment = (res.operator_comment || '').toLowerCase();
@@ -731,6 +734,8 @@ function isTechnicalErrorResult(res: Partial<CallRecord>): boolean {
     'лимит токенов',
     'не удавалось скачать',
     'отсутствует ключ',
+    'не настроен',
+    'ошибка распознавания',
     'ошибка ии-анализа',
     'анализ звонка заблокирован из-за ошибки',
     'отсутствует api ключ',
@@ -845,6 +850,8 @@ async function analyzeCallTextOrAudio(
     cleanTranscript.startsWith('Стенограмма отсутствует') ||
     cleanTranscript.includes('не содержит разборчивой речи') ||
     cleanTranscript.includes('Стенограмма ожидает') ||
+    cleanTranscript.includes('ожидает расшифровки') ||
+    cleanTranscript.includes('ожидает распознавания') ||
     cleanTranscript.includes('не была загружена') ||
     cleanTranscript.includes('исчерпан лимит') ||
     cleanTranscript.includes('лимит токенов') ||
@@ -853,6 +860,7 @@ async function analyzeCallTextOrAudio(
     cleanTranscript.includes('rate-limits') ||
     cleanTranscript.includes('Gemini') ||
     cleanTranscript.includes('Ошибка:') ||
+    cleanTranscript.includes('Ошибка распознавания') ||
     cleanTranscript.includes('отсутствует диалог') ||
     cleanTranscript.includes('Запись разговора и стенограмма отсутствуют') ||
     cleanTranscript.includes('Разговор не состоялся');
@@ -888,10 +896,12 @@ async function analyzeCallTextOrAudio(
         appendLog('success', 'speechkit', `Аудиозапись успешно расшифрована (${activeProviderLabel}, ${cleanTranscript.length} симв.)`);
       } else {
         sttErrorReason = sttResult.error || 'Распознавание речи вернуло пустой текст (в записи отсутствует разборчивая речь или тишина)';
+        usedTranscriptionEngine = sttResult.engine;
         appendLog('warning', 'speechkit', sttErrorReason);
       }
     } catch (sttErr: any) {
       sttErrorReason = sttErr.message || String(sttErr);
+      usedTranscriptionEngine = 'none';
       appendLog('error', 'speechkit', `Ошибка распознавания речи (${activeProviderLabel}): ${sttErrorReason}`);
     }
   }
@@ -901,13 +911,45 @@ async function analyzeCallTextOrAudio(
   }
 
   // Strict check for calls WITHOUT speech:
-  // If duration is unknown and text is ultra-short (<15 chars) without dialogue markers
   if (!cleanTranscript) {
     if (hasAudio) {
       const audioKbytes = Math.round((Buffer.from(audioBase64!.data, 'base64').length) / 1024);
       const durStr = callDurationSeconds !== undefined ? `, ${callDurationSeconds} сек.` : '';
+      const activeProviderLabel = getSttProviderLabel(resolveActiveSttProvider(sttProviderOverride));
+      const isHardSttFailure = Boolean(
+        sttErrorReason &&
+        !sttErrorReason.includes('не содержит разборчивой речи')
+      );
+
+      if (isHardSttFailure) {
+        appendLog('error', 'speechkit', `Транскрибация (${activeProviderLabel}) не выполнена: ${sttErrorReason}`);
+        return {
+          transcript: `Ошибка распознавания речи (${activeProviderLabel}): ${sttErrorReason}`,
+          summary: `Аудиозапись доступна (${audioKbytes} КБ${durStr}), но транскрибация через ${activeProviderLabel} завершилась ошибкой: ${sttErrorReason}`,
+          key_facts: {
+            is_dispute: false,
+            dispute_reason: null,
+            promises: [],
+            tone_client: 'нейтральный',
+            tone_manager: 'нейтральный',
+            call_outcome: 'ошибка распознавания',
+            booking_status: 'не применимо',
+            client_issue: `Ошибка STT (${activeProviderLabel}): ${sttErrorReason}`
+          },
+          trigger_phrases: [],
+          recommendations: [
+            `Проверьте настройки и API-ключ для ${activeProviderLabel} в панели администратора.`,
+            'Прослушайте запись в плеере и запустите перетранскрибацию повторно.'
+          ],
+          operator_score: null,
+          operator_comment: `Ошибка распознавания речи (${activeProviderLabel}): ${sttErrorReason}`,
+          error_message: sttErrorReason,
+          transcription_engine: 'none',
+        };
+      }
+
       appendLog('info', 'megafon', `Аудиозапись получена (${audioKbytes} КБ${durStr}). Ожидание расшифровки речи...`);
-      
+
       return {
         transcript: `Стенограмма ожидает расшифровки. Аудиозапись доступна в плеере (${audioKbytes} КБ${durStr}).`,
         summary: `Аудиозапись звонка доступна для прослушивания в плеере (${audioKbytes} КБ${durStr}), автоматическая расшифровка ожидает обработки. Вы можете прослушать запись в плеере.`,
@@ -919,7 +961,7 @@ async function analyzeCallTextOrAudio(
           tone_manager: 'нейтральный',
           call_outcome: 'ожидает расшифровки',
           booking_status: 'не применимо',
-          client_issue: 'Аудиозапись загружена и воспроизводится в плеере, расшифровка речи ожидает обработки'
+          client_issue: sttErrorReason || 'Аудиозапись загружена и воспроизводится в плеере, расшифровка речи ожидает обработки'
         },
         trigger_phrases: [],
         recommendations: [
@@ -927,7 +969,10 @@ async function analyzeCallTextOrAudio(
           'Для расшифровки нажмите кнопку «Пересчитать» или проверьте настройки распознавания речи.'
         ],
         operator_score: null,
-        operator_comment: `Запись разговора доступна для прослушивания в плеере (${audioKbytes} КБ${durStr}). Оценка работы оператора ожидает распознавания речи.`
+        operator_comment: sttErrorReason
+          ? `Распознавание (${activeProviderLabel}): ${sttErrorReason}`
+          : `Запись разговора доступна для прослушивания в плеере (${audioKbytes} КБ${durStr}). Оценка работы оператора ожидает распознавания речи.`,
+        ...(usedTranscriptionEngine ? { transcription_engine: usedTranscriptionEngine } : {}),
       };
     }
 
@@ -4643,8 +4688,14 @@ async function performCallReanalysis(
     call.transcript === 'Обработка аудио...' ||
     call.transcript.startsWith('Аудиозапись не была') ||
     call.transcript.startsWith('Стенограмма отсутствует') ||
+    call.transcript.includes('Запись разговора и стенограмма отсутствуют') ||
+    call.transcript.includes('Разговор не состоялся') ||
     call.transcript.includes('не содержит разборчивой речи') ||
     call.transcript.includes('Стенограмма ожидает') ||
+    call.transcript.includes('ожидает расшифровки') ||
+    call.transcript.includes('ожидает распознавания') ||
+    call.transcript.includes('Аудиозапись звонка доступна') ||
+    call.transcript.includes('Стенограмма не сформирована') ||
     call.transcript.includes('не была загружена') ||
     call.transcript.includes('предоставьте аудиозапись') ||
     call.transcript.includes('исчерпан лимит') ||
@@ -4654,6 +4705,7 @@ async function performCallReanalysis(
     call.transcript.includes('rate-limits') ||
     call.transcript.includes('Gemini') ||
     call.transcript.includes('Ошибка:') ||
+    call.transcript.includes('Ошибка распознавания') ||
     call.transcript.includes('отсутствует диалог') ||
     call.transcript.includes('Автоответчик:') ||
     call.transcript.includes('автоответчик') ||
@@ -4668,6 +4720,7 @@ async function performCallReanalysis(
   // Mark status as processing and record attempt metadata
   call.status = 'processing';
   call.transcript = existingTranscript || 'Загрузка аудиозаписи...';
+  call.error_message = undefined;
   call.retry_count = (call.retry_count || 0) + 1;
   call.last_retry_at = new Date().toISOString();
   db.calls[callIdx] = call;
@@ -4682,10 +4735,21 @@ async function performCallReanalysis(
     let audioBase64: { data: string; mimeType: string } | null = null;
     let audioDownloadFailed = false;
 
+    // Сначала проверяем локальный кэш аудио (на случай если файл уже загружен)
+    const cachedBeforeLookup = readAudioFromCache(callId, audioUrl);
+    if (cachedBeforeLookup) {
+      audioBase64 = {
+        data: cachedBeforeLookup.buffer.toString('base64'),
+        mimeType: cachedBeforeLookup.mimeType,
+      };
+    }
+
     // If it is a real Megafon call, lookup direct link ONLY if audioUrl is missing or is a web report link
-    const needsLinkLookup = !audioUrl || 
-                            audioUrl.includes('/reports/mgf_calls/') || 
-                            audioUrl.includes('uuid=');
+    const needsLinkLookup = !audioBase64 && (
+      !audioUrl ||
+      audioUrl.includes('/reports/mgf_calls/') ||
+      audioUrl.includes('uuid=')
+    );
     if (callId.startsWith('megafon-real-') && needsLinkLookup) {
       const commId = callId.replace('megafon-real-', '');
       if (authCtx.apiVersion === 'rest_wcgp' && authCtx.restDomain && authCtx.restToken && call.timestamp) {
@@ -4714,20 +4778,32 @@ async function performCallReanalysis(
       }
     }
 
-    if (audioUrl) {
-      appendLog('info', 'megafon', `[Переанализ/Авто-Повтор] Скачивание аудиозаписи с ${audioUrl}...`);
-      audioBase64 = await downloadAudioAsBase64(audioUrl, megafonToken, callId);
-      if (!audioBase64) {
-        audioDownloadFailed = true;
-        appendLog('warning', 'megafon', `[Переанализ/Авто-Повтор] Не удалось скачать аудиозапись.`);
+    if (!audioBase64) {
+      if (audioUrl) {
+        appendLog('info', 'megafon', `[Переанализ/Авто-Повтор] Скачивание аудиозаписи с ${audioUrl}...`);
+        audioBase64 = await downloadAudioAsBase64(audioUrl, megafonToken, callId);
+        if (!audioBase64) {
+          audioDownloadFailed = true;
+          appendLog('warning', 'megafon', `[Переанализ/Авто-Повтор] Не удалось скачать аудиозапись.`);
+        } else {
+          appendLog('success', 'megafon', `[Переанализ/Авто-Повтор] Аудиозапись успешно скачана.`);
+        }
       } else {
-        appendLog('success', 'megafon', `[Переанализ/Авто-Повтор] Аудиозапись успешно скачана.`);
+        audioDownloadFailed = true;
       }
-    } else {
-      audioDownloadFailed = true;
     }
 
-    const shouldRetranscribeFromAudio = Boolean(options?.forceRetranscribe && audioBase64 && !audioDownloadFailed);
+    const activeStt = resolveActiveSttProvider(options?.sttProvider);
+    const previousStt = call.transcription_engine && call.transcription_engine !== 'none'
+      ? normalizeSttProvider(call.transcription_engine)
+      : 'yandex_speechkit';
+    const engineSwitched = Boolean(activeStt !== previousStt);
+
+    const shouldRetranscribeFromAudio = Boolean(
+      (options?.forceRetranscribe || engineSwitched || !existingTranscript) &&
+      audioBase64 &&
+      !audioDownloadFailed
+    );
     const analysisResult = await analyzeCallTextOrAudio(
       selectedModel,
       shouldRetranscribeFromAudio ? '' : existingTranscript,
@@ -4740,10 +4816,14 @@ async function performCallReanalysis(
     const finalDb = readDb();
     const finalCallIdx = finalDb.calls.findIndex((c: any) => c.call_id === callId);
     if (finalCallIdx !== -1) {
-      const isFailed = (audioDownloadFailed && !existingTranscript) || isTechnicalErrorResult(analysisResult);
+      const isFailed =
+        (audioDownloadFailed && !existingTranscript) ||
+        Boolean(analysisResult.error_message) ||
+        isTechnicalErrorResult(analysisResult);
       finalDb.calls[finalCallIdx] = {
         ...finalDb.calls[finalCallIdx],
         ...analysisResult,
+        error_message: analysisResult.error_message || undefined,
         status: isFailed ? 'failed' : 'completed',
         is_demo: false,
         model_used: selectedModel,
@@ -4813,27 +4893,28 @@ app.post('/api/calls/batch-reanalyze', async (req, res) => {
     )
   );
 
-  appendLog('info', 'speechkit', `Запущен пакетный переанализ для ${candidates.length} звонков...`);
+  const activeSttLabel = getSttProviderLabel(resolveActiveSttProvider());
+  appendLog('info', 'speechkit', `Запущен пакетный переанализ (${activeSttLabel}) для ${candidates.length} звонков...`);
 
   // Start background queue processing
   (async () => {
     let successCount = 0;
     for (const c of candidates) {
       try {
-        await performCallReanalysis(c.call_id, modelOverride);
+        await performCallReanalysis(c.call_id, modelOverride, { forceRetranscribe: true });
         successCount++;
         await new Promise(r => setTimeout(r, 600));
       } catch (err: any) {
         console.warn(`[BatchReanalyze] Ошибка обработки звонка ${c.call_id}:`, err.message);
       }
     }
-    appendLog('success', 'speechkit', `Пакетный переанализ завершен: успешно обработано ${successCount} из ${candidates.length} звонков.`);
+    appendLog('success', 'speechkit', `Пакетный переанализ (${activeSttLabel}) завершен: успешно обработано ${successCount} из ${candidates.length} звонков.`);
   })();
 
   res.json({
     success: true,
     totalQueued: candidates.length,
-    message: `Запущен фоновый переанализ для ${candidates.length} звонков через Yandex SpeechKit и GigaChat.`
+    message: `Запущен фоновый переанализ для ${candidates.length} звонков через ${activeSttLabel} и GigaChat.`
   });
 });
 

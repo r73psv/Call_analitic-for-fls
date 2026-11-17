@@ -63305,6 +63305,78 @@
       "revoked_date": null,
       "retention_period_days": 90,
       "updated_at": "2026-10-04T17:07:43.726Z"
+    },
+    {
+      "consent_id": "59d6aefc-d995-4f62-9bbe-85e69684f1cf",
+      "client_phone_masked": "****551500",
+      "client_phone_hash": "5202b5604838f9b7fa5bfd7c5145e514a4d1ac17c6cc065b1517756e6ad0bd6e",
+      "consent_date": "2026-11-17T15:24:04.729Z",
+      "consent_method": "voice",
+      "consent_source": "auto",
+      "call_id_origin": "megafon-call-89103",
+      "consent_text_version": "1.0",
+      "purposes": [
+        "quality_control",
+        "ai_analysis"
+      ],
+      "data_categories": [
+        "phone",
+        "voice",
+        "call_content"
+      ],
+      "third_party_sharing": true,
+      "status": "active",
+      "revoked_date": null,
+      "retention_period_days": 90,
+      "updated_at": "2026-11-17T17:02:07.401Z"
+    },
+    {
+      "consent_id": "2a4fb724-6b4c-4e4b-9a43-11066a4c55e2",
+      "client_phone_masked": "****006677",
+      "client_phone_hash": "c9f49b0bd7c00caa012cacbb6c6e6b79882d7c4f1a92dfd3da01ca92e8e87ad0",
+      "consent_date": "2026-11-17T13:54:04.729Z",
+      "consent_method": "voice",
+      "consent_source": "auto",
+      "call_id_origin": "megafon-call-89102",
+      "consent_text_version": "1.0",
+      "purposes": [
+        "quality_control",
+        "ai_analysis"
+      ],
+      "data_categories": [
+        "phone",
+        "voice",
+        "call_content"
+      ],
+      "third_party_sharing": true,
+      "status": "active",
+      "revoked_date": null,
+      "retention_period_days": 90,
+      "updated_at": "2026-11-17T17:02:07.401Z"
+    },
+    {
+      "consent_id": "c9ac35b6-9335-4ac5-baa4-ffcbdcc48960",
+      "client_phone_masked": "****003344",
+      "client_phone_hash": "cbea316064c5dcb1c4afdd59f67d4387d18dd006a54b2fe5236ac142998f804a",
+      "consent_date": "2026-11-17T12:54:04.729Z",
+      "consent_method": "voice",
+      "consent_source": "auto",
+      "call_id_origin": "megafon-call-89101",
+      "consent_text_version": "1.0",
+      "purposes": [
+        "quality_control",
+        "ai_analysis"
+      ],
+      "data_categories": [
+        "phone",
+        "voice",
+        "call_content"
+      ],
+      "third_party_sharing": true,
+      "status": "active",
+      "revoked_date": null,
+      "retention_period_days": 90,
+      "updated_at": "2026-11-17T17:02:07.401Z"
     }
   ]
 }
