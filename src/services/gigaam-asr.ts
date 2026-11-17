@@ -281,7 +281,8 @@ async function sendChatAudioOnce(
   audioBuffer: Buffer,
   meta: { ext: string; mime: string },
   config: GigaAmConfig,
-  mode: 'input_audio' | 'audio_url'
+  mode: 'input_audio' | 'audio_url',
+  includeTextPrompt: boolean = true
 ): Promise<{ status: number; ok: boolean; statusText: string; rawBody: string }> {
   const chatUrl = getChatCompletionsUrlFromConfig(config.apiUrl);
   const modelParam =
@@ -306,22 +307,28 @@ async function sendChatAudioOnce(
           },
         };
 
-  const payload = {
+  const contentParts = includeTextPrompt
+    ? [
+        {
+          type: 'text',
+          text: 'Расшифруй аудиозапись телефонного разговора дословно на русском языке. Выведи только текст стенограммы без пояснений.',
+        },
+        audioPart,
+      ]
+    : [audioPart];
+
+  const payload: Record<string, any> = {
     model: modelParam,
-    temperature: 0,
     messages: [
       {
         role: 'user',
-        content: [
-          {
-            type: 'text',
-            text: 'Расшифруй аудиозапись телефонного разговора дословно на русском языке. Выведи только текст стенограммы без пояснений.',
-          },
-          audioPart,
-        ],
+        content: contentParts,
       },
     ],
   };
+  if (includeTextPrompt) {
+    payload.temperature = 0;
+  }
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -355,19 +362,32 @@ async function tryChatAudioFallback(
   // Для OpenAI-совместимого input_audio гарантированно принимаются wav/mp3
   let effectiveBuf = audioBuffer;
   let effectiveMeta = meta;
+  let wasConvertedToWav = false;
   if (meta.ext !== 'wav' && meta.ext !== 'mp3') {
     const wavBuf = convertToWav16kMono(audioBuffer);
     if (wavBuf && wavBuf.length > 44) {
       effectiveBuf = wavBuf;
       effectiveMeta = { ext: 'wav', mime: 'audio/wav' };
+      wasConvertedToWav = true;
     }
   }
 
-  const modes: Array<'input_audio' | 'audio_url'> = ['input_audio', 'audio_url'];
+  const attempts: Array<{ mode: 'input_audio' | 'audio_url'; includeText: boolean }> = [
+    { mode: 'input_audio', includeText: true },
+    { mode: 'audio_url', includeText: true },
+    { mode: 'input_audio', includeText: false },
+    { mode: 'audio_url', includeText: false },
+  ];
   let lastRes: { status: number; ok: boolean; statusText: string; rawBody: string } | null = null;
 
-  for (const mode of modes) {
-    const res = await sendChatAudioOnce(effectiveBuf, effectiveMeta, config, mode);
+  for (const attempt of attempts) {
+    const res = await sendChatAudioOnce(
+      effectiveBuf,
+      effectiveMeta,
+      config,
+      attempt.mode,
+      attempt.includeText
+    );
     lastRes = res;
     if (res.ok) {
       return {
@@ -375,23 +395,36 @@ async function tryChatAudioFallback(
         text: parseTranscriptionBody(res.rawBody, label),
       };
     }
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401 || res.status === 403 || res.status === 404) {
       break;
     }
   }
 
-  // Если первый формат (например mp3) отклонён, пробуем WAV 16kHz PCM
-  if (effectiveMeta.ext !== 'wav' && lastRes && (lastRes.status === 400 || lastRes.status === 415 || lastRes.status === 422)) {
+  // Если первый формат (например mp3 или нестандартный WAV) отклонён с 400/415/422 — перекодируем в чистый WAV 16кГц моно PCM
+  if (
+    !wasConvertedToWav &&
+    lastRes &&
+    (lastRes.status === 400 || lastRes.status === 415 || lastRes.status === 422)
+  ) {
     const wavBuf = convertToWav16kMono(audioBuffer);
     if (wavBuf && wavBuf.length > 44) {
-      for (const mode of modes) {
-        const res = await sendChatAudioOnce(wavBuf, { ext: 'wav', mime: 'audio/wav' }, config, mode);
+      for (const attempt of attempts.slice(0, 2)) {
+        const res = await sendChatAudioOnce(
+          wavBuf,
+          { ext: 'wav', mime: 'audio/wav' },
+          config,
+          attempt.mode,
+          attempt.includeText
+        );
         lastRes = res;
         if (res.ok) {
           return {
             ...res,
             text: parseTranscriptionBody(res.rawBody, label),
           };
+        }
+        if (res.status === 401 || res.status === 403 || res.status === 404) {
+          break;
         }
       }
     }
@@ -838,11 +871,32 @@ export async function testGigaAmConnection(
         };
       }
 
+      // Если пользователь явно указал /v1/chat/completions, но он не принял аудио — проверим также /v1/audio/transcriptions
+      if (isDirectChatUrl && transcriptionsStatus === null) {
+        const txUrl = `${parsedUrl.origin}/v1/audio/transcriptions`;
+        const txProbe = await sendMultipartOnce(
+          probeWav,
+          { ext: 'wav', mime: 'audio/wav' },
+          { ...cfg, apiUrl: txUrl },
+          'file',
+          { includeLanguage: false }
+        );
+        if (txProbe.ok) {
+          return {
+            success: true,
+            message: `Подключение установлено! Для транскрибации используйте эндпоинт ${txUrl} (а не /v1/chat/completions).`,
+          };
+        }
+        transcriptionsStatus = txProbe.status;
+        transcriptionsErrBody = txProbe.rawBody.slice(0, 180) || txProbe.statusText;
+      }
+
       const audioHint = audioModelsList.length > 0
         ? ` Аудио-модели в каталоге: ${audioModelsList.join(', ')}.`
         : '';
+      const txUrlLabel = isDirectChatUrl ? `${parsedUrl.origin}/v1/audio/transcriptions` : cfg.apiUrl;
       const txPart = transcriptionsStatus
-        ? `${cfg.apiUrl} -> HTTP ${transcriptionsStatus} (${transcriptionsErrBody}); `
+        ? `${txUrlLabel} -> HTTP ${transcriptionsStatus} (${transcriptionsErrBody}); `
         : '';
       throw new Error(
         `Модель видна в /v1/models, но транскрибация недоступна: ${txPart}${getChatCompletionsUrlFromConfig(cfg.apiUrl)} -> HTTP ${chatProbe.status} (${
@@ -851,8 +905,11 @@ export async function testGigaAmConnection(
       );
     }
 
+    const audioHint = audioModelsList.length > 0
+      ? ` Аудио-модели в каталоге: ${audioModelsList.join(', ')}.`
+      : '';
     throw new Error(
-      `Модель видна в /v1/models, но эндпоинт транскрибации ${cfg.apiUrl} вернул HTTP ${transcriptionsStatus}: ${transcriptionsErrBody}`
+      `Модель видна в /v1/models, но эндпоинт транскрибации ${cfg.apiUrl} вернул HTTP ${transcriptionsStatus}: ${transcriptionsErrBody}.${audioHint}`
     );
   }
 
