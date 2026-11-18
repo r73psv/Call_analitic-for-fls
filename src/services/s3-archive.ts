@@ -4,6 +4,7 @@
  */
 
 import { S3Client, GetObjectCommand, PutObjectCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { encrypt, decrypt } from '../store/crypto-store.js';
 import { readStore, writeStore, readStoreSync } from '../store/store.js';
 import { CallRecord, S3ArchiveBatch, S3ArchiveStatus } from '../types.js';
@@ -56,6 +57,10 @@ export function getArchiveS3Client(): S3ClientArchiveInfo | null {
       secretAccessKey,
     },
     forcePathStyle: true,
+    requestHandler: new NodeHttpHandler({
+      connectionTimeout: 10000,
+      requestTimeout: 30000,
+    }),
   });
 
   return { s3, bucket, keyPrefix, endpoint };

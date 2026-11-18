@@ -149,7 +149,8 @@ export function buildCallEvaluation(criteriaInput: Partial<CallEvaluationCriteri
       name: def.name,
       score,
       is_applicable: isApplicable,
-      explanation
+      explanation,
+      ...(found?.evidence_quote !== undefined ? { evidence_quote: found.evidence_quote } : {}),
     };
   });
 
@@ -229,6 +230,7 @@ export function extractCallEvaluation(
   // Проверка валидности уже существующей оценки (защита от галлюцинаций и противоречий со стенограммой)
   if (existingEvaluation?.criteria && Array.isArray(existingEvaluation.criteria) && existingEvaluation.criteria.length >= 10) {
     const critMap = new Map(existingEvaluation.criteria.map(c => [c.id, c]));
+    const critGreeting = critMap.get('greeting_intro');
     const crit6 = critMap.get('additional_services');
     const critParallel = critMap.get('parallel_booking');
     const critAlt = critMap.get('alternative_options');
@@ -236,6 +238,19 @@ export function extractCallEvaluation(
     const critPrice = critMap.get('price_presentation');
     const critMaster = critMap.get('service_and_master_presentation');
     const mistakesStr = (mistakes || []).join(' ').toLowerCase();
+
+    const { managerText: mgrTxtCheck, fullText: fullTxtCheck } = splitSpeakerLines(ctx.cleanTranscript);
+    const openCheck = (mgrTxtCheck || fullTxtCheck).slice(0, 160);
+    const openHasGreetingWithClientAndSalon =
+      /(?:добрый день|здравствуйте|доброе утро|добрый вечер)/iu.test(openCheck) &&
+      /(?:[Дд]обр(?:ый\s+(?:день|вечер)|ое\s+утро)|[Зз]дравствуйте)[,\s]+(?!(?:Салон|Студ|Лик|Фэшн|Фешен|Fashion))[А-ЯЁ][а-яё]+/u.test(openCheck) &&
+      /(?:студи|салон|fashion|фешен|фэшн|лук\s*студ|лик)/iu.test(openCheck);
+    const hasFalseGreetingPenalty = Boolean(
+      openHasGreetingWithClientAndSalon &&
+        critGreeting &&
+        ((critGreeting.score ?? 10) < 9 ||
+          /не\s+представил|не\s+назвал[а]?\s+имя/i.test(`${critGreeting.explanation || ''} ${mistakesStr}`))
+    );
 
     const hasCrossSellContradiction = crit6 && crit6.score === 10 && mistakesStr.includes('сопутствующ');
     const hasWrongClosing10 =
@@ -273,6 +288,7 @@ export function extractCallEvaluation(
       (critPrice.score ?? 0) < 8;
 
     if (
+      !hasFalseGreetingPenalty &&
       !hasCrossSellContradiction &&
       !hasWrongClosing10 &&
       !hasMissedConfirmedClosing &&
@@ -313,10 +329,11 @@ export function extractCallEvaluation(
 
   // 1. Приветствие и представление (строго по стартовой реплике приветствия менеджера)
   const rawOpeningManager = (managerText || fullText).slice(0, 160).trim();
-  const openingManagerText = rawOpeningManager.split(/(?<=[.!?])\s+/)[0] || rawOpeningManager;
-  const hasGreeting = /(?:добрый день|здравствуйте|доброе утро|добрый вечер|приветствую|алло)/iu.test(openingManagerText);
-  const hasManagerNameIntro = /(?:меня зовут|администратор(?:\s+салона[^.!?]{0,40})?\s+[А-ЯЁа-яё]+|это\s+[А-ЯЁа-яё]+)/iu.test(openingManagerText);
-  const hasSalonName = /(?:студи|салон|fashion|фешен|фэшн|лик)/iu.test(openingManagerText);
+  const openingManagerText = rawOpeningManager.split(/(?<=[.!?])\s+(?=[А-ЯЁA-Z])/).slice(0, 2).join(' ') || rawOpeningManager;
+    const hasGreeting = /(?:добрый день|здравствуйте|доброе утро|добрый вечер|приветствую|алло)/iu.test(openingManagerText);
+    const hasManagerNameIntro = /(?:меня зовут|администратор(?:\s+салона[^.!?]{0,40})?\s+[А-ЯЁа-яё]+|это\s+[А-ЯЁа-яё]+)/iu.test(openingManagerText);
+    const hasClientNameGreeting = /(?:[Дд]обр(?:ый\s+(?:день|вечер)|ое\s+утро)|[Зз]дравствуйте)[,\s]+(?!(?:Салон|Студ|Лик|Фэшн|Фешен|Fashion))[А-ЯЁ][а-яё]+/u.test(openingManagerText);
+    const hasSalonName = /(?:студи|салон|fashion|фешен|фэшн|лук\s*студ|лик)/iu.test(openingManagerText);
   const isClippedIntroInStt =
     !hasGreeting &&
     !hasManagerNameIntro &&
@@ -330,7 +347,7 @@ export function extractCallEvaluation(
       ? null
       : hasGreeting && hasManagerNameIntro && hasSalonName
       ? 10
-      : hasManagerNameIntro && hasSalonName
+      : (hasGreeting && hasSalonName && hasClientNameGreeting) || (hasManagerNameIntro && hasSalonName)
       ? 9
       : hasGreeting && (hasManagerNameIntro || hasSalonName)
       ? 8
@@ -341,12 +358,14 @@ export function extractCallEvaluation(
       ? 'Начальное приветствие администратора не попало в расшифровку (звонящая сразу обращается к администратору по имени — критерий не снижает оценку).'
       : hasGreeting && hasManagerNameIntro && hasSalonName
       ? 'Приветствие по полному корпоративному стандарту: названы салон и имя администратора.'
+      : hasGreeting && hasSalonName && hasClientNameGreeting
+      ? 'Приветствие по стандарту: администратор вежливо поприветствовал клиента по имени и назвал салон.'
       : hasManagerNameIntro && hasSalonName
       ? 'Администратор представился с названием салона и собственным именем.'
       : hasGreeting && hasManagerNameIntro
       ? 'Приветствие вежливое с указанием имени администратора.'
       : hasGreeting && hasSalonName
-      ? 'Приветствие вежливое с названием салона, но администратор не назвал собственное имя.'
+      ? 'Приветствие вежливое с названием салона.'
       : hasGreeting
       ? 'Приветствие озвучено вежливо, однако в расшифровке не зафиксированы название салона и имя администратора.'
       : 'Приветствие скомкано или не соответствует корпоративному стандарту.'
@@ -411,6 +430,9 @@ export function extractCallEvaluation(
   // Клиентские обращения (первичная запись, перенос, спор, отказ, отсутствие услуги, консультация)
   const isDispute = ctx.isDispute;
   const isRescheduleOrCheck = ctx.isRescheduleOrCheck;
+  const isBookingConfirmationCall =
+    /(?:запись\s+подтверд|подтверд[а-яё]*\s+запис|подойд[её]те|обратный\s+звонок|будем\s+ожидать)/iu.test(ctx.cleanTranscript) &&
+    !/(?:сколько\s+стоит|хочу\s+записаться|какую\s+услугу|цен[ауы]|прайс)/iu.test(ctx.cleanTranscript);
 
   // 2. Выявление потребности гостя
   const hasNeedsQuestions = /(?:какую услугу|на какую|когда вам|в какое время|в какие дни|какой мастер|что именно|подскажите|хотели бы|планируете|на какое число|какой эффект|какие волосы|на что именно|необходимо будет|верно,?\s*да)/iu.test(managerEffective);
@@ -423,6 +445,7 @@ export function extractCallEvaluation(
   const priceAskedByClient = /(?:сколько стоит|по стоимости|цена|прайс|поч[её]м)/iu.test(clientEffective);
   const isPriceApplicable =
     !isRescheduleOrCheck &&
+    !isBookingConfirmationCall &&
     (!ctx.isUnavailableServiceRefusal || hasPriceMention || priceAskedByClient) &&
     (ctx.category !== 'consultation' || hasPriceMention || priceAskedByClient);
 
@@ -443,6 +466,7 @@ export function extractCallEvaluation(
   const isCrossSellApplicable =
     !isDispute &&
     !isRescheduleOrCheck &&
+    !isBookingConfirmationCall &&
     !ctx.isUnavailableServiceRefusal &&
     ctx.category !== 'declined';
 
@@ -481,9 +505,11 @@ export function extractCallEvaluation(
     {
       id: 'needs_identification',
       name: 'Выявление потребности гостя',
-      is_applicable: true,
-      score: hasNeedsQuestions ? 9 : (ctx.isUnavailableServiceRefusal ? 6 : 7),
-      explanation: hasNeedsQuestions
+      is_applicable: !isBookingConfirmationCall,
+      score: isBookingConfirmationCall ? null : (hasNeedsQuestions ? 9 : (ctx.isUnavailableServiceRefusal ? 6 : 7)),
+      explanation: isBookingConfirmationCall
+        ? 'Звонок направлен на подтверждение уже согласованного визита (не снижает оценку).'
+        : hasNeedsQuestions
         ? 'Администратор задавал уточняющие вопросы, выявляя пожелания гостя по услуге, времени или деталям визита.'
         : ctx.isUnavailableServiceRefusal
         ? 'Запрос клиента зафиксирован с его слов, но уточняющих вопросов (о желаемом результате, типе волос или срочности) не задано.'
@@ -494,11 +520,15 @@ export function extractCallEvaluation(
     {
       id: 'service_and_master_presentation',
       name: 'Презентация услуги и мастера',
-      is_applicable: true,
-      score: ctx.isUnavailableServiceRefusal
+      is_applicable: !isBookingConfirmationCall,
+      score: isBookingConfirmationCall
+        ? null
+        : ctx.isUnavailableServiceRefusal
         ? (hasNeedsQuestions && hasMasterPresented ? 8 : 6)
         : (hasMasterPresented ? 9 : 6),
-      explanation: ctx.isUnavailableServiceRefusal
+      explanation: isBookingConfirmationCall
+        ? 'Услуга и мастер в коротком подтверждении визита не требовали отдельной презентации (не снижает оценку).'
+        : ctx.isUnavailableServiceRefusal
         ? 'Администратор назвал доступную в салоне услугу (химическая завивка) и предложил консультацию, однако не раскрыл особенности процедуры и не представил мастера.'
         : hasMasterPresented
         ? 'Администратор сориентировал клиента по специалисту и/или особенностям выполнения процедуры.'

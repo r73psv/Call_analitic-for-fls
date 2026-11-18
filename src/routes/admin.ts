@@ -10,6 +10,7 @@ import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import path from 'path';
 import { S3Client, HeadBucketCommand } from '@aws-sdk/client-s3';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { readStore, writeStore } from '../store/store.js';
 import { requireRole, logAccess, getCurrentUser } from './auth.js';
 import { hashPassword, verifyPassword } from '../store/user-store.js';
@@ -710,6 +711,10 @@ adminRouter.post('/test/yandex-storage', async (req: Request, res: Response) => 
       endpoint,
       credentials: { accessKeyId, secretAccessKey },
       forcePathStyle: true,
+      requestHandler: new NodeHttpHandler({
+        connectionTimeout: 10000,
+        requestTimeout: 30000,
+      }),
     });
 
     await s3.send(new HeadBucketCommand({ Bucket: bucket }));
@@ -753,6 +758,10 @@ adminRouter.post('/test/s3', async (req: Request, res: Response) => {
       endpoint,
       credentials: { accessKeyId, secretAccessKey },
       forcePathStyle: true,
+      requestHandler: new NodeHttpHandler({
+        connectionTimeout: 10000,
+        requestTimeout: 30000,
+      }),
     });
 
     await s3.send(new HeadBucketCommand({ Bucket: bucket }));

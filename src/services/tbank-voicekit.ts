@@ -16,6 +16,10 @@ import {
   computeSilenceCutPoints,
   refineTranscriptRoles,
   fixDuplicatedTranscript,
+  probeAudioChannels,
+  splitStereoToMonoWavChannels,
+  mergeDualChannelTranscripts,
+  TimedUtterance,
 } from './speechkit.js';
 
 const TBANK_STT_BASE_URL = process.env.TBANK_VOICEKIT_ENDPOINT || 'https://api.tbank.ru';
@@ -216,12 +220,26 @@ function parseVoiceKitResults(results: any[]): string {
   return items.map((i) => i.text).join('\n');
 }
 
-async function recognizeSync(
+function parseVoiceKitUtterances(results: any[], offsetSec: number = 0): TimedUtterance[] {
+  if (!Array.isArray(results) || results.length === 0) return [];
+  const mapped: (TimedUtterance | null)[] = results.map((r) => {
+    const alt = Array.isArray(r?.alternatives) ? r.alternatives[0] : null;
+    const text = String(alt?.transcript || '').trim();
+    const startSec = r?.start_time ? parseFloat(String(r.start_time).replace('s', '')) || 0 : 0;
+    const endSec = r?.end_time ? parseFloat(String(r.end_time).replace('s', '')) || 0 : undefined;
+    return text
+      ? { text, start: startSec + offsetSec, end: endSec !== undefined ? endSec + offsetSec : undefined }
+      : null;
+  });
+  return mapped.filter((u): u is TimedUtterance => u !== null);
+}
+
+async function recognizeSyncRaw(
   audioBuffer: Buffer,
   encoding: string,
   sampleRateHertz: number,
   creds: TbankVoiceKitCredentials
-): Promise<string> {
+): Promise<any[]> {
   const jwt = createTbankVoiceKitJwt(creds.apiKey, creds.secretKey);
   const res = await axios.post(
     `${TBANK_STT_BASE_URL}/v1/stt:recognize`,
@@ -242,12 +260,47 @@ async function recognizeSync(
         Authorization: `Bearer ${jwt}`,
         'Content-Type': 'application/json',
       },
-      timeout: 60000,
+      timeout: 120000,
     }
   );
 
-  const results = res.data?.results || res.data?.response?.results || [];
+  return res.data?.results || res.data?.response?.results || [];
+}
+
+async function recognizeSync(
+  audioBuffer: Buffer,
+  encoding: string,
+  sampleRateHertz: number,
+  creds: TbankVoiceKitCredentials
+): Promise<string> {
+  const results = await recognizeSyncRaw(audioBuffer, encoding, sampleRateHertz, creds);
   return parseVoiceKitResults(results);
+}
+
+async function transcribeMonoChannelWithTbank(
+  wavOrBuffer: Buffer,
+  creds: TbankVoiceKitCredentials
+): Promise<TimedUtterance[]> {
+  const dur = getAudioDuration(wavOrBuffer);
+  if (dur > 0 && dur < 45 && wavOrBuffer.length <= 8 * 1024 * 1024) {
+    const pcm = convertToLinear16Mono(wavOrBuffer);
+    if (pcm && pcm.length > 0) {
+      const results = await recognizeSyncRaw(pcm, 'LINEAR16', 16000, creds);
+      const utts = parseVoiceKitUtterances(results, 0);
+      if (utts.length > 0) return utts;
+    }
+  }
+  const chunks = splitAudioIntoLinear16Chunks(wavOrBuffer);
+  const out: TimedUtterance[] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    try {
+      const results = await recognizeSyncRaw(chunks[i], 'LINEAR16', 16000, creds);
+      out.push(...parseVoiceKitUtterances(results, i * SEGMENT_SECONDS));
+    } catch (chunkErr: any) {
+      console.warn(`[T-Bank VoiceKit Channel] Ошибка сегмента ${i + 1}/${chunks.length}:`, chunkErr.message);
+    }
+  }
+  return out;
 }
 
 export async function transcribeWithTbankVoiceKit(audioBuffer: Buffer): Promise<string> {
@@ -260,9 +313,25 @@ export async function transcribeWithTbankVoiceKit(audioBuffer: Buffer): Promise<
 
   const audioFormat = detectAudioFormat(audioBuffer);
   const duration = getAudioDuration(audioBuffer);
+  const channels = probeAudioChannels(audioBuffer);
   console.log(
-    `[T-Bank VoiceKit] Подготовка аудио (${Math.round(audioBuffer.length / 1024)} КБ, ${duration.toFixed(1)} сек., формат: ${audioFormat})`
+    `[T-Bank VoiceKit] Подготовка аудио (${Math.round(audioBuffer.length / 1024)} КБ, ${duration.toFixed(1)} сек., каналов: ${channels}, формат: ${audioFormat})`
   );
+
+  if (channels >= 2) {
+    const split = splitStereoToMonoWavChannels(audioBuffer);
+    if (split && !split.isDualMono) {
+      console.log('[T-Bank VoiceKit] Стереозапись: разделение на 2 моно-канала для раздельного распознавания...');
+      const [ch0Utts, ch1Utts] = await Promise.all([
+        transcribeMonoChannelWithTbank(split.ch0, creds),
+        transcribeMonoChannelWithTbank(split.ch1, creds),
+      ]);
+      const merged = mergeDualChannelTranscripts(ch0Utts, ch1Utts);
+      if (merged.trim()) {
+        return merged;
+      }
+    }
+  }
 
   // Для коротких записей (< 45 сек. и <= 8 МБ) отправляем напрямую в :recognize
   if (duration > 0 && duration < 45 && audioBuffer.length <= 8 * 1024 * 1024) {

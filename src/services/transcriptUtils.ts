@@ -300,6 +300,8 @@ export const DEFAULT_ROLE_MARKERS: RoleMarkersConfig = {
     'fashion look',
     'фешен лук',
     'фэшн лук',
+    'лук студ',
+    'лук студия',
     'fls',
     'лик 28',
     'слушаю вас',
@@ -378,8 +380,14 @@ export const DEFAULT_ROLE_MARKERS: RoleMarkersConfig = {
     'по стоимости',
     'верно, да?',
     'укладку делала',
+    'подойдет?',
+    'подойдёт?',
+    'подойдете?',
+    'подойдёте?',
+    'спасибо за обратный звонок',
   ],
   client: [
+    'запись подтвердили',
     'а подскажите',
     'а у вас есть',
     'у вас есть',
@@ -490,7 +498,7 @@ export function refineTranscriptRoles(
       continue;
     }
 
-    const hasSalonOrAdminWord = /(?:салон|студи|администратор|фэшн|fashion|лик\s*28)/iu.test(lower);
+    const hasSalonOrAdminWord = /(?:салон|студи|администратор|фэшн|fashion|лук\s*студ|лик\s*28)/iu.test(lower);
     const isCallerSelfIntro =
       /(?:меня\s+зовут)/iu.test(lower) && !hasSalonOrAdminWord;
     const isAddressingStaffByName =

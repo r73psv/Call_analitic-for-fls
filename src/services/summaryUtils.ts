@@ -300,7 +300,7 @@ export function classifyCallContext(
   const rawBooking = (existingBookingStatus || existingKeyFacts?.booking_status || '').toLowerCase().trim();
   const outcome = (existingKeyFacts?.call_outcome || '').toLowerCase().trim();
   const clientConfirmedAtEnd =
-    /(?:да,\s*(?:отлично|давайте|записывайте|подойд[её]т|хорошо)|на\s+\d{1,2}\s+(?:я\s+)?оставляю|оставьте тогда|подтверждаю запись|давайте я продиктую|угу,?\s*хорошо(?:[.,\s]+до свидания)?)/iu.test(callerTextForRefusal) ||
+    /(?:да,?\s*(?:вс[её],?\s*)?(?:запись\s+подтвер[а-яё]*|подтвер[а-яё]*\s+запись|отлично|давайте|записывайте|подойд[её]т|хорошо)|на\s+\d{1,2}\s+(?:я\s+)?оставляю|оставьте тогда|подтверждаю запись|запись\s+подтвер[а-яё]*|давайте я продиктую|угу,?\s*хорошо(?:[.,\s]+до свидания)?)/iu.test(callerTextForRefusal) ||
     /(?<!не\s)(?:записала|записываю|записал|записали|записываем)\s+вас/iu.test(managerLines || cleanTranscript);
 
   const isDeclined =
@@ -314,8 +314,8 @@ export function classifyCallContext(
   const managerEffectiveForBooking = managerLines || cleanTranscript;
   const hasRealBookingActionInTranscript =
     /(?<!не\s)(?:записала(?:\s+вас)?|записываю(?:\s+вас)?|записал(?:\s+вас)?|записали(?:\s+вас)?|запишем(?:\s+вас)?|записываем(?:\s+вас)?|вы\s+записаны|запись\s+(?:успешно\s+)?(?:подтверждаем|подтверждена|оформлена)|на\s+\d{1,2}(?::\d{2})?\s+(?:я\s+)?оставляю|оставляем\s+все|договорились\s+(?:на|в)|жду\s+вас\s+(?:завтра|сегодня|в\s+\d))/iu.test(managerEffectiveForBooking) ||
-    (/(?:запишите|давайте\s+на\s+\d|подойд[её]т|согласна|согласен|давайте я продиктую)/iu.test(callerTextForRefusal) &&
-      /(?:запис|жд[её]м|ожида|подтвержд|хорошо)/iu.test(managerEffectiveForBooking));
+    (/(?:запишите|давайте\s+на\s+\d|подойд[её]т|согласна|согласен|давайте я продиктую|да,?\s*(?:вс[её],?\s*)?(?:запись\s+подтвер|подтвер[а-яё]*\s+запись))/iu.test(callerTextForRefusal) &&
+      /(?:запис|жд[её]м|ожида|подтвержд|хорошо|подойд[её]те)/iu.test(managerEffectiveForBooking));
 
   const isConfirmedBooking =
     !isNonClient &&
@@ -464,7 +464,7 @@ export function extractEssenceDetails(
   } else {
     const rel = cleanTranscript.match(/(?:^|[^\p{L}\d])(сегодня|завтра|послезавтра|в\s+понедельник|во\s+вторник|в\s+среду|в\s+четверг|в\s+пятницу|в\s+субботу|в\s+воскресенье|на\s+выходных|на\s+выходные)(?:[^\p{L}\d]|$)/iu);
     if (rel) {
-      date = rel[1].trim();
+      date = rel[1].trim().toLowerCase();
     } else {
       const dateSummaryMatch = cleanExisting?.match(/дата\s*[—–:\-]\s*([^,\n;.]+)/iu);
       if (dateSummaryMatch && !/не указан|не применим/i.test(dateSummaryMatch[1])) {
@@ -528,11 +528,21 @@ export function extractEssenceDetails(
         if (std) {
           time = std[1];
         } else {
-          const wordTime = cleanTranscript.match(/(?:^|[^\p{L}\d])(?:в|на)\s+([012]?\d)\s+(?:часов|часа)(?:[^\p{L}\d]|$)/iu);
+          const wordTime = cleanTranscript.match(/(?:^|[^\p{L}\d])(?:в|на|к)\s+([012]?\d)\s*(?:часов|часа|утра|дня|вечера|ночи)(?:[^\p{L}\d]|$)/iu);
           if (wordTime && Number(wordTime[1]) <= 23) {
             time = `${wordTime[1].padStart(2, '0')}:00`;
-          } else if (/(?:^|[^\p{L}\d])к\s+часу(?:[^\p{L}\d]|$)/iu.test(cleanTranscript)) {
-            time = '13:00';
+          } else {
+            const plainHourTime = cleanTranscript.match(
+              /(?:^|[^\p{L}\d])(?:в|на|к)\s+([012]?\d)(?=\s*(?:подойд[её]т[а-яё]*|удобно|можно|будет|свободн|[?!.,\n]|$))/iu
+            );
+            if (plainHourTime) {
+              const h = Number(plainHourTime[1]);
+              if (h >= 7 && h <= 22) {
+                time = `${String(h).padStart(2, '0')}:00`;
+              }
+            } else if (/(?:^|[^\p{L}\d])к\s+часу(?:[^\p{L}\d]|$)/iu.test(cleanTranscript)) {
+              time = '13:00';
+            }
           }
         }
       }

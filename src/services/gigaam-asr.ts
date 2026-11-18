@@ -14,6 +14,10 @@ import {
   splitAudioIntoOpusChunks,
   refineTranscriptRoles,
   fixDuplicatedTranscript,
+  probeAudioChannels,
+  splitStereoToMonoWavChannels,
+  mergeDualChannelTranscripts,
+  TimedUtterance,
 } from './speechkit.js';
 
 export const CLOUDRU_GIGAASR_TRANSCRIPTIONS_URL =
@@ -284,6 +288,47 @@ export function extractTextFromGigaAmResponse(data: any): string {
   }
 
   return '';
+}
+
+export function extractSegmentsFromGigaAmResponse(rawBody: string, offsetSec: number = 0): TimedUtterance[] {
+  if (!rawBody || !rawBody.trim()) return [];
+  try {
+    const parsed = JSON.parse(rawBody);
+    const segs = Array.isArray(parsed?.segments)
+      ? parsed.segments
+      : Array.isArray(parsed?.utterances)
+      ? parsed.utterances
+      : null;
+
+    if (segs && segs.length > 0) {
+      const out = segs
+        .map((seg: any) => {
+          const text = String(seg?.text || seg?.transcript || seg?.utterance || '').trim();
+          if (!text) return null;
+          const start = typeof seg?.start === 'number'
+            ? seg.start + offsetSec
+            : typeof seg?.start_time === 'number'
+            ? seg.start_time + offsetSec
+            : undefined;
+          const end = typeof seg?.end === 'number'
+            ? seg.end + offsetSec
+            : typeof seg?.end_time === 'number'
+            ? seg.end_time + offsetSec
+            : undefined;
+          return { text, start, end } satisfies TimedUtterance;
+        })
+        .filter((s: TimedUtterance | null): s is TimedUtterance => s !== null);
+      if (out.length > 0) return out;
+    }
+
+    const plainText = extractTextFromGigaAmResponse(parsed);
+    if (plainText) {
+      return [{ text: plainText, start: offsetSec > 0 ? offsetSec : undefined }];
+    }
+    return [];
+  } catch {
+    return rawBody.trim() ? [{ text: rawBody.trim(), start: offsetSec > 0 ? offsetSec : undefined }] : [];
+  }
 }
 
 interface CloudRuAttemptOpts {
@@ -729,7 +774,9 @@ async function postAudioToGigaAm(
   mimeType: string,
   config: GigaAmConfig,
   fieldName: 'file' | 'audio' = 'file',
-  allowWavFallback: boolean = true
+  allowWavFallback: boolean = true,
+  preferVerboseJson: boolean = false,
+  onRawSegments?: (segs: TimedUtterance[]) => void
 ): Promise<string> {
   const format = detectAudioFormat(audioBuffer);
   const meta = getFileMeta(format, mimeType);
@@ -751,6 +798,9 @@ async function postAudioToGigaAm(
     ) {
       const chatRes = await tryChatAudioFallback(audioBuffer, meta, resolvedConfig, label);
       if (chatRes.ok) {
+        if (onRawSegments && chatRes.text) {
+          onRawSegments([{ text: chatRes.text }]);
+        }
         return chatRes.text;
       }
 
@@ -762,12 +812,15 @@ async function postAudioToGigaAm(
           meta,
           { ...resolvedConfig, apiUrl: txUrl },
           fieldName,
-          { responseFormat: 'json', includeLanguage: true }
+          { responseFormat: preferVerboseJson ? 'verbose_json' : 'json', includeLanguage: true }
         );
         if (txRes.ok) {
           transcriptionsFallbackUrls.add(resolvedConfig.apiUrl);
           const parsedText = parseTranscriptionBody(txRes.rawBody, label);
-          if (parsedText) return parsedText;
+          if (parsedText) {
+            if (onRawSegments) onRawSegments(extractSegmentsFromGigaAmResponse(txRes.rawBody));
+            return parsedText;
+          }
         }
         const txMinimalRes = !txRes.ok && txRes.status !== 401 && txRes.status !== 403 && txRes.status !== 404
           ? await sendMultipartOnce(
@@ -780,6 +833,7 @@ async function postAudioToGigaAm(
           : txRes;
         if (txMinimalRes.ok) {
           transcriptionsFallbackUrls.add(resolvedConfig.apiUrl);
+          if (onRawSegments) onRawSegments(extractSegmentsFromGigaAmResponse(txMinimalRes.rawBody));
           return parseTranscriptionBody(txMinimalRes.rawBody, label);
         }
       }
@@ -797,11 +851,17 @@ async function postAudioToGigaAm(
       ? { ...resolvedConfig, apiUrl: getTranscriptionsUrlFromConfig(resolvedConfig.apiUrl) }
       : resolvedConfig;
 
-    const paramProfiles: CloudRuAttemptOpts[] = [
-      { responseFormat: 'json', includeLanguage: true },
-      { responseFormat: 'verbose_json', includeLanguage: true },
-      { includeLanguage: false },
-    ];
+    const paramProfiles: CloudRuAttemptOpts[] = preferVerboseJson
+      ? [
+          { responseFormat: 'verbose_json', includeLanguage: true },
+          { responseFormat: 'json', includeLanguage: true },
+          { includeLanguage: false },
+        ]
+      : [
+          { responseFormat: 'json', includeLanguage: true },
+          { responseFormat: 'verbose_json', includeLanguage: true },
+          { includeLanguage: false },
+        ];
 
     let lastRes: { status: number; ok: boolean; statusText: string; rawBody: string } | null = null;
     for (const profile of paramProfiles) {
@@ -810,7 +870,10 @@ async function postAudioToGigaAm(
 
       if (res.ok) {
         const parsedText = parseTranscriptionBody(res.rawBody, label);
-        if (parsedText) return parsedText;
+        if (parsedText) {
+          if (onRawSegments) onRawSegments(extractSegmentsFromGigaAmResponse(res.rawBody));
+          return parsedText;
+        }
         // Если ответ 200 OK с пустым текстом, пробуем следующий профиль или WAV fallback
         continue;
       }
@@ -966,35 +1029,34 @@ async function postAudioToGigaAm(
   return parseTranscriptionBody(res.rawBody, label);
 }
 
-export async function transcribeWithGigaAm(
+async function transcribeMonoAudioSegmentsWithGigaAm(
   audioBuffer: Buffer,
-  mimeType: string = 'audio/mpeg',
-  variantOverride?: GigaamModelVariant
-): Promise<string> {
-  const cfg = getGigaAmConfig(undefined, undefined, variantOverride);
-  if (!cfg.apiUrl) {
-    throw new Error(
-      'GigaASR / GigaAM v3 не настроен: укажите URL эндпоинта (например Cloud.ru Evolution) в настройках системы'
-    );
-  }
-  if (cfg.apiUrl.includes('cloud.ru') && !cfg.apiKey) {
-    throw new Error(
-      'GigaASR (Cloud.ru Evolution): укажите API-ключ сервисного аккаунта Cloud.ru (GIGAAM_API_KEY) в настройках системы'
-    );
-  }
-
+  mimeType: string,
+  cfg: GigaAmConfig,
+  label: string,
+  preferVerboseJson: boolean = false
+): Promise<TimedUtterance[]> {
   const duration = getAudioDuration(audioBuffer);
-  const label = cfg.isCloudRu ? 'GigaASR Cloud.ru' : 'GigaAM v3';
-  console.log(
-    `[${label}] Отправка аудио (${Math.round(audioBuffer.length / 1024)} КБ, ${duration.toFixed(1)} сек., модель: ${cfg.variant}) -> ${cfg.apiUrl}`
-  );
-
-  // Сначала пробуем отправить файл целиком
   let directError: Error | null = null;
+
   try {
-    const directText = await postAudioToGigaAm(audioBuffer, mimeType, cfg);
+    let capturedSegments: TimedUtterance[] = [];
+    const directText = await postAudioToGigaAm(
+      audioBuffer,
+      mimeType,
+      cfg,
+      'file',
+      true,
+      preferVerboseJson,
+      (segs) => {
+        capturedSegments = segs;
+      }
+    );
+    if (capturedSegments.length > 0) {
+      return capturedSegments;
+    }
     if (directText && directText.trim()) {
-      return fixDuplicatedTranscript(refineTranscriptRoles(directText.trim()));
+      return [{ text: directText.trim(), start: 0 }];
     }
   } catch (err: any) {
     directError = err;
@@ -1017,7 +1079,6 @@ export async function transcribeWithGigaAm(
     console.warn(`[${label}] Прямая отправка не принята (${err.message}), переключение на сегментацию WAV 16кГц...`);
   }
 
-  // Режим сегментации по паузам в стандартном WAV 16kHz mono (или fallback в OGG Opus)
   const shouldChunk = duration >= 20 || (duration === 0 && audioBuffer.length > 256 * 1024) || Boolean(directError);
   if (shouldChunk) {
     let chunks = splitAudioIntoWavChunks(audioBuffer, 22);
@@ -1028,21 +1089,41 @@ export async function transcribeWithGigaAm(
     }
 
     if (chunks.length > 0) {
-      const chunkTexts: string[] = [];
+      const allSegments: TimedUtterance[] = [];
       let lastChunkErr: Error | null = null;
+      let offsetSec = 0;
       for (let i = 0; i < chunks.length; i++) {
+        const chunkDur = getAudioDuration(chunks[i]) || 22;
         try {
-          const text = await postAudioToGigaAm(chunks[i], chunkMime, cfg, 'file', chunkMime !== 'audio/wav');
-          if (text && text.trim()) {
-            chunkTexts.push(text.trim());
+          let captured: TimedUtterance[] = [];
+          const text = await postAudioToGigaAm(
+            chunks[i],
+            chunkMime,
+            cfg,
+            'file',
+            chunkMime !== 'audio/wav',
+            preferVerboseJson,
+            (segs) => {
+              captured = segs.map((s) => ({
+                ...s,
+                start: typeof s.start === 'number' ? s.start + offsetSec : offsetSec,
+                end: typeof s.end === 'number' ? s.end + offsetSec : undefined,
+              }));
+            }
+          );
+          if (captured.length > 0) {
+            allSegments.push(...captured);
+          } else if (text && text.trim()) {
+            allSegments.push({ text: text.trim(), start: offsetSec });
           }
         } catch (chunkErr: any) {
           lastChunkErr = chunkErr;
           console.warn(`[${label}] Ошибка сегмента ${i + 1}/${chunks.length}:`, chunkErr.message);
         }
+        offsetSec += chunkDur;
       }
-      if (chunkTexts.length > 0) {
-        return fixDuplicatedTranscript(refineTranscriptRoles(chunkTexts.join('\n')));
+      if (allSegments.length > 0) {
+        return allSegments;
       }
       if (lastChunkErr) {
         throw lastChunkErr;
@@ -1054,7 +1135,55 @@ export async function transcribeWithGigaAm(
     throw directError;
   }
 
-  return '';
+  return [];
+}
+
+export async function transcribeWithGigaAm(
+  audioBuffer: Buffer,
+  mimeType: string = 'audio/mpeg',
+  variantOverride?: GigaamModelVariant
+): Promise<string> {
+  const cfg = getGigaAmConfig(undefined, undefined, variantOverride);
+  if (!cfg.apiUrl) {
+    throw new Error(
+      'GigaASR / GigaAM v3 не настроен: укажите URL эндпоинта (например Cloud.ru Evolution) в настройках системы'
+    );
+  }
+  if (cfg.apiUrl.includes('cloud.ru') && !cfg.apiKey) {
+    throw new Error(
+      'GigaASR (Cloud.ru Evolution): укажите API-ключ сервисного аккаунта Cloud.ru (GIGAAM_API_KEY) в настройках системы'
+    );
+  }
+
+  const duration = getAudioDuration(audioBuffer);
+  const label = cfg.isCloudRu ? 'GigaASR Cloud.ru' : 'GigaAM v3';
+  const channels = probeAudioChannels(audioBuffer);
+  console.log(
+    `[${label}] Отправка аудио (${Math.round(audioBuffer.length / 1024)} КБ, ${duration.toFixed(1)} сек., каналов: ${channels}, модель: ${cfg.variant}) -> ${cfg.apiUrl}`
+  );
+
+  // П. 2: Если запись стерео (Мегафон) — разделяем на два моно-канала, распознаём по отдельности и склеиваем по ролям
+  if (channels >= 2) {
+    const split = splitStereoToMonoWavChannels(audioBuffer);
+    if (split && !split.isDualMono) {
+      console.log(`[${label}] Истинное стерео: разделение на 2 моно-канала для раздельного распознавания...`);
+      const [ch0Segs, ch1Segs] = await Promise.all([
+        transcribeMonoAudioSegmentsWithGigaAm(split.ch0, 'audio/wav', cfg, `${label} [CH0]`, true),
+        transcribeMonoAudioSegmentsWithGigaAm(split.ch1, 'audio/wav', cfg, `${label} [CH1]`, true),
+      ]);
+      const merged = mergeDualChannelTranscripts(ch0Segs, ch1Segs);
+      if (merged.trim()) {
+        return merged;
+      }
+    } else if (split?.isDualMono) {
+      console.log(`[${label}] Обнаружен dual-mono (одинаковые каналы) — используем стандартную моно-схему с разметкой ролей по смыслу.`);
+    }
+  }
+
+  // Моно-режим (или dual-mono): стандартный пайплайн, роли разметит модель по смыслу
+  const segs = await transcribeMonoAudioSegmentsWithGigaAm(audioBuffer, mimeType, cfg, label, false);
+  const joined = segs.map((s) => s.text).filter(Boolean).join('\n').trim();
+  return joined ? fixDuplicatedTranscript(refineTranscriptRoles(joined)) : '';
 }
 
 export async function transcribeWithGigaAmRetry(

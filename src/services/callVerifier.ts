@@ -268,9 +268,9 @@ function parseSummaryVerifierFields(rawContent: string): {
 }
 
 /**
- * Второй независимый проход верификации резюме по стенограмме.
- * Проверяет каждую цитату программно на вхождение в стенограмму; при галлюцинации цитаты
- * выполняет один повторный прогон при temperature=0, либо помечает поле как unconfirmed.
+ * Второй независимый проход верификации резюме по стенограмме (один запрос к модели).
+ * Программно проверяет каждую цитату на вхождение в стенограмму:
+ * если цитата отсутствует — немедленно помечает поле как unconfirmed без повторного вызова API.
  */
 export async function verifySummary(
   transcript: string,
@@ -284,31 +284,19 @@ export async function verifySummary(
 }> {
   const userContent = `СТЕНОГРАММА:\n${transcript}\n\nЧЕРНОВИК РЕЗЮМЕ (JSON):\n${JSON.stringify(draftSummary, null, 2)}`;
 
-  let parsed = parseSummaryVerifierFields(
+  const parsed = parseSummaryVerifierFields(
     await callVerifierModel(VERIFIER_PROMPT, userContent, opts, 4000)
   );
 
   let hallucinatedQuotesCaught = 0;
-  const hasFakeQuote = (fields: VerifierField[]) =>
-    fields.some((f) => f.quote && !isQuotePresentInTranscript(transcript, f.quote));
 
-  if (hasFakeQuote(parsed.fields)) {
-    hallucinatedQuotesCaught++;
-    console.warn('[Verifier] Обнаружена цитата, отсутствующая в стенограмме. Повторный строгий прогон (temperature=0)...');
-    try {
-      const retryContent = `${userContent}\n\nВНИМАНИЕ: В предыдущей попытке приведена цитата, которой нет в стенограмме. Приводи ТОЛЬКО дословные фрагменты текста из блока СТЕНОГРАММА или укажи verdict: "unconfirmed" и quote: null.`;
-      parsed = parseSummaryVerifierFields(
-        await callVerifierModel(VERIFIER_PROMPT, retryContent, opts, 4000)
-      );
-    } catch {
-      // keep first parsed and sanitize below
-    }
-  }
-
-  // Финальная бесплатная страховка: ни одна фейковая цитата не проходит
+  // Программная проверка цитат БЕЗ повторного запроса к LLM
   const verifiedFields: VerifierField[] = parsed.fields.map((f) => {
     if (f.quote && !isQuotePresentInTranscript(transcript, f.quote)) {
       hallucinatedQuotesCaught++;
+      console.warn(
+        `[Verifier] Поле "${f.field}": цитата не найдена в стенограмме ("${f.quote.slice(0, 60)}"). Помечено unconfirmed без ретрая.`
+      );
       return {
         ...f,
         verdict: 'unconfirmed',
@@ -380,23 +368,11 @@ export async function verifyCriteriaWithTranscript(
 
   const userContent = `СТЕНОГРАММА:\n${transcript}\n\nПРИМЕНИМЫЕ КРИТЕРИИ АУДИТА (JSON):\n${JSON.stringify(conciseCriteria, null, 2)}`;
 
-  let items = parseCriteriaVerification(
+  const items = parseCriteriaVerification(
     await callVerifierModel(CRITERIA_VERIFIER_PROMPT, userContent, opts, 2000)
   );
 
   let hallucinatedQuotesCaught = 0;
-  if (items.some((it) => it.quote && !isQuotePresentInTranscript(transcript, it.quote))) {
-    hallucinatedQuotesCaught++;
-    try {
-      const retryContent = `${userContent}\n\nВНИМАНИЕ: Убедись, что каждая quote дословно скопирована из блока СТЕНОГРАММА. Если цитаты нет — ставь verdict: "unconfirmed" и quote: null.`;
-      items = parseCriteriaVerification(
-        await callVerifierModel(CRITERIA_VERIFIER_PROMPT, retryContent, opts, 2000)
-      );
-    } catch {
-      // sanitize below
-    }
-  }
-
   const sanitized = items.map((it) => {
     if (it.quote && !isQuotePresentInTranscript(transcript, it.quote)) {
       hallucinatedQuotesCaught++;

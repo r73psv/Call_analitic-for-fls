@@ -157,6 +157,282 @@ export function convertToWav16kMono(buffer: Buffer): Buffer | null {
   return null;
 }
 
+export interface TimedUtterance {
+  text: string;
+  start?: number;
+  end?: number;
+}
+
+export interface StereoSplitResult {
+  ch0: Buffer;
+  ch1: Buffer;
+  isDualMono: boolean;
+}
+
+/**
+ * Определяет количество аудиоканалов файла через ffprobe (1 = моно, 2 = стерео).
+ */
+export function probeAudioChannels(buffer: Buffer): number {
+  let inPath = '';
+  try {
+    const tempDir = path.join(process.cwd(), 'temp');
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+    inPath = path.join(tempDir, `ch-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`);
+    fs.writeFileSync(inPath, buffer);
+    const out = execSync(
+      `ffprobe -v error -select_streams a:0 -show_entries stream=channels -of default=noprint_wrappers=1:nokey=1 "${inPath}" 2>/dev/null`,
+      { timeout: 10000 }
+    );
+    const channels = parseInt(out.toString().trim(), 10);
+    return !isNaN(channels) && channels > 0 ? channels : 1;
+  } catch {
+    return 1;
+  } finally {
+    if (inPath) {
+      try { fs.unlinkSync(inPath); } catch {}
+    }
+  }
+}
+
+/**
+ * Проверяет, содержат ли два 16-bit PCM WAV буфера практически идентичный сигнал (dual-mono).
+ */
+function checkWavDualMono(wav0: Buffer, wav1: Buffer): boolean {
+  const HEADER_BYTES = 44;
+  if (wav0.length <= HEADER_BYTES + 320 || wav1.length <= HEADER_BYTES + 320) {
+    return false;
+  }
+  const len = Math.min(wav0.length, wav1.length);
+  const sampleCount = Math.floor((len - HEADER_BYTES) / 2);
+  if (sampleCount < 160) return false;
+
+  const step = Math.max(1, Math.floor(sampleCount / 4000));
+  let sum0Sq = 0;
+  let sum1Sq = 0;
+  let dot = 0;
+  let diffSq = 0;
+  let count = 0;
+
+  for (let s = 0; s < sampleCount; s += step) {
+    const offset = HEADER_BYTES + s * 2;
+    const v0 = wav0.readInt16LE(offset);
+    const v1 = wav1.readInt16LE(offset);
+    sum0Sq += v0 * v0;
+    sum1Sq += v1 * v1;
+    dot += v0 * v1;
+    const d = v0 - v1;
+    diffSq += d * d;
+    count++;
+  }
+
+  if (count === 0) return false;
+  const rms0 = Math.sqrt(sum0Sq / count);
+  const rms1 = Math.sqrt(sum1Sq / count);
+
+  // Если оба канала почти тихие — трактуем как моно
+  if (rms0 < 20 && rms1 < 20) return true;
+  // Если один канал почти полностью тихий, а второй содержит речь — это истинное стерео (односторонняя или раздельная запись)
+  if (rms0 < 20 || rms1 < 20) return false;
+
+  const denom = Math.sqrt(sum0Sq) * Math.sqrt(sum1Sq);
+  const corr = denom > 0 ? dot / denom : 0;
+  const rmsDiff = Math.sqrt(diffSq / count);
+  const relDiff = rmsDiff / Math.max(rms0, rms1, 1);
+
+  return corr > 0.985 && relDiff < 0.08;
+}
+
+/**
+ * Разделяет стерео-аудиозапись (2 канала) на два независимых моно WAV 16kHz PCM файла через ffmpeg.
+ * Возвращает null, если вход не стерео или возникла ошибка ffmpeg.
+ */
+export function splitStereoToMonoWavChannels(buffer: Buffer): StereoSplitResult | null {
+  let tempDir = '';
+  try {
+    const channels = probeAudioChannels(buffer);
+    if (channels < 2) {
+      return null;
+    }
+
+    tempDir = path.join(process.cwd(), 'temp', `stereo-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    fs.mkdirSync(tempDir, { recursive: true });
+    const inPath = path.join(tempDir, 'stereo_in.tmp');
+    const leftPath = path.join(tempDir, 'ch0.wav');
+    const rightPath = path.join(tempDir, 'ch1.wav');
+    fs.writeFileSync(inPath, buffer);
+
+    execSync(
+      `ffmpeg -y -i "${inPath}" -filter_complex "channelsplit=channel_layout=stereo[left][right]" -map "[left]" -vn -acodec pcm_s16le -ar 16000 -ac 1 "${leftPath}" -map "[right]" -vn -acodec pcm_s16le -ar 16000 -ac 1 "${rightPath}" 2>/dev/null`,
+      { timeout: 45000 }
+    );
+
+    if (!fs.existsSync(leftPath) || !fs.existsSync(rightPath)) {
+      return null;
+    }
+
+    const ch0 = fs.readFileSync(leftPath);
+    const ch1 = fs.readFileSync(rightPath);
+    if (ch0.length <= 44 || ch1.length <= 44) {
+      return null;
+    }
+
+    const isDualMono = checkWavDualMono(ch0, ch1);
+    return { ch0, ch1, isDualMono };
+  } catch (err: any) {
+    console.warn('[Audio StereoSplit] Ошибка разделения стерео-каналов:', err.message);
+    return null;
+  } finally {
+    if (tempDir) {
+      try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+    }
+  }
+}
+
+function scoreChannelAsManager(utterances: TimedUtterance[]): number {
+  const joined = utterances
+    .map((u) => u.text)
+    .filter((t) => !isIvrUtterance(t))
+    .join(' ')
+    .toLowerCase();
+  if (!joined) return 0;
+
+  let score = 0;
+  const managerPatterns = [
+    /салон(?:\s+красоты)?/i,
+    /лук\s+студ|фэшн\s+лук|fashion\s+look|лик\s*28/i,
+    /администратор/i,
+    /чем\s+(?:я\s+)?могу\s+(?:вам\s+)?помочь/i,
+    /слушаю\s+вас/i,
+    /записал[аи]?\s+вас|записываю\s+вас/i,
+    /будем\s+(?:вас\s+)?ожидать|жд[её]м\s+вас/i,
+    /свободн(?:ое|ые)\s+(?:время|окошк|слот)/i,
+    /по\s+стоимости/i,
+    /данный\s+мастер/i,
+  ];
+  const clientPatterns = [
+    /хотел[а]?\s+бы\s+записаться|хочу\s+записаться/i,
+    /подскажите,?\s+пожалуйста/i,
+    /сколько\s+стоит/i,
+    /мо[её]\s+имя|меня\s+зовут/i,
+    /я\s+у\s+вас\s+была/i,
+    /у\s+меня\s+(?:вот\s+)?запись/i,
+    /опоздаю|задержусь/i,
+    /давайте\s+я\s+продиктую/i,
+  ];
+
+  for (const pat of managerPatterns) {
+    if (pat.test(joined)) score += 3;
+  }
+  for (const pat of clientPatterns) {
+    if (pat.test(joined)) score -= 3;
+  }
+  return score;
+}
+
+/**
+ * Склеивает транскрипты двух раздельно распознанных моно-каналов стерео-записи
+ * с определением роли каждого канала:
+ * 1) по речевым маркерам салона/клиента;
+ * 2) при равенстве: правило «менеджер отвечает первым (приветствие), клиент перезвонил».
+ */
+export function mergeDualChannelTranscripts(
+  ch0Segments: TimedUtterance[],
+  ch1Segments: TimedUtterance[]
+): string {
+  const clean0 = ch0Segments
+    .map((s) => ({ ...s, text: (s.text || '').trim() }))
+    .filter((s) => s.text.length > 0);
+  const clean1 = ch1Segments
+    .map((s) => ({ ...s, text: (s.text || '').trim() }))
+    .filter((s) => s.text.length > 0);
+
+  if (clean0.length === 0 && clean1.length === 0) return '';
+  if (clean0.length === 0) {
+    return refineTranscriptRoles(clean1.map((s) => s.text).join('\n'));
+  }
+  if (clean1.length === 0) {
+    return refineTranscriptRoles(clean0.map((s) => s.text).join('\n'));
+  }
+
+  const score0 = scoreChannelAsManager(clean0);
+  const score1 = scoreChannelAsManager(clean1);
+
+  let managerChannel: 0 | 1 = 0;
+  if (score0 > score1) {
+    managerChannel = 0;
+  } else if (score1 > score0) {
+    managerChannel = 1;
+  } else {
+    // Правило по умолчанию: менеджер отвечает первым (приветствие), клиент перезвонил
+    const firstNonIvr0 = clean0.find((u) => !isIvrUtterance(u.text));
+    const firstNonIvr1 = clean1.find((u) => !isIvrUtterance(u.text));
+    const t0 = firstNonIvr0?.start;
+    const t1 = firstNonIvr1?.start;
+    if (typeof t0 === 'number' && typeof t1 === 'number' && Math.abs(t0 - t1) > 0.05) {
+      managerChannel = t0 <= t1 ? 0 : 1;
+    } else {
+      managerChannel = 0;
+    }
+  }
+
+  const hasValidTimestamps =
+    clean0.some((s) => typeof s.start === 'number' && s.start > 0) ||
+    clean1.some((s) => typeof s.start === 'number' && s.start > 0);
+
+  type TaggedSegment = { role: 'Менеджер' | 'Клиент'; text: string; start: number; seq: number };
+  const tagged: TaggedSegment[] = [];
+
+  if (hasValidTimestamps) {
+    clean0.forEach((s, idx) => {
+      tagged.push({
+        role: managerChannel === 0 ? 'Менеджер' : 'Клиент',
+        text: s.text,
+        start: typeof s.start === 'number' ? s.start : idx * 2,
+        seq: idx,
+      });
+    });
+    clean1.forEach((s, idx) => {
+      tagged.push({
+        role: managerChannel === 1 ? 'Менеджер' : 'Клиент',
+        text: s.text,
+        start: typeof s.start === 'number' ? s.start : idx * 2 + 0.5,
+        seq: idx,
+      });
+    });
+    tagged.sort((a, b) => (a.start !== b.start ? a.start - b.start : a.seq - b.seq));
+  } else {
+    // Если ASR не вернул таймкоды сегментов, чередуем реплики, начиная с канала менеджера
+    const mgrSegs = managerChannel === 0 ? clean0 : clean1;
+    const cliSegs = managerChannel === 0 ? clean1 : clean0;
+    const mgrLines = mgrSegs.flatMap((s) => s.text.split(/\n+/).map((l) => l.trim()).filter(Boolean));
+    const cliLines = cliSegs.flatMap((s) => s.text.split(/\n+/).map((l) => l.trim()).filter(Boolean));
+    const maxLen = Math.max(mgrLines.length, cliLines.length);
+    for (let i = 0; i < maxLen; i++) {
+      if (i < mgrLines.length) {
+        tagged.push({ role: 'Менеджер', text: mgrLines[i], start: i * 2, seq: i * 2 });
+      }
+      if (i < cliLines.length) {
+        tagged.push({ role: 'Клиент', text: cliLines[i], start: i * 2 + 1, seq: i * 2 + 1 });
+      }
+    }
+  }
+
+  const finalLines: string[] = [];
+  for (const item of tagged) {
+    const cleanText = item.text.replace(/^(?:Менеджер|Клиент|Администратор|Оператор|Автоинформатор)\s*:\s*/i, '').trim();
+    if (!cleanText) continue;
+    if (isIvrUtterance(cleanText)) {
+      finalLines.push(`Автоинформатор: ${cleanText}`);
+      continue;
+    }
+    const { ivr, rest } = extractIvrPrefix(cleanText);
+    if (ivr) finalLines.push(`Автоинформатор: ${ivr}`);
+    if (rest) finalLines.push(`${item.role}: ${rest}`);
+  }
+
+  return finalLines.join('\n');
+}
+
 /**
  * П. 3.6 ТЗ: детекция пауз в аудио через ffmpeg silencedetect.
  * Возвращает список времён (в секундах) середин обнаруженных пауз.
@@ -562,7 +838,52 @@ export async function transcribeWithSpeechKit(audioBuffer: Buffer): Promise<stri
     }
   }
 
-  // 2. Если запись короче 28 секунд (лимит синхронного SpeechKit v1 — строго менее 30 секунд):
+  // 2. Перед синхронным распознаванием проверяем: если запись стерео — разделяем на два моно-канала
+  const channelsCount = probeAudioChannels(audioBuffer);
+  if (channelsCount >= 2) {
+    const split = splitStereoToMonoWavChannels(audioBuffer);
+    if (split && !split.isDualMono) {
+      console.log(`[SpeechKit Sync] Стереозапись (${channelsCount} канала) разделена на 2 моно-канала для раздельного распознавания`);
+      const transcribeMonoWavChannel = async (wavBuf: Buffer): Promise<TimedUtterance[]> => {
+        const chDur = getAudioDuration(wavBuf);
+        if (chDur > 0 && chDur < 28) {
+          const ogg = convertToOggOpus(wavBuf);
+          if (ogg) {
+            const text = await transcribeSynchronous(ogg, authHeader, 'oggopus');
+            return text && text.trim() ? [{ text: text.trim(), start: 0, end: chDur }] : [];
+          }
+        }
+        const chChunks = splitAudioIntoOpusChunks(wavBuf);
+        const out: TimedUtterance[] = [];
+        for (let idx = 0; idx < chChunks.length; idx++) {
+          try {
+            const text = await transcribeSynchronous(chChunks[idx], authHeader, 'oggopus');
+            if (text && text.trim()) {
+              out.push({ text: text.trim(), start: idx * SEGMENT_SECONDS, end: (idx + 1) * SEGMENT_SECONDS });
+            }
+          } catch (chunkErr: any) {
+            console.warn(`[SpeechKit Sync Channel] Ошибка сегмента ${idx + 1}/${chChunks.length}:`, chunkErr.message);
+          }
+        }
+        return out;
+      };
+
+      try {
+        const [ch0Segs, ch1Segs] = await Promise.all([
+          transcribeMonoWavChannel(split.ch0),
+          transcribeMonoWavChannel(split.ch1),
+        ]);
+        const merged = mergeDualChannelTranscripts(ch0Segs, ch1Segs);
+        if (merged.trim()) {
+          return merged;
+        }
+      } catch (stereoErr: any) {
+        console.warn('[SpeechKit Sync] Ошибка раздельного распознавания каналов, переключение на моно:', stereoErr.message);
+      }
+    }
+  }
+
+  // 3. Моно-режим: если запись короче 28 секунд (лимит синхронного SpeechKit v1 — строго менее 30 секунд):
   // Конвертируем в нативный OGG Opus и распознаем напрямую
   if (duration > 0 && duration < 28) {
     try {
@@ -578,7 +899,7 @@ export async function transcribeWithSpeechKit(audioBuffer: Buffer): Promise<stri
     }
   }
 
-  // 3. Для длинных разговоров (или если прямое распознавание не сработало):
+  // 4. Для длинных разговоров (или если прямое распознавание не сработало):
   // Разделение на сегменты (п. 3.6 ТЗ: по паузам, с fallback на таймер),
   // гарантирует отсутствие ошибки 400 "audio duration should be less than 30s"
   console.log(`[SpeechKit] Разделение аудио (${duration.toFixed(1)} сек.) на сегменты для пошагового распознавания...`);
@@ -711,7 +1032,7 @@ async function transcribeSynchronous(
         Authorization: authHeader,
         'Content-Type': 'application/octet-stream',
       },
-      timeout: 45000,
+      timeout: 120000,
     }
   );
 

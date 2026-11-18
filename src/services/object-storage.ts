@@ -4,6 +4,7 @@
  */
 
 import { S3Client, PutObjectCommand, DeleteObjectCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { readStoreSync } from '../store/store.js';
 
 export interface YandexStorageConfig {
@@ -65,6 +66,10 @@ export function getYandexStorageClient(): { s3: S3Client; bucket: string } | nul
       secretAccessKey: cfg.secretAccessKey,
     },
     forcePathStyle: true,
+    requestHandler: new NodeHttpHandler({
+      connectionTimeout: 10000,
+      requestTimeout: 30000,
+    }),
   });
 
   return { s3, bucket: cfg.bucket };
@@ -128,6 +133,10 @@ export async function testYandexStorageBucket(params?: Partial<YandexStorageConf
       secretAccessKey,
     },
     forcePathStyle: true,
+    requestHandler: new NodeHttpHandler({
+      connectionTimeout: 10000,
+      requestTimeout: 30000,
+    }),
   });
 
   await s3.send(new HeadBucketCommand({ Bucket: bucket }));

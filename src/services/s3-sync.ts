@@ -4,6 +4,7 @@
  */
 
 import { S3Client, GetObjectCommand, PutObjectCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { encrypt, decrypt } from '../store/crypto-store.js';
 import { readStoreSync } from '../store/store.js';
 
@@ -43,6 +44,10 @@ function getTimewebS3Client(): { s3: S3Client; bucket: string; storeKey: string;
       secretAccessKey,
     },
     forcePathStyle: true,
+    requestHandler: new NodeHttpHandler({
+      connectionTimeout: 10000,
+      requestTimeout: 30000,
+    }),
   });
 
   const storeKey = `${keyPrefix}data-store.enc`;

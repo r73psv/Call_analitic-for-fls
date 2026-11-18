@@ -111,7 +111,7 @@ async function queryYandexGPTApi(
       'x-folder-id': folderId
     },
     httpsAgent,
-    timeout: 45000
+    timeout: 60000
   });
 
   const alternative = res.data?.result?.alternatives?.[0];
@@ -158,7 +158,7 @@ async function queryGigaChatFallback(
         'Content-Type': 'application/json'
       },
       httpsAgent,
-      timeout: 45000
+      timeout: 60000
     }
   );
 

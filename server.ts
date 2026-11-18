@@ -11,6 +11,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import dotenv from 'dotenv';
+import axios from 'axios';
 import { CallRecord, LogEntry, SystemConfig, ModelType, DashboardStats, KeyFacts, VkConfig, YclientsConfig, GigaChatModel, SttProvider, SystemNotification, NotificationType, UserRole, ContextClarification } from './src/types.js';
 import { transcribeWithRetry, fixDuplicatedTranscript, refineTranscriptRoles } from './src/services/speechkit.js';
 import { transcribeAudio, resolveActiveSttProvider, getSttProviderLabel, normalizeSttProvider } from './src/services/transcriptionService.js';
@@ -46,6 +47,9 @@ import {
 
 // Setup environment variables
 dotenv.config();
+
+// Обязательный глобальный тайм-аут по умолчанию для всех исходящих HTTP-вызовов
+axios.defaults.timeout = 30000;
 
 // Ensure compatibility with Russian domestic TLS certificates (Минцифры / Megafon / GigaChat)
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -1288,7 +1292,8 @@ async function sendToVk(call: CallRecord, config: VkConfig, force: boolean = fal
         message: message,
         random_id: String(Math.floor(Math.random() * 1000000000)),
         v: '5.131'
-      })
+      }),
+      signal: AbortSignal.timeout(15000)
     });
     
     const result = await response.json();
@@ -1377,7 +1382,8 @@ async function sendToYclients(call: CallRecord, config: YclientsConfig) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${config.userToken}, Partner ${config.partnerToken}`
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(15000)
     });
     
     const result = await response.json();
@@ -1849,7 +1855,10 @@ async function downloadAudioAsBase64(url: string, token?: string, callId?: strin
       for (const att of attempts) {
         try {
           appendLog('info', 'megafon', `Запуск fetch для скачивания аудиозаписи с ${att.reqUrl.replace(/token=[^&]+/gi, 'token=***')}...`);
-          const response = await fetch(att.reqUrl, { headers: att.headers });
+          const response = await fetch(att.reqUrl, {
+            headers: att.headers,
+            signal: AbortSignal.timeout(60000),
+          });
           if (!response.ok) {
             appendLog('warning', 'megafon', `Не удалось скачать аудиозапись (HTTP ${response.status} ${response.statusText})`);
             continue;
@@ -2934,7 +2943,10 @@ app.get('/api/megafon-ats/record-proxy', async (req, res) => {
     for (const att of attempts) {
       try {
         appendLog('info', 'megafon', `Запрос проксирования аудиозаписи: ${att.url.replace(/token=[^&]+/gi, 'token=***')}`);
-        const response = await fetch(att.url, { headers: att.headers });
+        const response = await fetch(att.url, {
+          headers: att.headers,
+          signal: AbortSignal.timeout(60000),
+        });
         if (!response.ok) {
           lastStatus = response.status;
           lastStatusText = response.statusText;
