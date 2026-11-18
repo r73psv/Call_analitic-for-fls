@@ -301,7 +301,7 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
       process.env.TBANK_VOICEKIT_SECRET_KEY = creds.tbankSecretKey;
     }
     if (body.gigaamApiUrl !== undefined) {
-      creds.gigaamApiUrl = String(body.gigaamApiUrl).trim();
+      creds.gigaamApiUrl = String(body.gigaamApiUrl).trim().replace(/[/.,;:\s]+$/, '');
       process.env.GIGAAM_API_URL = creds.gigaamApiUrl;
     }
     if (body.gigaamApiKey !== undefined) {

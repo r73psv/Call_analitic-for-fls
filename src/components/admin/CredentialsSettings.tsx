@@ -312,8 +312,8 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
         transcriptionModel,
         tbankApiKey,
         tbankSecretKey,
-        gigaamApiUrl,
-        gigaamApiKey,
+        gigaamApiUrl: gigaamApiUrl.trim().replace(/[/.,;:\s]+$/, ''),
+        gigaamApiKey: gigaamApiKey.trim(),
         gigaamVariant,
         yandexStorageBucket,
         yandexStorageAccessKey,
@@ -610,11 +610,15 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
     setSavingGigaamOnly(true);
     setGigaamTestResult(null);
     try {
+      const cleanGigaUrl = gigaamApiUrl.trim().replace(/[/.,;:\s]+$/, '');
       const payload: Record<string, any> = {
-        gigaamApiUrl: gigaamApiUrl.trim(),
+        gigaamApiUrl: cleanGigaUrl,
         gigaamApiKey: gigaamApiKey.trim(),
         gigaamVariant,
       };
+      if (cleanGigaUrl !== gigaamApiUrl) {
+        setGigaamApiUrl(cleanGigaUrl);
+      }
       if (activateAsDefault) {
         payload.transcriptionModel = 'gigaam_v3';
       }
@@ -649,12 +653,16 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
     setTestingGigaam(true);
     setGigaamTestResult(null);
     try {
+      const cleanGigaUrl = gigaamApiUrl.trim().replace(/[/.,;:\s]+$/, '');
+      if (cleanGigaUrl !== gigaamApiUrl) {
+        setGigaamApiUrl(cleanGigaUrl);
+      }
       const res = await fetch('/api/admin/test/gigaam', {
         method: 'POST',
         headers: getHeaders(),
         body: JSON.stringify({
-          apiUrl: gigaamApiUrl,
-          apiKey: gigaamApiKey,
+          apiUrl: cleanGigaUrl,
+          apiKey: gigaamApiKey.trim(),
           variant: gigaamVariant,
         }),
       });
@@ -1527,7 +1535,7 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
               id="gigaam-api-url-input"
             />
             <p className="text-[10px] text-slate-500 mt-1">
-              Для Cloud.ru Evolution нажмите пресет выше или укажите <code>https://foundation-models.api.cloud.ru/v1/audio/transcriptions</code>.
+              Для Cloud.ru Evolution нажмите пресет выше или укажите <code>https://foundation-models.api.cloud.ru/v1/audio/transcriptions</code>
             </p>
           </div>
 

@@ -76,7 +76,7 @@ export function isCloudRuEvolutionEndpoint(url: string, variant?: GigaamModelVar
 }
 
 export function normalizeGigaAmEndpointUrl(rawUrl: string, variant?: GigaamModelVariant): string {
-  const clean = (rawUrl || '').trim().replace(/\/+$/, '');
+  const clean = (rawUrl || '').trim().replace(/[/.,;:\s]+$/, '');
   if (!clean) {
     return isCloudRuModelVariant(variant) ? CLOUDRU_GIGAASR_TRANSCRIPTIONS_URL : '';
   }
