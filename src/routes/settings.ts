@@ -192,7 +192,16 @@ settingsRouter.put('/', requireRole(['admin', 'manager']), async (req: Request, 
     }
 
     if (gigaamVariant) {
-      const validVariants: GigaamModelVariant[] = ['sber/GigaASR', 'e2e_rnnt', 'e2e_ctc', 'rnnt', 'ctc'];
+      const validVariants: GigaamModelVariant[] = [
+        'GigaChat/GigaASR',
+        'GigaChat/SaluteSpeech',
+        'openai/whisper-large-v3',
+        'sber/GigaASR',
+        'e2e_rnnt',
+        'e2e_ctc',
+        'rnnt',
+        'ctc',
+      ];
       if (!validVariants.includes(gigaamVariant)) {
         return res.status(400).json({ error: `Недопустимый вариант GigaASR / GigaAM v3. Допустимые: ${validVariants.join(', ')}` });
       }

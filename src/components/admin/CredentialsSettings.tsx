@@ -368,7 +368,7 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
         setStoreEncryptionKeyConfigured(true);
       }
       setTbankConfigured(Boolean(tbankApiKey.trim() && tbankSecretKey.trim()));
-      const isCloudRuGiga = gigaamApiUrl.toLowerCase().includes('cloud.ru') || gigaamVariant === 'sber/GigaASR';
+      const isCloudRuGiga = gigaamApiUrl.toLowerCase().includes('cloud.ru') || gigaamVariant.includes('/');
       setGigaamConfigured(isCloudRuGiga ? Boolean(gigaamApiKey.trim()) : Boolean(gigaamApiUrl.trim()));
       setYandexConfigured(Boolean(yandexApiKey.trim() || yandexKeyInfo.configured));
       onConfigUpdated?.();
@@ -626,7 +626,7 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Ошибка сохранения настроек GigaASR');
 
-      const isCloudRuGiga = gigaamApiUrl.toLowerCase().includes('cloud.ru') || gigaamVariant === 'sber/GigaASR';
+      const isCloudRuGiga = gigaamApiUrl.toLowerCase().includes('cloud.ru') || gigaamVariant.includes('/');
       setGigaamConfigured(isCloudRuGiga ? Boolean(gigaamApiKey.trim()) : Boolean(gigaamApiUrl.trim()));
       if (activateAsDefault) {
         setTranscriptionModel('gigaam_v3');
@@ -1389,7 +1389,7 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
               tbank_voicekit: tbankConfigured || Boolean(tbankApiKey.trim() && tbankSecretKey.trim()),
               gigaam_v3:
                 gigaamConfigured ||
-                (gigaamApiUrl.toLowerCase().includes('cloud.ru') || gigaamVariant === 'sber/GigaASR'
+                (gigaamApiUrl.toLowerCase().includes('cloud.ru') || gigaamVariant.includes('/')
                   ? Boolean(gigaamApiKey.trim())
                   : Boolean(gigaamApiUrl.trim())),
             }}
@@ -1482,16 +1482,16 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
               type="button"
               onClick={() => {
                 setGigaamApiUrl('https://foundation-models.api.cloud.ru/v1/audio/transcriptions');
-                setGigaamVariant('sber/GigaASR');
+                setGigaamVariant('GigaChat/GigaASR');
               }}
               id="preset-cloudru-gigaasr-btn"
               className={`px-2.5 py-1 text-[11px] font-bold rounded-lg border transition-colors ${
-                gigaamApiUrl.toLowerCase().includes('cloud.ru') || gigaamVariant === 'sber/GigaASR'
+                gigaamApiUrl.toLowerCase().includes('cloud.ru') || gigaamVariant.includes('/')
                   ? 'bg-indigo-600 text-white border-indigo-600'
                   : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
               }`}
             >
-              ★ Cloud.ru Evolution (sber/GigaASR)
+              ★ Cloud.ru Evolution (GigaChat/GigaASR)
             </button>
             <button
               type="button"
@@ -1499,13 +1499,13 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
                 if (gigaamApiUrl.toLowerCase().includes('cloud.ru')) {
                   setGigaamApiUrl('');
                 }
-                if (gigaamVariant === 'sber/GigaASR') {
+                if (gigaamVariant.includes('/')) {
                   setGigaamVariant('e2e_rnnt');
                 }
               }}
               id="preset-selfhosted-gigaam-btn"
               className={`px-2.5 py-1 text-[11px] font-bold rounded-lg border transition-colors ${
-                !gigaamApiUrl.toLowerCase().includes('cloud.ru') && gigaamVariant !== 'sber/GigaASR'
+                !gigaamApiUrl.toLowerCase().includes('cloud.ru') && !gigaamVariant.includes('/')
                   ? 'bg-slate-800 text-white border-slate-800'
                   : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
               }`}
@@ -1535,10 +1535,12 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
             <label className="block text-xs font-bold text-slate-700 mb-1">
               Модель / вариант весов
             </label>
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               {(
                 [
-                  { id: 'sber/GigaASR', label: 'sber/GigaASR' },
+                  { id: 'GigaChat/GigaASR', label: 'GigaChat/GigaASR' },
+                  { id: 'GigaChat/SaluteSpeech', label: 'GigaChat/SaluteSpeech' },
+                  { id: 'openai/whisper-large-v3', label: 'openai/whisper-large-v3' },
                   { id: 'e2e_rnnt', label: 'e2e_rnnt' },
                   { id: 'e2e_ctc', label: 'e2e_ctc' },
                   { id: 'rnnt', label: 'rnnt' },
@@ -1561,7 +1563,7 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
               ))}
             </div>
             <p className="text-[10px] text-slate-500 mt-1">
-              <code>sber/GigaASR</code> — облачный API Cloud.ru Evolution; <code>e2e_*</code> / <code>rnnt</code> / <code>ctc</code> — self-hosted GigaAM v3.
+              <code>GigaChat/GigaASR</code>, <code>GigaChat/SaluteSpeech</code>, <code>openai/whisper-large-v3</code> — облачный API Cloud.ru Evolution; <code>e2e_*</code> / <code>rnnt</code> / <code>ctc</code> — self-hosted GigaAM v3.
             </p>
           </div>
 

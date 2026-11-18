@@ -65,7 +65,7 @@ export const STT_MODELS: {
     shortLabel: 'GigaASR',
     label: 'GigaASR / GigaAM v3',
     vendor: 'Cloud.ru Evolution · Сбер ASR',
-    desc: 'Распознавание речи Сбер через Cloud.ru Foundation Models (sber/GigaASR) или self-hosted GigaAM v3.',
+    desc: 'Распознавание речи Сбер через Cloud.ru Foundation Models (GigaChat/GigaASR) или self-hosted GigaAM v3.',
     icon: Cpu,
   },
 ];

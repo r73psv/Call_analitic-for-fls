@@ -9,7 +9,15 @@ export type GigaChatModel = 'GigaChat:Lite' | 'GigaChat:Pro' | 'GigaChat:Max' | 
 
 export type SttProvider = 'yandex_speechkit' | 'tbank_voicekit' | 'gigaam_v3';
 
-export type GigaamModelVariant = 'sber/GigaASR' | 'e2e_rnnt' | 'e2e_ctc' | 'rnnt' | 'ctc';
+export type GigaamModelVariant =
+  | 'GigaChat/GigaASR'
+  | 'GigaChat/SaluteSpeech'
+  | 'openai/whisper-large-v3'
+  | 'sber/GigaASR'
+  | 'e2e_rnnt'
+  | 'e2e_ctc'
+  | 'rnnt'
+  | 'ctc';
 
 export type UserRole = 'admin' | 'manager' | 'operator' | 'viewer';
 
