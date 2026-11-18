@@ -115,12 +115,41 @@ export interface StructuredCallSummary {
   manager_next_steps: string[]; // 8. Какие дальнейшие действия необходимо выполнить менеджеру
 }
 
+export type VerifierVerdict = 'confirmed' | 'contradicts' | 'unconfirmed';
+
+export interface VerifierField {
+  field: string;
+  draft_value: string;
+  verdict: VerifierVerdict;
+  quote: string | null;
+  corrected_value: string | null;
+  hallucinated_quote?: boolean;
+}
+
+export interface CriteriaVerificationItem {
+  id: string;
+  verdict: VerifierVerdict;
+  quote: string | null;
+  hallucinated_quote?: boolean;
+}
+
+export interface CallVerificationReport {
+  summary_verdict: 'ок' | 'есть противоречия' | string;
+  fields: VerifierField[];
+  flags: string[];
+  criteria_flags?: string[];
+  hallucinated_quotes_caught?: number;
+  verified_at?: string;
+}
+
 export interface CallEvaluationCriterion {
   id: string; // e.g. 'greeting_intro', 'needs_identification', ...
   name: string; // e.g. 'Приветствие и представление'
   score: number | null; // 0-10 или null если не применим
   is_applicable: boolean; // применим ли критерий к конкретному звонку
   explanation: string; // краткое объяснение оценки
+  evidence_quote?: string | null; // точная цитата-обоснование из стенограммы
+  requires_verification?: boolean; // помечено верификатором как требующее проверки
 }
 
 export interface CallEvaluation {
@@ -240,6 +269,11 @@ export interface CallRecord {
 
   // Context Clarifications with AI (Yandex.GPT)
   context_clarifications?: ContextClarification[];
+
+  // Результаты независимого второго прохода верификации по стенограмме
+  verification_report?: CallVerificationReport;
+  verification_flags?: string[];
+  missed_opportunities?: { type: string; evidence: string; what_to_say: string }[];
 }
 
 export interface ContextClarification {
@@ -500,6 +534,8 @@ export interface AnalysisResult {
   evaluation?: CallEvaluation;
   criteria_scores?: CallEvaluationCriterion[];
   missed_opportunities?: { type: string; evidence: string; what_to_say: string }[];
+  verification_report?: CallVerificationReport;
+  verification_flags?: string[];
 }
 
 export type NotificationType = 'call_analyzed' | 'dispute_detected' | 'booking_confirmed' | 'call_failed' | 'incoming_call';

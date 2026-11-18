@@ -14,7 +14,7 @@ import {
   MessageSquareQuote, Send, Target, Banknote, CalendarClock, ArrowRightCircle,
   Award, Gauge, BarChart3, Filter, CheckCheck, MinusCircle, ChevronDown, ChevronUp, Info, Sparkle, RefreshCw
 } from 'lucide-react';
-import { CallRecord, NextStepItem, ContextClarification, StructuredCallSummary, CallEvaluation, CallEvaluationCriterion } from '../types.js';
+import { CallRecord, NextStepItem, ContextClarification, StructuredCallSummary, CallEvaluation, CallEvaluationCriterion, VerifierField } from '../types.js';
 import { ReanalyzeButton } from './ReanalyzeButton.js';
 import { getSttEngineDisplayName } from './TranscriptionModelSelector.js';
 import { refineTranscriptRoles } from '../services/transcriptUtils.js';
@@ -155,6 +155,53 @@ export function CallDetails({
     }
     return list;
   }, [callEvaluation, criteriaFilter, criteriaSearch]);
+
+  const verificationMeta = useMemo(() => {
+    const report = call.verification_report;
+    const fieldMap = new Map<string, VerifierField>();
+    if (report?.fields) {
+      for (const f of report.fields) {
+        if (f?.field) fieldMap.set(f.field, f);
+      }
+    }
+    const flagSet = new Set<string>([
+      ...(call.verification_flags || []),
+      ...(report?.flags || []),
+    ]);
+    const criteriaFlagSet = new Set<string>(report?.criteria_flags || []);
+    const totalFlags = flagSet.size + criteriaFlagSet.size;
+    return {
+      hasReport: Boolean(report),
+      fieldMap,
+      flagSet,
+      criteriaFlagSet,
+      totalFlags,
+      hallucinatedCaught: report?.hallucinated_quotes_caught || 0,
+    };
+  }, [call.verification_report, call.verification_flags]);
+
+  const renderFieldVerificationBadge = (fieldKeys: string[], currentValue?: string | null) => {
+    const isUnconfirmedText = String(currentValue || '').toLowerCase().includes('не подтверждено стенограммой');
+    const isFlagged = isUnconfirmedText || fieldKeys.some((k) => verificationMeta.flagSet.has(k));
+    if (!isFlagged) return null;
+    return (
+      <span
+        className="text-[9px] font-bold px-1.5 py-0.2 rounded-md bg-amber-50 text-amber-800 border border-amber-300 inline-flex items-center gap-0.5 shrink-0"
+        title="Не подтверждено прямой цитатой на втором проходе верификации — требует ручной проверки"
+      >
+        <AlertTriangle className="w-2.5 h-2.5" />
+        <span>Требует проверки</span>
+      </span>
+    );
+  };
+
+  const getFieldQuote = (fieldKeys: string[]): string | null => {
+    for (const k of fieldKeys) {
+      const f = verificationMeta.fieldMap.get(k);
+      if (f?.verdict === 'confirmed' && f.quote) return f.quote;
+    }
+    return null;
+  };
 
   // Извлечение параметров сути обращения (услуга, дата, время, мастер)
   const essence = useMemo(() => {
@@ -1315,16 +1362,38 @@ export function CallDetails({
 
             {/* 8 обязательных параметров структурированного резюме звонка */}
             <div className="mb-4 bg-linear-to-br from-slate-50 via-white to-indigo-50/20 border border-slate-200/90 rounded-xl p-3.5 shadow-3xs space-y-3" id="structured-call-summary-8-items">
-              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <div className="flex items-center justify-between gap-2 flex-wrap pb-2 border-b border-slate-100">
                 <div className="flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-indigo-600 animate-pulse"></span>
                   <span className="text-[11px] font-bold uppercase tracking-wider text-slate-800">
                     Обязательные параметры резюме звонка (8 пунктов)
                   </span>
                 </div>
-                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
-                  Регламент качества
-                </span>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {verificationMeta.hasReport && (
+                    verificationMeta.totalFlags > 0 ? (
+                      <span
+                        className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-300 inline-flex items-center gap-1"
+                        title={
+                          verificationMeta.hallucinatedCaught > 0
+                            ? `Отсечено выдуманных цитат: ${verificationMeta.hallucinatedCaught}`
+                            : 'Часть фактов не подтвердилась цитатой во втором проходе'
+                        }
+                      >
+                        <AlertTriangle className="w-3 h-3" />
+                        <span>Требует проверки ({verificationMeta.totalFlags})</span>
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 inline-flex items-center gap-1">
+                        <ShieldCheck className="w-3 h-3" />
+                        <span>Фактчек: подтверждено</span>
+                      </span>
+                    )
+                  )}
+                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
+                    Регламент качества
+                  </span>
+                </div>
               </div>
 
               {/* Сетка параметров 1 - 5 */}
@@ -1335,12 +1404,20 @@ export function CallDetails({
                     <Target className="w-4 h-4" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">
-                      1. Цель обращения
-                    </span>
+                    <div className="flex items-center justify-between gap-2 mb-0.5 flex-wrap">
+                      <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                        1. Цель обращения
+                      </span>
+                      {renderFieldVerificationBadge(['call_purpose'], summaryParts.structured.call_purpose)}
+                    </div>
                     <span className="text-xs font-semibold text-slate-900 leading-snug block">
                       {summaryParts.structured.call_purpose || 'Консультация и запись на услуги салона'}
                     </span>
+                    {getFieldQuote(['call_purpose']) && (
+                      <p className="mt-1 text-[10px] text-slate-500 italic truncate" title={getFieldQuote(['call_purpose']) || ''}>
+                        Цитата: «{getFieldQuote(['call_purpose'])}»
+                      </p>
+                    )}
                   </div>
                 </div>
 
@@ -1350,12 +1427,20 @@ export function CallDetails({
                     <Scissors className="w-4 h-4" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">
-                      2. Желаемая услуга
-                    </span>
+                    <div className="flex items-center justify-between gap-1.5 mb-0.5 flex-wrap">
+                      <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                        2. Желаемая услуга
+                      </span>
+                      {renderFieldVerificationBadge(['requested_service', 'service'], summaryParts.structured.requested_service)}
+                    </div>
                     <span className="text-xs font-semibold text-slate-900 block truncate" title={summaryParts.structured.requested_service}>
                       {summaryParts.structured.requested_service || 'Не указана'}
                     </span>
+                    {getFieldQuote(['requested_service', 'service']) && (
+                      <p className="mt-1 text-[10px] text-slate-500 italic truncate" title={getFieldQuote(['requested_service', 'service']) || ''}>
+                        Цитата: «{getFieldQuote(['requested_service', 'service'])}»
+                      </p>
+                    )}
                   </div>
                 </div>
 
@@ -1365,16 +1450,25 @@ export function CallDetails({
                     <UserCheck className="w-4 h-4" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">
-                      3. Предложенный мастер
-                    </span>
+                    <div className="flex items-center justify-between gap-1.5 mb-0.5 flex-wrap">
+                      <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                        3. Предложенный мастер
+                      </span>
+                      {renderFieldVerificationBadge(['offered_master', 'master'], summaryParts.structured.offered_master)}
+                    </div>
                     <span className={`text-xs font-bold block truncate ${
-                      summaryParts.structured.offered_master.includes('Не выбран')
+                      summaryParts.structured.offered_master.includes('Не выбран') ||
+                      summaryParts.structured.offered_master.toLowerCase().includes('не подтверждено')
                         ? 'text-slate-500'
                         : 'text-emerald-700'
                     }`} title={summaryParts.structured.offered_master}>
                       {summaryParts.structured.offered_master || 'Не выбран'}
                     </span>
+                    {getFieldQuote(['offered_master', 'master']) && (
+                      <p className="mt-1 text-[10px] text-slate-500 italic truncate" title={getFieldQuote(['offered_master', 'master']) || ''}>
+                        Цитата: «{getFieldQuote(['offered_master', 'master'])}»
+                      </p>
+                    )}
                   </div>
                 </div>
 
@@ -1384,12 +1478,20 @@ export function CallDetails({
                     <Banknote className="w-4 h-4" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">
-                      4. Озвученная стоимость
-                    </span>
+                    <div className="flex items-center justify-between gap-1.5 mb-0.5 flex-wrap">
+                      <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                        4. Озвученная стоимость
+                      </span>
+                      {renderFieldVerificationBadge(['offered_price'], summaryParts.structured.offered_price)}
+                    </div>
                     <span className="text-xs font-semibold text-slate-900 block truncate" title={summaryParts.structured.offered_price}>
                       {summaryParts.structured.offered_price || 'Не озвучивалась'}
                     </span>
+                    {getFieldQuote(['offered_price']) && (
+                      <p className="mt-1 text-[10px] text-slate-500 italic truncate" title={getFieldQuote(['offered_price']) || ''}>
+                        Цитата: «{getFieldQuote(['offered_price'])}»
+                      </p>
+                    )}
                   </div>
                 </div>
 
@@ -1399,12 +1501,20 @@ export function CallDetails({
                     <CalendarClock className="w-4 h-4" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">
-                      5. Предложенные дата и время
-                    </span>
+                    <div className="flex items-center justify-between gap-2 mb-0.5 flex-wrap">
+                      <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                        5. Предложенные дата и время
+                      </span>
+                      {renderFieldVerificationBadge(['offered_date_time', 'date', 'time'], summaryParts.structured.offered_date_time)}
+                    </div>
                     <span className="text-xs font-semibold text-slate-900 block" title={summaryParts.structured.offered_date_time}>
                       {summaryParts.structured.offered_date_time || 'Не предложены'}
                     </span>
+                    {getFieldQuote(['offered_date_time', 'date', 'time']) && (
+                      <p className="mt-1 text-[10px] text-slate-500 italic truncate" title={getFieldQuote(['offered_date_time', 'date', 'time']) || ''}>
+                        Цитата: «{getFieldQuote(['offered_date_time', 'date', 'time'])}»
+                      </p>
+                    )}
                   </div>
                 </div>
 
@@ -1428,9 +1538,12 @@ export function CallDetails({
                     )}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">
-                      6. Состоялась ли запись
-                    </span>
+                    <div className="flex items-center justify-between gap-1.5 mb-0.5 flex-wrap">
+                      <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                        6. Состоялась ли запись
+                      </span>
+                      {renderFieldVerificationBadge(['booking_status_text', 'booking_status'], summaryParts.structured.booking_status_text)}
+                    </div>
                     <span className={`text-xs font-bold block leading-snug ${
                       summaryParts.structured.booking_status_text.toLowerCase().includes('состоялась') && !summaryParts.structured.booking_status_text.toLowerCase().includes('не состоялась')
                         ? 'text-emerald-700'
@@ -1442,6 +1555,11 @@ export function CallDetails({
                     }`}>
                       {summaryParts.structured.booking_status_text}
                     </span>
+                    {getFieldQuote(['booking_status_text', 'booking_status']) && (
+                      <p className="mt-1 text-[10px] text-slate-500 italic truncate" title={getFieldQuote(['booking_status_text', 'booking_status']) || ''}>
+                        Цитата: «{getFieldQuote(['booking_status_text', 'booking_status'])}»
+                      </p>
+                    )}
                   </div>
                 </div>
 
@@ -1451,12 +1569,20 @@ export function CallDetails({
                     <AlertTriangle className="w-4 h-4" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">
-                      7. Причина (если запись не состоялась)
-                    </span>
+                    <div className="flex items-center justify-between gap-1.5 mb-0.5 flex-wrap">
+                      <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                        7. Причина (если запись не состоялась)
+                      </span>
+                      {renderFieldVerificationBadge(['unbooked_reason'], summaryParts.structured.unbooked_reason)}
+                    </div>
                     <span className="text-xs font-medium text-slate-800 block leading-snug">
                       {summaryParts.structured.unbooked_reason || 'Запись успешно состоялась'}
                     </span>
+                    {getFieldQuote(['unbooked_reason']) && (
+                      <p className="mt-1 text-[10px] text-slate-500 italic truncate" title={getFieldQuote(['unbooked_reason']) || ''}>
+                        Цитата: «{getFieldQuote(['unbooked_reason'])}»
+                      </p>
+                    )}
                   </div>
                 </div>
 
@@ -1817,6 +1943,13 @@ export function CallDetails({
                                   <span>Не применим (не снижает оценку)</span>
                                 </span>
                               )}
+
+                              {(crit.requires_verification || verificationMeta.criteriaFlagSet.has(crit.id)) && (
+                                <span className="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-300 px-1.5 py-0.2 rounded-md inline-flex items-center gap-0.5">
+                                  <AlertTriangle className="w-2.5 h-2.5" />
+                                  <span>Требует проверки</span>
+                                </span>
+                              )}
                             </div>
 
                             {/* Прогресс-бар оценки */}
@@ -1837,9 +1970,17 @@ export function CallDetails({
                             </div>
 
                             {/* Обоснование оценки */}
-                            <div className="mt-2 p-2 rounded-lg bg-slate-50 border border-slate-100/90 text-[11px] text-slate-700 leading-relaxed">
-                              <span className="font-semibold text-slate-800 mr-1">Обоснование:</span>
-                              <span>{crit.explanation}</span>
+                            <div className="mt-2 p-2 rounded-lg bg-slate-50 border border-slate-100/90 text-[11px] text-slate-700 leading-relaxed space-y-1.5">
+                              <div>
+                                <span className="font-semibold text-slate-800 mr-1">Обоснование:</span>
+                                <span>{crit.explanation}</span>
+                              </div>
+                              {crit.evidence_quote && (
+                                <div className="pt-1 border-t border-slate-200/70 text-[10.5px] text-indigo-900/90 italic flex items-start gap-1.5">
+                                  <MessageSquareQuote className="w-3.5 h-3.5 text-indigo-500 shrink-0 mt-0.5" />
+                                  <span>«{crit.evidence_quote}»</span>
+                                </div>
+                              )}
                             </div>
                           </div>
                         </div>

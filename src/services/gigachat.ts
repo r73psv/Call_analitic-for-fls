@@ -20,6 +20,27 @@ import axios from 'axios';
 import https from 'https';
 import { getGigaChatToken, isGigaChatConfigured, invalidateGigaChatTokenCache } from './gigachat-auth.js';
 import { GigaChatModel, AnalysisResult, CallRecord, NextStepItem, KeyFacts, TokenUsage, ContextClarification, StructuredCallSummary, CallEvaluationCriterion, CallEvaluation } from '../types.js';
+import {
+  VERIFIER_PROMPT,
+  CRITERIA_VERIFIER_PROMPT,
+  verifySummary,
+  verifyCriteriaWithTranscript,
+  applyVerdicts,
+  isQuotePresentInTranscript,
+  buildConciseDraftForVerifier,
+  runTwoPassVerification,
+} from './callVerifier.js';
+
+export {
+  VERIFIER_PROMPT,
+  CRITERIA_VERIFIER_PROMPT,
+  verifySummary,
+  verifyCriteriaWithTranscript,
+  applyVerdicts,
+  isQuotePresentInTranscript,
+  buildConciseDraftForVerifier,
+  runTwoPassVerification,
+};
 
 const httpsAgent = new https.Agent({
   rejectUnauthorized: false,
@@ -1034,8 +1055,9 @@ export async function analyzeWithGigaChat(
   }
 
   // Пытаемся распарсить JSON, при неудаче — просим модель исправить формат.
+  let draft: AnalysisResult;
   try {
-    return parseGigaChatJson(rawContent, customSalonName, transcript);
+    draft = parseGigaChatJson(rawContent, customSalonName, transcript);
   } catch (parseErr) {
     console.warn('[GigaChat] Первый парсинг JSON не удался, отправка запроса на исправление формата...');
     const retryRes = await axios.post(
@@ -1061,8 +1083,34 @@ export async function analyzeWithGigaChat(
     );
 
     const retryContent = retryRes.data.choices?.[0]?.message?.content || '';
-    return parseGigaChatJson(retryContent, customSalonName, transcript);
+    draft = parseGigaChatJson(retryContent, customSalonName, transcript);
   }
+
+  // Второй независимый проход верификации (Pass 2): проверяет ТОЛЬКО стенограмму и черновик
+  if (draft.booking_status !== 'не применимо' && transcript.trim().length >= 15) {
+    try {
+      await new Promise((r) => setTimeout(r, 350)); // бережём RPS лимиты перед второй сессией
+      const verified = await runTwoPassVerification(transcript, draft, {
+        apiUrl: gigachatApiUrl,
+        token,
+        model,
+        httpsAgent,
+      });
+      const flagsCount = verified.verification_flags?.length || 0;
+      const critFlagsCount = verified.verification_report?.criteria_flags?.length || 0;
+      const caughtQuotes = verified.verification_report?.hallucinated_quotes_caught || 0;
+      console.log(
+        `[GigaChat Verifier] Фактчек завершён: вердикт="${verified.verification_report?.summary_verdict || 'ок'}", флагов полей=${flagsCount}, флагов критериев=${critFlagsCount}, отсечено фейковых цитат=${caughtQuotes}`
+      );
+      return verified;
+    } catch (verifyErr: any) {
+      console.warn(
+        `[GigaChat Verifier] Пропуск верификации из-за сбоя API (возвращаем черновик 1-го прохода): ${verifyErr.message || verifyErr}`
+      );
+    }
+  }
+
+  return draft;
 }
 
 export type { EssenceDetails } from './summaryUtils.js';

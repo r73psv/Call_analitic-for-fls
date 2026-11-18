@@ -797,6 +797,9 @@ async function executeSingleModelAttempt(
         operator_score: analysis.operator_score,
         operator_mistakes: analysis.operator_mistakes || [],
         operator_comment: analysis.operator_comment,
+        missed_opportunities: analysis.missed_opportunities,
+        verification_report: analysis.verification_report,
+        verification_flags: analysis.verification_flags,
         model_used: gigaModel
       }
     };
@@ -1040,6 +1043,9 @@ async function analyzeCallTextOrAudio(
       operator_score: analysis.operator_score,
       operator_mistakes: analysis.operator_mistakes || [],
       operator_comment: analysis.operator_comment,
+      missed_opportunities: analysis.missed_opportunities,
+      verification_report: analysis.verification_report,
+      verification_flags: analysis.verification_flags,
       model_used: modelToUse,
       ...(usedTranscriptionEngine ? { transcription_engine: usedTranscriptionEngine } : {}),
     };
@@ -4230,6 +4236,15 @@ app.post('/api/calls/webhook', async (req, res) => {
           if (analysis.key_facts) {
             newCall.key_facts = { ...newCall.key_facts, ...analysis.key_facts };
           }
+          if (analysis.missed_opportunities) {
+            newCall.missed_opportunities = analysis.missed_opportunities;
+          }
+          if (analysis.verification_report) {
+            newCall.verification_report = analysis.verification_report;
+          }
+          if (analysis.verification_flags) {
+            newCall.verification_flags = analysis.verification_flags;
+          }
         }
       } catch (analysisErr: any) {
         console.warn('[Webhook AI Analysis Warning]', analysisErr.message);
@@ -4823,6 +4838,9 @@ async function performCallReanalysis(
       finalDb.calls[finalCallIdx] = {
         ...finalDb.calls[finalCallIdx],
         ...analysisResult,
+        verification_report: analysisResult.verification_report,
+        verification_flags: analysisResult.verification_flags,
+        missed_opportunities: analysisResult.missed_opportunities,
         error_message: analysisResult.error_message || undefined,
         status: isFailed ? 'failed' : 'completed',
         is_demo: false,
@@ -5542,6 +5560,9 @@ async function startServer() {
                 };
                 updatedDb.calls[idx].operator_score = analysis.operator_score;
                 updatedDb.calls[idx].operator_comment = analysis.operator_comment;
+                updatedDb.calls[idx].missed_opportunities = analysis.missed_opportunities;
+                updatedDb.calls[idx].verification_report = analysis.verification_report;
+                updatedDb.calls[idx].verification_flags = analysis.verification_flags;
                 updatedDb.calls[idx].recommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : [analysis.recommendations];
                 writeDb(updatedDb);
                 console.log('[Migration] Резюме и итог звонка megafon-real-84462946 успешно актуализированы в базе данных!');
