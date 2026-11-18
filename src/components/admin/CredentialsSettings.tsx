@@ -92,6 +92,17 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
 
   // GigaAM v3 (SaluteDevices / Sber ASR)
   const [gigaamApiUrl, setGigaamApiUrl] = useState('');
+
+  const sanitizeGigaAmUrlClient = (raw: string) => {
+    let clean = raw.trim().replace(/[/.,;:\s]+$/, '');
+    if (/\/audio\/transcription$/i.test(clean)) {
+      clean = clean.replace(/\/audio\/transcription$/i, '/audio/transcriptions');
+    }
+    if (/^https?:\/\/foundation-models\.api\.cloud\.ru(\/v1(\/audio)?)?$/i.test(clean)) {
+      clean = 'https://foundation-models.api.cloud.ru/v1/audio/transcriptions';
+    }
+    return clean;
+  };
   const [gigaamApiKey, setGigaamApiKey] = useState('');
   const [gigaamVariant, setGigaamVariant] = useState<GigaamModelVariant>('e2e_rnnt');
   const [gigaamConfigured, setGigaamConfigured] = useState(false);
@@ -312,7 +323,7 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
         transcriptionModel,
         tbankApiKey,
         tbankSecretKey,
-        gigaamApiUrl: gigaamApiUrl.trim().replace(/[/.,;:\s]+$/, ''),
+        gigaamApiUrl: sanitizeGigaAmUrlClient(gigaamApiUrl),
         gigaamApiKey: gigaamApiKey.trim(),
         gigaamVariant,
         yandexStorageBucket,
@@ -610,7 +621,7 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
     setSavingGigaamOnly(true);
     setGigaamTestResult(null);
     try {
-      const cleanGigaUrl = gigaamApiUrl.trim().replace(/[/.,;:\s]+$/, '');
+      const cleanGigaUrl = sanitizeGigaAmUrlClient(gigaamApiUrl);
       const payload: Record<string, any> = {
         gigaamApiUrl: cleanGigaUrl,
         gigaamApiKey: gigaamApiKey.trim(),
@@ -653,7 +664,7 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
     setTestingGigaam(true);
     setGigaamTestResult(null);
     try {
-      const cleanGigaUrl = gigaamApiUrl.trim().replace(/[/.,;:\s]+$/, '');
+      const cleanGigaUrl = sanitizeGigaAmUrlClient(gigaamApiUrl);
       if (cleanGigaUrl !== gigaamApiUrl) {
         setGigaamApiUrl(cleanGigaUrl);
       }
@@ -1535,7 +1546,9 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
               id="gigaam-api-url-input"
             />
             <p className="text-[10px] text-slate-500 mt-1">
-              Для Cloud.ru Evolution нажмите пресет выше или укажите <code>https://foundation-models.api.cloud.ru/v1/audio/transcriptions</code>
+              Для Cloud.ru Evolution нажмите пресет выше или укажите{' '}
+              <code>https://foundation-models.api.cloud.ru/v1/audio/transcriptions</code>{' '}
+              (обратите внимание на букву <strong>s</strong> в конце <code>transcriptions</code>).
             </p>
           </div>
 

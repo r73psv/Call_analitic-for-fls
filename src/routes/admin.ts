@@ -20,7 +20,7 @@ import { scanTempFiles, cleanTempFiles, runCleanupNow } from '../store/cleanup.j
 import { getDefaultSystemPrompt } from '../services/gigachat.js';
 import { archiveCallsToS3, getS3ArchiveStatus, listS3Archives } from '../services/s3-archive.js';
 import { testTbankVoiceKitConnection, isTbankVoiceKitConfigured } from '../services/tbank-voicekit.js';
-import { testGigaAmConnection, getGigaAmConfig, isGigaAmConfigured, normalizeGigaamVariant } from '../services/gigaam-asr.js';
+import { testGigaAmConnection, getGigaAmConfig, isGigaAmConfigured, normalizeGigaamVariant, normalizeGigaAmEndpointUrl } from '../services/gigaam-asr.js';
 import { resolveActiveSttProvider, normalizeSttProvider } from '../services/transcriptionService.js';
 import { SystemCredentials, GigaChatModel, AutoCleanupSettings, LogEntry } from '../types.js';
 
@@ -75,7 +75,7 @@ adminRouter.get('/credentials', async (req: Request, res: Response) => {
       tbankConfigured: isTbankVoiceKitConfigured(),
 
       // GigaAM v3 (SaluteDevices / Sber ASR)
-      gigaamApiUrl: creds.gigaamApiUrl || process.env.GIGAAM_API_URL || '',
+      gigaamApiUrl: normalizeGigaAmEndpointUrl(creds.gigaamApiUrl || process.env.GIGAAM_API_URL || '', getGigaAmConfig().variant),
       gigaamApiKey: creds.gigaamApiKey || process.env.GIGAAM_API_KEY || '',
       gigaamVariant: getGigaAmConfig().variant,
       gigaamConfigured: isGigaAmConfigured(),
@@ -301,7 +301,10 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
       process.env.TBANK_VOICEKIT_SECRET_KEY = creds.tbankSecretKey;
     }
     if (body.gigaamApiUrl !== undefined) {
-      creds.gigaamApiUrl = String(body.gigaamApiUrl).trim().replace(/[/.,;:\s]+$/, '');
+      const nextVariant = body.gigaamVariant !== undefined
+        ? normalizeGigaamVariant(String(body.gigaamVariant))
+        : creds.gigaamVariant;
+      creds.gigaamApiUrl = normalizeGigaAmEndpointUrl(String(body.gigaamApiUrl), nextVariant);
       process.env.GIGAAM_API_URL = creds.gigaamApiUrl;
     }
     if (body.gigaamApiKey !== undefined) {
@@ -661,13 +664,14 @@ adminRouter.post('/test/gigaam', async (req: Request, res: Response) => {
   try {
     const store = await readStore();
     const creds = store.config.credentials || {};
-    const apiUrl = req.body.apiUrl !== undefined && req.body.apiUrl !== ''
+    const variant = req.body.variant || creds.gigaamVariant || process.env.GIGAAM_MODEL_VARIANT;
+    const rawApiUrl = req.body.apiUrl !== undefined && req.body.apiUrl !== ''
       ? String(req.body.apiUrl).trim()
-      : (creds.gigaamApiUrl || process.env.GIGAAM_API_URL);
+      : (creds.gigaamApiUrl || process.env.GIGAAM_API_URL || '');
+    const apiUrl = normalizeGigaAmEndpointUrl(rawApiUrl, variant);
     const apiKey = req.body.apiKey !== undefined && req.body.apiKey !== ''
       ? String(req.body.apiKey).trim()
       : (creds.gigaamApiKey || process.env.GIGAAM_API_KEY);
-    const variant = req.body.variant || creds.gigaamVariant || process.env.GIGAAM_MODEL_VARIANT;
 
     const testRes = await testGigaAmConnection(apiUrl, apiKey, variant);
     return res.json(testRes);

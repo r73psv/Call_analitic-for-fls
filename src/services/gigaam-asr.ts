@@ -36,8 +36,19 @@ const VALID_VARIANTS: GigaamModelVariant[] = [
 const chatCompletionsFallbackUrls = new Set<string>();
 const transcriptionsFallbackUrls = new Set<string>();
 
+// Кэш рабочих аудио-моделей при автопереключении внутри Cloud.ru каталога (TTL 10 минут)
+const cloudRuWorkingModelOverrides = new Map<string, { model: GigaamModelVariant; expiresAt: number }>();
+
+interface CloudRuCatalogInfo {
+  models: string[];
+  audioToTextModels: string[];
+  ttsOnlyModels: string[];
+  endpointsByModel: Record<string, string[]>;
+  expiresAt: number;
+}
+
 // Кэш списка моделей Cloud.ru /v1/models (TTL 10 минут)
-const cloudRuModelsCache = new Map<string, { models: string[]; expiresAt: number }>();
+const cloudRuModelsCache = new Map<string, CloudRuCatalogInfo>();
 
 export function isCloudRuModelVariant(variant?: GigaamModelVariant | string): boolean {
   if (!variant) return false;
@@ -72,14 +83,52 @@ export function normalizeGigaamVariant(raw?: string): GigaamModelVariant {
 
 export function isCloudRuEvolutionEndpoint(url: string, variant?: GigaamModelVariant): boolean {
   const lower = (url || '').toLowerCase();
-  return lower.includes('cloud.ru') || lower.includes('/v1/audio/transcriptions') || isCloudRuModelVariant(variant);
+  return (
+    lower.includes('cloud.ru') ||
+    lower.includes('/v1/audio/transcriptions') ||
+    lower.includes('/v1/audio/transcription') ||
+    isCloudRuModelVariant(variant)
+  );
 }
 
 export function normalizeGigaAmEndpointUrl(rawUrl: string, variant?: GigaamModelVariant): string {
-  const clean = (rawUrl || '').trim().replace(/[/.,;:\s]+$/, '');
+  let clean = (rawUrl || '').trim().replace(/[/.,;:\s]+$/, '');
   if (!clean) {
     return isCloudRuModelVariant(variant) ? CLOUDRU_GIGAASR_TRANSCRIPTIONS_URL : '';
   }
+
+  // Частая опечатка: /audio/transcription в единственном числе вместо /audio/transcriptions
+  if (/\/audio\/transcription$/i.test(clean)) {
+    clean = clean.replace(/\/audio\/transcription$/i, '/audio/transcriptions');
+  }
+
+  try {
+    const parsed = new URL(clean);
+    if (parsed.hostname.toLowerCase() === 'foundation-models.api.cloud.ru') {
+      const pathLower = parsed.pathname.toLowerCase().replace(/\/+$/, '');
+      if (pathLower === '/v1/chat/completions') {
+        return `${parsed.origin}/v1/chat/completions`;
+      }
+      // Любой базовый или неполный путь для foundation-models.api.cloud.ru приводим к /v1/audio/transcriptions
+      if (
+        pathLower === '' ||
+        pathLower === '/v1' ||
+        pathLower === '/v1/audio' ||
+        pathLower === '/audio' ||
+        pathLower === '/audio/transcriptions' ||
+        pathLower === '/audio/transcription' ||
+        pathLower === '/v1/audio/transcription' ||
+        pathLower === '/v1/audio/transcriptions' ||
+        pathLower === '/v1/models' ||
+        pathLower === '/v1/realtime'
+      ) {
+        return CLOUDRU_GIGAASR_TRANSCRIPTIONS_URL;
+      }
+    }
+  } catch {
+    // non-URL strings pass through after basic sanitization
+  }
+
   if (/^https?:\/\/foundation-models\.api\.cloud\.ru(\/v1)?$/i.test(clean)) {
     return CLOUDRU_GIGAASR_TRANSCRIPTIONS_URL;
   }
@@ -256,11 +305,23 @@ async function fetchCloudRuCatalogModels(
   origin: string,
   apiKey: string,
   bypassCache: boolean = false
-): Promise<{ status: number; models: string[] }> {
+): Promise<{
+  status: number;
+  models: string[];
+  audioToTextModels: string[];
+  ttsOnlyModels: string[];
+  endpointsByModel: Record<string, string[]>;
+}> {
   const cacheKey = `${origin}::${apiKey.slice(0, 12)}`;
   const cached = cloudRuModelsCache.get(cacheKey);
   if (!bypassCache && cached && cached.expiresAt > Date.now()) {
-    return { status: 200, models: cached.models };
+    return {
+      status: 200,
+      models: cached.models,
+      audioToTextModels: cached.audioToTextModels,
+      ttsOnlyModels: cached.ttsOnlyModels,
+      endpointsByModel: cached.endpointsByModel,
+    };
   }
   const headers: Record<string, string> = {};
   if (apiKey) {
@@ -271,14 +332,48 @@ async function fetchCloudRuCatalogModels(
     signal: AbortSignal.timeout(10000),
   });
   if (!res.ok) {
-    return { status: res.status, models: [] };
+    return {
+      status: res.status,
+      models: [],
+      audioToTextModels: [],
+      ttsOnlyModels: [],
+      endpointsByModel: {},
+    };
   }
   const data: any = await res.json().catch(() => ({}));
-  const models: string[] = Array.isArray(data?.data)
-    ? data.data.map((m: any) => String(m?.id || '').trim()).filter(Boolean)
-    : [];
-  cloudRuModelsCache.set(cacheKey, { models, expiresAt: Date.now() + 10 * 60 * 1000 });
-  return { status: 200, models };
+  const rawList: any[] = Array.isArray(data?.data) ? data.data : [];
+  const models: string[] = [];
+  const audioToTextModels: string[] = [];
+  const ttsOnlyModels: string[] = [];
+  const endpointsByModel: Record<string, string[]> = {};
+
+  for (const m of rawList) {
+    const id = String(m?.id || '').trim();
+    if (!id) continue;
+    models.push(id);
+    const metaType = String(m?.metadata?.type || '').toLowerCase();
+    const rawEndpoints: any[] = Array.isArray(m?.metadata?.endpoints) ? m.metadata.endpoints : [];
+    const paths = rawEndpoints
+      .map((ep: any) => String(ep?.path || '').trim())
+      .filter(Boolean);
+    if (paths.length > 0) {
+      endpointsByModel[id] = paths;
+    }
+    if (metaType === 'audio-to-text' || paths.some((p) => p.includes('/audio/transcriptions'))) {
+      audioToTextModels.push(id);
+    } else if (metaType === 'tts') {
+      ttsOnlyModels.push(id);
+    }
+  }
+
+  cloudRuModelsCache.set(cacheKey, {
+    models,
+    audioToTextModels,
+    ttsOnlyModels,
+    endpointsByModel,
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  });
+  return { status: 200, models, audioToTextModels, ttsOnlyModels, endpointsByModel };
 }
 
 function pickCloudRuModelFromCatalog(desired: GigaamModelVariant, catalogModels: string[]): GigaamModelVariant {
@@ -303,23 +398,89 @@ function pickCloudRuModelFromCatalog(desired: GigaamModelVariant, catalogModels:
   return isCloudRuModelVariant(desired) ? desired : 'GigaChat/GigaASR';
 }
 
-async function resolveCloudRuConfig(config: GigaAmConfig, bypassCache: boolean = false): Promise<GigaAmConfig> {
-  if (!config.isCloudRu) return config;
+function getAlternateCloudRuAudioModels(
+  primaryModel: string,
+  catalogModels: string[],
+  audioToTextModels: string[]
+): GigaamModelVariant[] {
+  const candidates = new Set<string>();
+  for (const id of audioToTextModels) {
+    if (id.toLowerCase() !== primaryModel.toLowerCase()) {
+      candidates.add(id);
+    }
+  }
+  for (const fallback of ['GigaChat/GigaASR', 'openai/whisper-large-v3']) {
+    if (
+      fallback.toLowerCase() !== primaryModel.toLowerCase() &&
+      (catalogModels.length === 0 || catalogModels.some((id) => id.toLowerCase() === fallback.toLowerCase()))
+    ) {
+      const exact = catalogModels.find((id) => id.toLowerCase() === fallback.toLowerCase()) || fallback;
+      candidates.add(exact);
+    }
+  }
+  return Array.from(candidates) as GigaamModelVariant[];
+}
+
+async function resolveCloudRuConfig(
+  config: GigaAmConfig,
+  bypassCache: boolean = false
+): Promise<{
+  config: GigaAmConfig;
+  catalogModels: string[];
+  audioToTextModels: string[];
+  ttsOnlyModels: string[];
+  endpointsByModel: Record<string, string[]>;
+}> {
+  if (!config.isCloudRu) {
+    return {
+      config,
+      catalogModels: [],
+      audioToTextModels: [],
+      ttsOnlyModels: [],
+      endpointsByModel: {},
+    };
+  }
+  const overrideKey = `${config.apiUrl}::${config.variant}`;
+  const cachedOverride = !bypassCache ? cloudRuWorkingModelOverrides.get(overrideKey) : undefined;
   try {
     const origin = new URL(config.apiUrl).origin;
-    const { status, models } = await fetchCloudRuCatalogModels(origin, config.apiKey, bypassCache);
-    if (status === 200 && models.length > 0) {
+    const cat = await fetchCloudRuCatalogModels(origin, config.apiKey, bypassCache);
+    if (cat.status === 200 && cat.models.length > 0) {
+      let picked = pickCloudRuModelFromCatalog(config.variant, cat.models);
+      // Если пользователь выбрал TTS-модель (SaluteSpeech), автоматически берём реальную STT-модель (GigaASR / whisper)
+      if (
+        cat.ttsOnlyModels.some((id) => id.toLowerCase() === picked.toLowerCase()) &&
+        cat.audioToTextModels.length > 0
+      ) {
+        const gigaAsr = cat.audioToTextModels.find((id) => id.toLowerCase().includes('gigaasr'));
+        picked = (gigaAsr || cat.audioToTextModels[0]) as GigaamModelVariant;
+      }
+      if (cachedOverride && cachedOverride.expiresAt > Date.now()) {
+        picked = cachedOverride.model;
+      }
       return {
-        ...config,
-        variant: pickCloudRuModelFromCatalog(config.variant, models),
+        config: { ...config, variant: picked },
+        catalogModels: cat.models,
+        audioToTextModels: cat.audioToTextModels,
+        ttsOnlyModels: cat.ttsOnlyModels,
+        endpointsByModel: cat.endpointsByModel,
       };
     }
   } catch {
     // ignore catalog discovery errors during transcription
   }
+  const fallbackVariant =
+    cachedOverride && cachedOverride.expiresAt > Date.now()
+      ? cachedOverride.model
+      : isCloudRuModelVariant(config.variant)
+      ? config.variant
+      : 'GigaChat/GigaASR';
   return {
-    ...config,
-    variant: isCloudRuModelVariant(config.variant) ? config.variant : 'GigaChat/GigaASR',
+    config: { ...config, variant: fallbackVariant },
+    catalogModels: [],
+    audioToTextModels: [],
+    ttsOnlyModels: [],
+    endpointsByModel: {},
   };
 }
 
@@ -575,8 +736,14 @@ async function postAudioToGigaAm(
   const label = config.isCloudRu ? 'GigaASR (Cloud.ru)' : 'GigaAM v3';
 
   if (config.isCloudRu) {
-    const resolvedConfig = await resolveCloudRuConfig(config);
+    const {
+      config: resolvedConfig,
+      catalogModels,
+      audioToTextModels,
+      endpointsByModel,
+    } = await resolveCloudRuConfig(config);
     const isDirectChatUrl = resolvedConfig.apiUrl.toLowerCase().endsWith('/chat/completions');
+    const overrideKey = `${config.apiUrl}::${config.variant}`;
 
     if (
       (isDirectChatUrl || chatCompletionsFallbackUrls.has(resolvedConfig.apiUrl)) &&
@@ -659,22 +826,64 @@ async function postAudioToGigaAm(
       }
     }
 
-    // Если /v1/audio/transcriptions вернул 404 или 405, пробуем Cloud.ru /v1/chat/completions (input_audio / audio_url)
+    // Если /v1/audio/transcriptions вернул 404 или 405:
+    // 1) Пробуем альтернативные audio-to-text модели из каталога (например openai/whisper-large-v3),
+    // 2) Пробуем /v1/chat/completions только если модель не строго audio-to-text без chat-эндпоинта.
     if (lastRes && (lastRes.status === 404 || lastRes.status === 405)) {
-      console.warn(
-        `[${label}] ${effectiveTxConfig.apiUrl} вернул HTTP ${lastRes.status}, переключение на ${getChatCompletionsUrlFromConfig(effectiveTxConfig.apiUrl)}...`
+      const altModels = getAlternateCloudRuAudioModels(
+        effectiveTxConfig.variant,
+        catalogModels,
+        audioToTextModels
       );
-      const chatRes = await tryChatAudioFallback(audioBuffer, meta, effectiveTxConfig, label);
-      if (chatRes.ok) {
-        chatCompletionsFallbackUrls.add(resolvedConfig.apiUrl);
-        return chatRes.text;
+      for (const altModel of altModels) {
+        console.warn(
+          `[${label}] Модель ${effectiveTxConfig.variant} вернула HTTP ${lastRes.status} на ${effectiveTxConfig.apiUrl}, пробуем резервную аудио-модель ${altModel}...`
+        );
+        const altCfg: GigaAmConfig = { ...effectiveTxConfig, variant: altModel };
+        for (const profile of [{ responseFormat: 'json', includeLanguage: true }, { includeLanguage: false }] as CloudRuAttemptOpts[]) {
+          const altRes = await sendMultipartOnce(audioBuffer, meta, altCfg, fieldName, profile);
+          if (altRes.ok) {
+            const parsedText = parseTranscriptionBody(altRes.rawBody, label);
+            if (parsedText) {
+              cloudRuWorkingModelOverrides.set(overrideKey, {
+                model: altModel,
+                expiresAt: Date.now() + 10 * 60 * 1000,
+              });
+              return parsedText;
+            }
+          }
+          if (altRes.status === 401 || altRes.status === 403 || altRes.status === 404 || altRes.status === 405) {
+            break;
+          }
+        }
       }
+
+      const modelPaths = endpointsByModel[effectiveTxConfig.variant] || [];
+      const supportsChat = modelPaths.length === 0 || modelPaths.some((p) => p.includes('/chat/completions'));
+      if (supportsChat) {
+        console.warn(
+          `[${label}] ${effectiveTxConfig.apiUrl} вернул HTTP ${lastRes.status}, переключение на ${getChatCompletionsUrlFromConfig(effectiveTxConfig.apiUrl)}...`
+        );
+        const chatRes = await tryChatAudioFallback(audioBuffer, meta, effectiveTxConfig, label);
+        if (chatRes.ok) {
+          chatCompletionsFallbackUrls.add(resolvedConfig.apiUrl);
+          return chatRes.text;
+        }
+        const err: any = new Error(
+          `${label}: ${effectiveTxConfig.apiUrl} вернул HTTP ${lastRes.status} (${lastRes.statusText}), а ${getChatCompletionsUrlFromConfig(effectiveTxConfig.apiUrl)} вернул HTTP ${chatRes.status}: ${
+            chatRes.rawBody.slice(0, 220) || chatRes.statusText
+          }`
+        );
+        err.status = chatRes.status;
+        throw err;
+      }
+
       const err: any = new Error(
-        `${label}: ${effectiveTxConfig.apiUrl} вернул HTTP ${lastRes.status} (${lastRes.statusText}), а ${getChatCompletionsUrlFromConfig(effectiveTxConfig.apiUrl)} вернул HTTP ${chatRes.status}: ${
-          chatRes.rawBody.slice(0, 220) || chatRes.statusText
+        `${label}: ${effectiveTxConfig.apiUrl} (модель ${effectiveTxConfig.variant}) вернул HTTP ${lastRes.status}: ${
+          (lastRes.rawBody || '').slice(0, 220) || lastRes.statusText
         }`
       );
-      err.status = chatRes.status;
+      err.status = lastRes.status;
       throw err;
     }
 
@@ -932,18 +1141,30 @@ export async function testGigaAmConnection(
   if (cfg.isCloudRu) {
     let catalogModels: string[] = [];
     let audioModelsList: string[] = [];
+    let endpointsByModel: Record<string, string[]> = {};
+    let ttsOnlyModels: string[] = [];
     try {
       const cat = await fetchCloudRuCatalogModels(parsedUrl.origin, cfg.apiKey, true);
       if (cat.status === 401 || cat.status === 403) {
         throw new Error(`Ошибка авторизации Cloud.ru Evolution (${cat.status}): проверьте API-ключ`);
       }
       catalogModels = cat.models;
-      audioModelsList = catalogModels.filter((id) => /asr|whisper|audio|speech|gigaasr/i.test(id));
+      audioModelsList = cat.audioToTextModels.length > 0
+        ? cat.audioToTextModels
+        : catalogModels.filter((id) => /asr|whisper|gigaasr/i.test(id));
+      endpointsByModel = cat.endpointsByModel;
+      ttsOnlyModels = cat.ttsOnlyModels;
     } catch (err: any) {
       if (/авторизац/i.test(err.message)) throw err;
     }
 
-    const resolvedModelId = pickCloudRuModelFromCatalog(cfg.variant, catalogModels);
+    let resolvedModelId = pickCloudRuModelFromCatalog(cfg.variant, catalogModels);
+    let saluteRedirectNote = '';
+    if (ttsOnlyModels.some((id) => id.toLowerCase() === resolvedModelId.toLowerCase()) && audioModelsList.length > 0) {
+      const nextStt = audioModelsList.find((id) => id.toLowerCase().includes('gigaasr')) || audioModelsList[0];
+      saluteRedirectNote = ` (модель ${resolvedModelId} — это TTS, для распознавания речи используется ${nextStt})`;
+      resolvedModelId = nextStt as GigaamModelVariant;
+    }
     const resolvedCfg: GigaAmConfig = { ...cfg, variant: resolvedModelId };
     const hasSelectedOrGigaAsr =
       catalogModels.some((id) => id.toLowerCase() === resolvedModelId.toLowerCase()) ||
@@ -970,7 +1191,7 @@ export async function testGigaAmConnection(
       if (probeRes.ok) {
         return {
           success: true,
-          message: `Подключение к Cloud.ru Evolution установлено! Модель ${resolvedModelId} доступна и /v1/audio/transcriptions отвечает.`,
+          message: `Подключение к Cloud.ru Evolution установлено! Модель ${resolvedModelId} доступна и /v1/audio/transcriptions отвечает.${saluteRedirectNote}`,
         };
       }
 
@@ -985,7 +1206,7 @@ export async function testGigaAmConnection(
         if (minimalProbe.ok) {
           return {
             success: true,
-            message: `Подключение к Cloud.ru Evolution установлено! Модель ${resolvedModelId} готова к транскрибации.`,
+            message: `Подключение к Cloud.ru Evolution установлено! Модель ${resolvedModelId} готова к транскрибации.${saluteRedirectNote}`,
           };
         }
         transcriptionsStatus = minimalProbe.status;
@@ -996,8 +1217,35 @@ export async function testGigaAmConnection(
       }
     }
 
-    // Если /v1/audio/transcriptions вернул 404/405 или указан /v1/chat/completions — проверяем оба эндпоинта
-    if (isDirectChatUrl || transcriptionsStatus === 404 || transcriptionsStatus === 405) {
+    // Если выбранная модель вернула 404/405 на /v1/audio/transcriptions — пробуем альтернативные audio-to-text модели каталога
+    if (!isDirectChatUrl && (transcriptionsStatus === 404 || transcriptionsStatus === 405)) {
+      const altModels = getAlternateCloudRuAudioModels(resolvedModelId, catalogModels, audioModelsList);
+      for (const altModel of altModels) {
+        const altCfg: GigaAmConfig = { ...resolvedCfg, variant: altModel };
+        const altProbe = await sendMultipartOnce(
+          probeWav,
+          { ext: 'wav', mime: 'audio/wav' },
+          altCfg,
+          'file',
+          { responseFormat: 'json', includeLanguage: true }
+        );
+        if (altProbe.ok) {
+          cloudRuWorkingModelOverrides.set(`${cfg.apiUrl}::${cfg.variant}`, {
+            model: altModel,
+            expiresAt: Date.now() + 10 * 60 * 1000,
+          });
+          return {
+            success: true,
+            message: `Подключение установлено! Модель ${resolvedModelId} вернула HTTP ${transcriptionsStatus}, активировано автоматическое переключение на аудио-модель ${altModel}.`,
+          };
+        }
+      }
+    }
+
+    // Если /v1/audio/transcriptions вернул 404/405 (для моделей с поддержкой chat) или указан /v1/chat/completions
+    const modelPaths = endpointsByModel[resolvedModelId] || [];
+    const modelSupportsChat = isDirectChatUrl || modelPaths.length === 0 || modelPaths.some((p) => p.includes('/chat/completions'));
+    if (isDirectChatUrl || ((transcriptionsStatus === 404 || transcriptionsStatus === 405) && modelSupportsChat)) {
       const chatProbe = await tryChatAudioFallback(
         probeWav,
         { ext: 'wav', mime: 'audio/wav' },
@@ -1046,7 +1294,7 @@ export async function testGigaAmConnection(
       }
 
       const audioHint = audioModelsList.length > 0
-        ? ` Аудио-модели в каталоге: ${audioModelsList.join(', ')}.`
+        ? ` Audio-to-Text модели в каталоге: ${audioModelsList.join(', ')}.`
         : '';
       const txUrlLabel = isDirectChatUrl ? getTranscriptionsUrlFromConfig(resolvedCfg.apiUrl) : resolvedCfg.apiUrl;
       const txPart = transcriptionsStatus
@@ -1063,7 +1311,7 @@ export async function testGigaAmConnection(
     }
 
     const audioHint = audioModelsList.length > 0
-      ? ` Аудио-модели в каталоге: ${audioModelsList.join(', ')}.`
+      ? ` Audio-to-Text модели в каталоге: ${audioModelsList.join(', ')}.`
       : '';
     throw new Error(
       `Модель ${resolvedModelId} видна в /v1/models, но эндпоинт транскрибации ${resolvedCfg.apiUrl} вернул HTTP ${transcriptionsStatus}: ${transcriptionsErrBody}.${audioHint}`
