@@ -18,6 +18,20 @@ export interface CriterionDefinition {
 /**
  * 10 обязательных критериев оценки звонка по регламенту салона красоты
  */
+export const LEGACY_CRITERION_ID_MAP: Record<string, string> = {
+  service_and_master_presentation: 'service_presentation',
+  handling_objections: 'objections',
+  additional_services: 'upsell',
+  alternative_options: 'alternatives',
+  closing_booking: 'closing',
+  communication_quality_closing: 'communication',
+};
+
+export function normalizeCriterionId(id?: string | null): string {
+  const s = String(id || '').trim();
+  return LEGACY_CRITERION_ID_MAP[s] || s;
+}
+
 export const EVALUATION_CRITERIA_DEFINITIONS: CriterionDefinition[] = [
   {
     id: 'greeting_intro',
@@ -34,7 +48,7 @@ export const EVALUATION_CRITERIA_DEFINITIONS: CriterionDefinition[] = [
     iconKey: 'needs'
   },
   {
-    id: 'service_and_master_presentation',
+    id: 'service_presentation',
     name: 'Презентация услуги и мастера',
     shortDescription: 'Экспертное представление специалиста, квалификации, особенностей и длительности процедуры',
     category: 'service',
@@ -48,14 +62,14 @@ export const EVALUATION_CRITERIA_DEFINITIONS: CriterionDefinition[] = [
     iconKey: 'price'
   },
   {
-    id: 'handling_objections',
+    id: 'objections',
     name: 'Работа с возражениями',
     shortDescription: 'Отработка сомнений по цене, плотной записи мастера, переубеждение и предложение решений',
     category: 'sales',
     iconKey: 'objections'
   },
   {
-    id: 'additional_services',
+    id: 'upsell',
     name: 'Предложение дополнительных услуг',
     shortDescription: 'Допродажа сопутствующих процедур (снятие, спа-уход, дизайн, оформление бровей, уход)',
     category: 'sales',
@@ -69,21 +83,21 @@ export const EVALUATION_CRITERIA_DEFINITIONS: CriterionDefinition[] = [
     iconKey: 'parallel'
   },
   {
-    id: 'alternative_options',
+    id: 'alternatives',
     name: 'Предложение альтернативных вариантов',
     shortDescription: 'Вилка времени (2+ слота), альтернативные даты, другие мастера или лист ожидания при занятости',
     category: 'service',
     iconKey: 'alternatives'
   },
   {
-    id: 'closing_booking',
+    id: 'closing',
     name: 'Закрытие на запись',
     shortDescription: 'Инициатива фиксации брони, четкое проговаривание даты, времени, мастера и подтверждение',
     category: 'sales',
     iconKey: 'closing'
   },
   {
-    id: 'communication_quality_closing',
+    id: 'communication',
     name: 'Качество коммуникации и завершение разговора',
     shortDescription: 'Грамотная речь, отсутствие слов-паразитов, предупреждение о напоминании и теплое прощание',
     category: 'standard',
@@ -120,7 +134,12 @@ export function calculateOverallScore(criteria: CallEvaluationCriterion[]): {
 export function buildCallEvaluation(criteriaInput: Partial<CallEvaluationCriterion>[]): CallEvaluation {
   const criteriaMap = new Map<string, Partial<CallEvaluationCriterion>>();
   criteriaInput.forEach(c => {
-    if (c.id) criteriaMap.set(c.id, c);
+    if (c.id) {
+      criteriaMap.set(normalizeCriterionId(c.id), c);
+    }
+    if (c.name) {
+      criteriaMap.set(c.name, c);
+    }
   });
 
   const normalizedCriteria: CallEvaluationCriterion[] = EVALUATION_CRITERIA_DEFINITIONS.map(def => {
@@ -229,14 +248,14 @@ export function extractCallEvaluation(
 
   // Проверка валидности уже существующей оценки (защита от галлюцинаций и противоречий со стенограммой)
   if (existingEvaluation?.criteria && Array.isArray(existingEvaluation.criteria) && existingEvaluation.criteria.length >= 10) {
-    const critMap = new Map(existingEvaluation.criteria.map(c => [c.id, c]));
+    const critMap = new Map(existingEvaluation.criteria.map(c => [normalizeCriterionId(c.id), c]));
     const critGreeting = critMap.get('greeting_intro');
-    const crit6 = critMap.get('additional_services');
+    const crit6 = critMap.get('upsell');
     const critParallel = critMap.get('parallel_booking');
-    const critAlt = critMap.get('alternative_options');
-    const critClosing = critMap.get('closing_booking');
+    const critAlt = critMap.get('alternatives');
+    const critClosing = critMap.get('closing');
     const critPrice = critMap.get('price_presentation');
-    const critMaster = critMap.get('service_and_master_presentation');
+    const critMaster = critMap.get('service_presentation');
     const mistakesStr = (mistakes || []).join(' ').toLowerCase();
 
     const { managerText: mgrTxtCheck, fullText: fullTxtCheck } = splitSpeakerLines(ctx.cleanTranscript);
@@ -253,9 +272,11 @@ export function extractCallEvaluation(
     );
 
     const hasCrossSellContradiction = crit6 && crit6.score === 10 && mistakesStr.includes('сопутствующ');
+    const isExistingBookingConfirm = /(?:вы\s+записаны\s+(?:на|к)|ваша\s+запись\s+(?:на|к))/iu.test(ctx.cleanTranscript);
     const hasWrongClosing10 =
       !ctx.isConfirmedBooking &&
       !ctx.isRescheduleOrCheck &&
+      !isExistingBookingConfirm &&
       critClosing &&
       critClosing.is_applicable !== false &&
       (critClosing.score ?? 0) >= 8;
@@ -274,7 +295,7 @@ export function extractCallEvaluation(
       (critAlt.score ?? 0) < 8 &&
       /предложил альтернативн/i.test(critAlt.explanation || '');
     const hasSalesOnNonSalesCall =
-      (ctx.isNonClient || ctx.isLateWarning) &&
+      (ctx.isNonClient || (ctx.isLateWarning && !isExistingBookingConfirm)) &&
       (critClosing?.is_applicable !== false || critPrice?.is_applicable !== false || critMaster?.is_applicable !== false);
     const hasFakePriceExplanation =
       critPrice &&
@@ -380,15 +401,15 @@ export function extractCallEvaluation(
     return buildCallEvaluation([
       greetingCriterion,
       { id: 'needs_identification', is_applicable: false, score: null, explanation: notApp },
-      { id: 'service_and_master_presentation', is_applicable: false, score: null, explanation: notApp },
+      { id: 'service_presentation', is_applicable: false, score: null, explanation: notApp },
       { id: 'price_presentation', is_applicable: false, score: null, explanation: notApp },
-      { id: 'handling_objections', is_applicable: false, score: null, explanation: notApp },
-      { id: 'additional_services', is_applicable: false, score: null, explanation: notApp },
+      { id: 'objections', is_applicable: false, score: null, explanation: notApp },
+      { id: 'upsell', is_applicable: false, score: null, explanation: notApp },
       { id: 'parallel_booking', is_applicable: false, score: null, explanation: notApp },
-      { id: 'alternative_options', is_applicable: false, score: null, explanation: notApp },
-      { id: 'closing_booking', is_applicable: false, score: null, explanation: notApp },
+      { id: 'alternatives', is_applicable: false, score: null, explanation: notApp },
+      { id: 'closing', is_applicable: false, score: null, explanation: notApp },
       {
-        id: 'communication_quality_closing',
+        id: 'communication',
         is_applicable: true,
         score: hasPoliteClosing && acknowledgedAction ? 9 : (hasPoliteClosing ? 8 : 6),
         explanation: acknowledgedAction
@@ -407,15 +428,15 @@ export function extractCallEvaluation(
     return buildCallEvaluation([
       greetingCriterion,
       { id: 'needs_identification', is_applicable: false, score: null, explanation: notAppLate },
-      { id: 'service_and_master_presentation', is_applicable: false, score: null, explanation: notAppLate },
+      { id: 'service_presentation', is_applicable: false, score: null, explanation: notAppLate },
       { id: 'price_presentation', is_applicable: false, score: null, explanation: notAppLate },
-      { id: 'handling_objections', is_applicable: false, score: null, explanation: notAppLate },
-      { id: 'additional_services', is_applicable: false, score: null, explanation: notAppLate },
+      { id: 'objections', is_applicable: false, score: null, explanation: notAppLate },
+      { id: 'upsell', is_applicable: false, score: null, explanation: notAppLate },
       { id: 'parallel_booking', is_applicable: false, score: null, explanation: notAppLate },
-      { id: 'alternative_options', is_applicable: false, score: null, explanation: notAppLate },
-      { id: 'closing_booking', is_applicable: false, score: null, explanation: notAppLate },
+      { id: 'alternatives', is_applicable: false, score: null, explanation: notAppLate },
+      { id: 'closing', is_applicable: false, score: null, explanation: notAppLate },
       {
-        id: 'communication_quality_closing',
+        id: 'communication',
         is_applicable: true,
         score: confirmedWaiting && clarifiedClientOrTime ? 10 : (confirmedWaiting ? 8 : 6),
         explanation: confirmedWaiting && clarifiedClientOrTime
@@ -518,7 +539,7 @@ export function extractCallEvaluation(
 
     // 3. Презентация услуги и мастера
     {
-      id: 'service_and_master_presentation',
+      id: 'service_presentation',
       name: 'Презентация услуги и мастера',
       is_applicable: !isBookingConfirmationCall,
       score: isBookingConfirmationCall
@@ -554,7 +575,7 @@ export function extractCallEvaluation(
 
     // 5. Работа с возражениями
     {
-      id: 'handling_objections',
+      id: 'objections',
       name: 'Работа с возражениями',
       is_applicable: hasObjections,
       score: hasObjections
@@ -573,7 +594,7 @@ export function extractCallEvaluation(
 
     // 6. Предложение дополнительных услуг
     {
-      id: 'additional_services',
+      id: 'upsell',
       name: 'Предложение дополнительных услуг',
       is_applicable: isCrossSellApplicable,
       score: !isCrossSellApplicable ? null : (managerOfferedCrossSell ? 10 : 6),
@@ -603,7 +624,7 @@ export function extractCallEvaluation(
 
     // 8. Предложение альтернативных вариантов
     {
-      id: 'alternative_options',
+      id: 'alternatives',
       name: 'Предложение альтернативных вариантов',
       is_applicable: isSlotConflict || !isBookingAgreed,
       score: (isSlotConflict || !isBookingAgreed)
@@ -624,7 +645,7 @@ export function extractCallEvaluation(
 
     // 9. Закрытие на запись
     {
-      id: 'closing_booking',
+      id: 'closing',
       name: 'Закрытие на запись',
       is_applicable: true,
       score: isBookingAgreed ? 10 : (hasBookingAttempt ? 5 : 4),
@@ -639,7 +660,7 @@ export function extractCallEvaluation(
 
     // 10. Качество коммуникации и завершение разговора
     {
-      id: 'communication_quality_closing',
+      id: 'communication',
       name: 'Качество коммуникации и завершение разговора',
       is_applicable: true,
       score: isBookingAgreed
@@ -673,14 +694,14 @@ export function harmonizeMistakesAndEvaluation(
 } {
   const ctx = transcript ? classifyCallContext(transcript) : null;
   const criteriaMap = new Map<string, CallEvaluationCriterion>();
-  (evaluation.criteria || []).forEach(c => criteriaMap.set(c.id, c));
+  (evaluation.criteria || []).forEach(c => criteriaMap.set(normalizeCriterionId(c.id), c));
 
-  const critCrossSell = criteriaMap.get('additional_services');
+  const critCrossSell = criteriaMap.get('upsell');
   const critParallel = criteriaMap.get('parallel_booking');
-  const critAlternatives = criteriaMap.get('alternative_options');
-  const critObjections = criteriaMap.get('handling_objections');
+  const critAlternatives = criteriaMap.get('alternatives');
+  const critObjections = criteriaMap.get('objections');
   const critPrice = criteriaMap.get('price_presentation');
-  const critClosing = criteriaMap.get('closing_booking');
+  const critClosing = criteriaMap.get('closing');
 
   const isCrossSellNotApplicableOrHigh =
     !critCrossSell ||
@@ -789,7 +810,7 @@ export function harmonizeMistakesAndEvaluation(
 
     (evaluation.criteria || []).forEach(c => {
       if (c.is_applicable !== false && typeof c.score === 'number' && c.score < 8) {
-        switch (c.id) {
+        switch (normalizeCriterionId(c.id)) {
           case 'greeting_intro':
             derivedMistakes.push('Администратор не назвал собственное имя и/или название салона при приветствии.');
             derivedAdvice.push('Представляться по полному корпоративному стандарту (название салона + имя администратора).');
@@ -798,7 +819,7 @@ export function harmonizeMistakesAndEvaluation(
             derivedMistakes.push('Не заданы уточняющие вопросы для выявления потребностей гостя.');
             derivedAdvice.push('Проявлять активное слушание и уточнять пожелания гостя по результату, срокам и деталям.');
             break;
-          case 'service_and_master_presentation':
+          case 'service_presentation':
             derivedMistakes.push(c.explanation || 'Особенности услуги и квалификация мастера не раскрыты.');
             derivedAdvice.push('Кратко презентовать особенности методики и квалификацию мастера салона.');
             break;
@@ -806,11 +827,11 @@ export function harmonizeMistakesAndEvaluation(
             derivedMistakes.push('Стоимость процедуры не была озвучена в ходе диалога.');
             derivedAdvice.push('Четко и уверенно озвучивать стоимость и условия оказания услуги.');
             break;
-          case 'handling_objections':
+          case 'objections':
             derivedMistakes.push(c.explanation || 'Недостаточная аргументация при возражении/сомнении гостя.');
             derivedAdvice.push('Аргументировать преимущества доступных методик и предлагать комфортные решения.');
             break;
-          case 'additional_services':
+          case 'upsell':
             derivedMistakes.push('Администратор не предложил сопутствующие процедуры к основной услуге.');
             derivedAdvice.push('Предлагать сопутствующие процедуры при оформлении основной записи.');
             break;
@@ -818,17 +839,17 @@ export function harmonizeMistakesAndEvaluation(
             derivedMistakes.push('При бронировании комплекса услуг не была предложена опция параллельной записи в 4 руки.');
             derivedAdvice.push('Предлагать гостям параллельную запись в 4 руки для экономии времени.');
             break;
-          case 'alternative_options':
+          case 'alternatives':
             if (typeof c.score === 'number' && c.score <= 5) {
               derivedMistakes.push(c.explanation || 'Не предложены альтернативные варианты времени, дат или мастеров.');
               derivedAdvice.push('Предлагать несколько альтернативных вариантов по времени, мастерам или смежным услугам.');
             }
             break;
-          case 'closing_booking':
+          case 'closing':
             derivedMistakes.push(c.explanation || 'Запись в рамках диалога не состоялась.');
             derivedAdvice.push('При наличии интереса клиента активно переводить диалог к согласованию удобного времени или консультации.');
             break;
-          case 'communication_quality_closing':
+          case 'communication':
             if (ctx?.isLateWarning) {
               derivedMistakes.push('При подтверждении ожидания не уточнены имя клиента и точное время исходной записи.');
               derivedAdvice.push('При звонке об опоздании всегда уточнять имя гостя/время брони для быстрой отметки в расписании.');

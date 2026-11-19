@@ -4,7 +4,6 @@
  */
 
 import axios from 'axios';
-import https from 'https';
 import {
   AnalysisResult,
   CallEvaluationCriterion,
@@ -69,7 +68,6 @@ export interface VerifierCallOptions {
   apiUrl: string;
   token: string;
   model: string;
-  httpsAgent?: https.Agent;
 }
 
 export const UNCONFIRMED_VALUE_PLACEHOLDER = 'не подтверждено стенограммой';
@@ -221,7 +219,6 @@ async function callVerifierModel(
         Authorization: `Bearer ${opts.token}`,
         'Content-Type': 'application/json',
       },
-      ...(opts.httpsAgent ? { httpsAgent: opts.httpsAgent } : {}),
       timeout: 60000,
     }
   );

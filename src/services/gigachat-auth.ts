@@ -4,17 +4,10 @@
  */
 
 import axios from 'axios';
-import https from 'https';
 import { randomUUID } from 'crypto';
 import { readStoreSync } from '../store/store.js';
 
 let gigaTokenCache: { token: string; expiresAt: number } | null = null;
-
-// GigaChat API uses Russian state CA certificates (Минцифры РФ).
-// We set rejectUnauthorized to false to allow smooth TLS handshake across container environments.
-const httpsAgent = new https.Agent({
-  rejectUnauthorized: false,
-});
 
 export function getEffectiveGigaChatKey(): string {
   try {
@@ -68,7 +61,6 @@ export async function getGigaChatToken(): Promise<string> {
         Accept: 'application/json',
         RqUID: randomUUID(),
       },
-      httpsAgent,
       timeout: 20000,
     }
   );

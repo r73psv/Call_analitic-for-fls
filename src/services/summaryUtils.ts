@@ -76,7 +76,10 @@ export const FORBIDDEN_MASTER_WORDS = new Set([
   'не указан', 'не указана', 'не выбран', 'не выбрана', 'неизвестно', 'неизвестен',
   'продукции', 'продукция', 'матрикс', 'матриксе', 'экспресс', 'локоны', 'стрижку',
   'подруга', 'подруге', 'подругой', 'подружка', 'подружкой', 'девушка', 'девушки',
-  'данный', 'слушаю', 'загрузит', 'верно', 'свободно', 'вечернее', 'дневное'
+  'данный', 'слушаю', 'загрузит', 'верно', 'свободно', 'вечернее', 'дневное',
+  // Motion verbs & non-master street/transport phrases & time adverbs
+  'иду', 'идти', 'идёт', 'идем', 'идём', 'еду', 'приду', 'подойду', 'по улице', 'улице', 'улица', 'машина',
+  'сегодня', 'завтра', 'послезавтра', 'утром', 'днем', 'днём', 'вечером'
 ]);
 
 /**
@@ -89,6 +92,15 @@ export function isMasterNameValid(name?: string | null): boolean {
   if (trimmed.length < 2 || trimmed.length > 50) return false;
 
   const lower = trimmed.toLowerCase();
+
+  if (FORBIDDEN_MASTER_WORDS.has(lower)) {
+    return false;
+  }
+  for (const forbidden of FORBIDDEN_MASTER_WORDS) {
+    if (forbidden.includes(' ') && lower.includes(forbidden)) {
+      return false;
+    }
+  }
 
   // Отбрасываем фразы-паразиты, ошибочно попадающие в поле мастера
   if (/(?:меня\s+вот|записались|будете|посмотрим|получается|не\s+выбран|не\s+указан|салон|студио|фэшн|look|studio|fashion)/iu.test(lower)) {
@@ -314,7 +326,7 @@ export function classifyCallContext(
   const managerEffectiveForBooking = managerLines || cleanTranscript;
   const hasRealBookingActionInTranscript =
     /(?<!не\s)(?:записала(?:\s+вас)?|записываю(?:\s+вас)?|записал(?:\s+вас)?|записали(?:\s+вас)?|запишем(?:\s+вас)?|записываем(?:\s+вас)?|вы\s+записаны|запись\s+(?:успешно\s+)?(?:подтверждаем|подтверждена|оформлена)|на\s+\d{1,2}(?::\d{2})?\s+(?:я\s+)?оставляю|оставляем\s+все|договорились\s+(?:на|в)|жду\s+вас\s+(?:завтра|сегодня|в\s+\d))/iu.test(managerEffectiveForBooking) ||
-    (/(?:запишите|давайте\s+на\s+\d|подойд[её]т|согласна|согласен|давайте я продиктую|да,?\s*(?:вс[её],?\s*)?(?:запись\s+подтвер|подтвер[а-яё]*\s+запись))/iu.test(callerTextForRefusal) &&
+    (/(?:запишите|давайте\s+на\s+\d|подойд[её]т|подойду|согласна|согласен|давайте я продиктую|да,?\s*(?:вс[её],?\s*)?(?:запись\s+подтвер|подтвер[а-яё]*\s+запись))/iu.test(callerTextForRefusal) &&
       /(?:запис|жд[её]м|ожида|подтвержд|хорошо|подойд[её]те)/iu.test(managerEffectiveForBooking));
 
   const isConfirmedBooking =

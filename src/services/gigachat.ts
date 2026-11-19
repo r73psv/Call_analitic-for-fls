@@ -17,7 +17,6 @@
  */
 
 import axios from 'axios';
-import https from 'https';
 import { readStoreSync } from '../store/store.js';
 import { getGigaChatToken, isGigaChatConfigured, invalidateGigaChatTokenCache } from './gigachat-auth.js';
 import { GigaChatModel, AnalysisResult, CallRecord, NextStepItem, KeyFacts, TokenUsage, ContextClarification, StructuredCallSummary, CallEvaluationCriterion, CallEvaluation } from '../types.js';
@@ -42,10 +41,6 @@ export {
   buildConciseDraftForVerifier,
   runTwoPassVerification,
 };
-
-const httpsAgent = new https.Agent({
-  rejectUnauthorized: false,
-});
 
 export const FALLBACK_SALON_MASTERS = [
   'Дарья Прибыткова',
@@ -134,6 +129,7 @@ export function getSystemPrompt(customSalonName?: string, mastersList?: string[]
 
 === ЭТАП 1. ИЗВЛЕЧЕНИЕ ФАКТОВ ===
 Выпиши КАЖДЫЙ факт, релевантный резюме, в JSON. Каждому факту — точная дословная цитата из стенограммы. Факт без цитаты не существует.
+Мастера извлекай ТОЛЬКО из фраз менеджера вида "записаны к <Имя>", "запись к <Имя>", "у мастера <Имя>". Глаголы и слова клиента о движении ("иду", "идём", "приду", "еду", "подойду") — НЕ имена мастеров, в поле master их запрещено записывать. Если менеджер назвал мастера, а клиент произнёс глагол "иду" — мастером является имя из фразы менеджера.
 
 {
   "client_name": {"value": "...", "quote": "..."},
@@ -153,9 +149,10 @@ export function getSystemPrompt(customSalonName?: string, mastersList?: string[]
 
 === ЭТАП 2. КЛАССИФИКАЦИЯ СТАТУСА ===
 - "Запись состоялась" — если клиент явно подтвердил запись («хорошо», «да», «запишите», «записалась», «подтвердили», «буду», «подойду», «договорились») И/ИЛИ менеджер явно подтвердил бронь («жду», «ждём», «будем ожидать», «записал», «запись оформлена», «принято»).
+- Если менеджер сообщает о СУЩЕСТВУЮЩЕЙ записи ("вы записаны на...", "вы записаны к...") и клиент подтверждает визит или предупреждает об опоздании — статус "Запись состоялась", а в booking_done пиши "Подтверждение ранее сделанной записи". Отдельно новой записи в этом звонке не оформлялось — это отражай в тексте, но не в статусе. Статус "Консультация" — только если записи не существует и клиент не собирается приходить.
 - "Отсрочка" — клиент просит подумать / перезвонит / проверить расписание.
 - "Отказ" — клиент отказался от услуги, цены или времени.
-- "Консультация" — вопрос без попытки записаться или уведомление (предупреждение об опоздании, организационный вопрос).
+- "Консультация" — только если записи не существует и клиент не собирается приходить.
 - "Не применимо" — разговор не состоялся (тишина, гудки, сброс, автоответчик без живого диалога).
 
 ВАЖНЫЕ ПРАВИЛА РАЗБОРА РОЛЕЙ И СТАТУСА:
@@ -188,10 +185,14 @@ export function getSystemPrompt(customSalonName?: string, mastersList?: string[]
 Правило по приветствию: если менеджер поприветствовал клиента (особенно с обращением по имени и названием салона, например: «Добрый день, Михаил. Салон красоты Лук Студия.») — критерий 1 «Приветствие и представление» оценивается высоко (9–10 баллов); НЕ снижай балл с формулировкой «не представился», если в приветствии есть приветствие + имя клиента или название салона.
 Правило по стоимости: если конкретные цифры/рубли не озвучивались, критерий 4 имеет applicable: false, score: null.
 Правило по возражениям и альтернативам: если не было отказа или несогласия по времени/цене, критерии 5 и 8 имеют applicable: false, score: null.
+Критерий 8 (альтернативы) применим ТОЛЬКО если в диалоге был отказ или несогласие клиента по времени/цене/услуге. Если клиент подтвердил или согласился — критерий 8 не применим.
+Критерий 9 (закрытие на запись): если запись подтверждена — оценка 9–10, а не 5; формулировка "визит не согласован" при подтверждённой записи запрещена.
 
 ЗАПРЕЩЕНО:
 - Писать "не представился", если в приветствии звучали приветствие + имя клиента или название салона.
 - Писать "менеджер не переспросил про...", если клиент сам завершил тему.
+- Ставить оценку 5 или формулировку "визит не согласован" по критерию 9 (закрытие на запись), если запись подтверждена — в этом случае оценка должна быть 9–10.
+- Признавать критерий 8 (альтернативы) применимым, если клиент подтвердил или согласился и не было отказа/несогласия по времени/цене/услуге.
 - Придумывать ошибки и советы про SMS/автоподтверждения или допродажи, если диалог короткий/подтверждающий или для этого не было основания в стенограмме.
 - Копировать шаблонные фразы из примеров.
 - Выводить любой текст вне JSON.
@@ -838,7 +839,6 @@ export async function analyzeWithGigaChat(
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      httpsAgent,
       timeout: 60000,
     }
   );
@@ -871,7 +871,6 @@ export async function analyzeWithGigaChat(
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
-        httpsAgent,
         timeout: 60000,
       }
     );
@@ -888,7 +887,6 @@ export async function analyzeWithGigaChat(
         apiUrl: gigachatApiUrl,
         token,
         model,
-        httpsAgent,
       });
       const flagsCount = verified.verification_flags?.length || 0;
       const critFlagsCount = verified.verification_report?.criteria_flags?.length || 0;
@@ -943,6 +941,7 @@ import {
 
 import {
   EVALUATION_CRITERIA_DEFINITIONS,
+  normalizeCriterionId,
   calculateOverallScore,
   buildCallEvaluation,
   extractCallEvaluation,
@@ -1449,22 +1448,24 @@ export function formatSummaryWithEssence(
 }
 
 function mapAuditCriterionId(rawNameOrId: string): string | undefined {
-  const s = String(rawNameOrId || '').toLowerCase().trim();
-  if (!s) return undefined;
+  const raw = String(rawNameOrId || '').trim();
+  if (!raw) return undefined;
+  const normalizedId = normalizeCriterionId(raw);
+  const s = normalizedId.toLowerCase();
   const exact = EVALUATION_CRITERIA_DEFINITIONS.find(
-    d => d.id === s || d.name.toLowerCase() === s
+    d => d.id === normalizedId || d.id === s || d.name.toLowerCase() === s
   );
   if (exact) return exact.id;
   if (s.includes('приветств')) return 'greeting_intro';
   if (s.includes('потребност') || s.includes('выявлен')) return 'needs_identification';
-  if (s.includes('презентация услуги') || (s.includes('услуг') && s.includes('мастер'))) return 'service_and_master_presentation';
+  if (s.includes('презентация услуги') || (s.includes('услуг') && s.includes('мастер'))) return 'service_presentation';
   if (s.includes('стоимост') || s.includes('цен')) return 'price_presentation';
-  if (s.includes('возражен')) return 'handling_objections';
-  if (s.includes('дополнительн') || s.includes('допродаж')) return 'additional_services';
+  if (s.includes('возражен')) return 'objections';
+  if (s.includes('дополнительн') || s.includes('допродаж')) return 'upsell';
   if (s.includes('параллельн')) return 'parallel_booking';
-  if (s.includes('альтернатив')) return 'alternative_options';
-  if (s.includes('закрыт')) return 'closing_booking';
-  if (s.includes('коммуникац') || s.includes('завершен')) return 'communication_quality_closing';
+  if (s.includes('альтернатив')) return 'alternatives';
+  if (s.includes('закрыт')) return 'closing';
+  if (s.includes('коммуникац') || s.includes('завершен')) return 'communication';
   return undefined;
 }
 
@@ -1589,50 +1590,84 @@ export function parseGigaChatJson(text: string, customSalonName?: string, origin
     };
   }
 
-  // --- Ветка «разговор состоялся»: маппинг статуса Stage 2 («Запись состоялась | Отсрочка | Отказ | Консультация | Не применимо») ---
-  let bookingStatus = rawBooking;
+  // --- Ветка «разговор состоялся»: явный словарь маппинга статуса Stage 2 -> legacy (booking_status, call_outcome) ---
+  const BOOKING_STATUS_DICT: Record<
+    string,
+    {
+      booking_status: 'согласие' | 'консультация' | 'отказ' | 'не применимо';
+      call_outcome: 'запись' | 'перезвон' | 'отказ' | 'консультация' | 'не состоялся';
+    }
+  > = {
+    'запись состоялась': { booking_status: 'согласие', call_outcome: 'запись' },
+    'согласие': { booking_status: 'согласие', call_outcome: 'запись' },
+    'отсрочка': { booking_status: 'консультация', call_outcome: 'перезвон' },
+    'отказ': { booking_status: 'отказ', call_outcome: 'отказ' },
+    'консультация': { booking_status: 'консультация', call_outcome: 'консультация' },
+    'не применимо': { booking_status: 'не применимо', call_outcome: 'не состоялся' },
+  };
+
+  let bookingStatus: string = rawBooking;
   let outcomeFromStage2: string | null = null;
-  if (rawBooking.includes('запись состоялась') || rawBooking === 'согласие' || rawBooking.includes('соглас')) {
-    bookingStatus = 'согласие';
-    outcomeFromStage2 = 'запись';
+  const exactDictMatch = BOOKING_STATUS_DICT[rawBooking];
+  if (exactDictMatch) {
+    bookingStatus = exactDictMatch.booking_status;
+    outcomeFromStage2 = exactDictMatch.call_outcome;
+  } else if (rawBooking.includes('запись состоялась') || rawBooking.includes('соглас')) {
+    bookingStatus = BOOKING_STATUS_DICT['запись состоялась'].booking_status;
+    outcomeFromStage2 = BOOKING_STATUS_DICT['запись состоялась'].call_outcome;
   } else if (rawBooking.includes('отсроч')) {
-    bookingStatus = 'консультация';
-    outcomeFromStage2 = 'перезвон';
+    bookingStatus = BOOKING_STATUS_DICT['отсрочка'].booking_status;
+    outcomeFromStage2 = BOOKING_STATUS_DICT['отсрочка'].call_outcome;
   } else if (rawBooking.includes('отказ') || rawOutcome === 'отказ') {
-    bookingStatus = 'отказ';
-    outcomeFromStage2 = 'отказ';
+    bookingStatus = BOOKING_STATUS_DICT['отказ'].booking_status;
+    outcomeFromStage2 = BOOKING_STATUS_DICT['отказ'].call_outcome;
+  } else if (rawBooking.includes('не применим')) {
+    bookingStatus = BOOKING_STATUS_DICT['не применимо'].booking_status;
+    outcomeFromStage2 = BOOKING_STATUS_DICT['не применимо'].call_outcome;
   } else if (rawBooking.includes('консультац')) {
-    bookingStatus = 'консультация';
-    outcomeFromStage2 = 'консультация';
+    bookingStatus = BOOKING_STATUS_DICT['консультация'].booking_status;
+    outcomeFromStage2 = BOOKING_STATUS_DICT['консультация'].call_outcome;
   } else if (rawOutcome === 'запись') {
-    bookingStatus = 'согласие';
-    outcomeFromStage2 = 'запись';
+    bookingStatus = BOOKING_STATUS_DICT['запись состоялась'].booking_status;
+    outcomeFromStage2 = BOOKING_STATUS_DICT['запись состоялась'].call_outcome;
   } else {
-    bookingStatus = 'консультация';
+    bookingStatus = BOOKING_STATUS_DICT['консультация'].booking_status;
+    outcomeFromStage2 = BOOKING_STATUS_DICT['консультация'].call_outcome;
   }
+
+  // Если менеджер подтверждает существующую запись («вы записаны на/к...») и клиент подтверждает визит или предупреждает об опоздании — это «Запись состоялась»
+  const isExistingBookingConfirmation =
+    /(?:вы\s+записаны\s+(?:на|к)|ваша\s+запись\s+(?:на|к)|напомина(?:ем|ю)\s+о\s+(?:вашей\s+)?записи)/iu.test(dialogueCtx.cleanTranscript) &&
+    !/(?:отмен[а-яё]*\s+запис|не\s+смогу\s+прийти|не\s+приду)/iu.test(dialogueCtx.cleanTranscript);
 
   // Защита от ложного статуса «согласие» на основе IVR или при явном отказе/опоздании/партнёрском звонке,
   // а также восстановление статуса «согласие», если в конце стенограммы запись подтверждена («записали вас», «запись подтвердили»)
   if (dialogueCtx.isUnavailableServiceRefusal || dialogueCtx.isDeclined) {
     bookingStatus = 'отказ';
-  } else if (dialogueCtx.isLateWarning || dialogueCtx.isNonClient) {
+  } else if (dialogueCtx.isNonClient) {
     bookingStatus = 'консультация';
-  } else if (dialogueCtx.isConfirmedBooking) {
+  } else if (dialogueCtx.isLateWarning) {
+    bookingStatus = (isExistingBookingConfirmation && bookingStatus === 'согласие') ? 'согласие' : 'консультация';
+  } else if (dialogueCtx.isConfirmedBooking || (isExistingBookingConfirmation && bookingStatus === 'согласие')) {
     bookingStatus = 'согласие';
   } else if (bookingStatus === 'согласие' && !dialogueCtx.isRescheduleOrCheck) {
     bookingStatus = 'консультация';
   }
 
-  const validOutcomes = ['запись', 'отказ', 'консультация', 'перезвон', 'отмена'];
+  const validOutcomes = ['запись', 'отказ', 'консультация', 'перезвон', 'отмена', 'не состоялся'];
   let outcome = outcomeFromStage2 || (validOutcomes.includes(rawOutcome) ? rawOutcome : 'консультация');
   if (bookingStatus === 'согласие') {
     outcome = 'запись';
+  } else if (bookingStatus === 'не применимо') {
+    outcome = 'не состоялся';
   } else if (bookingStatus === 'отказ' && outcome !== 'отмена') {
     outcome = 'отказ';
-  } else if (dialogueCtx.isLateWarning || dialogueCtx.isNonClient) {
+  } else if (dialogueCtx.isNonClient || (dialogueCtx.isLateWarning && !(isExistingBookingConfirmation && bookingStatus === 'согласие'))) {
     outcome = 'консультация';
   } else if (rawBooking.includes('отсроч')) {
     outcome = 'перезвон';
+  } else if (bookingStatus === 'консультация' && outcome === 'запись') {
+    outcome = 'консультация';
   }
 
   const fullTranscript = formattedTranscript || originalTranscript || '';
@@ -1774,12 +1809,24 @@ export function parseGigaChatJson(text: string, customSalonName?: string, origin
 
   // Оценка звонка по 10 критериям (принимает как criteria_scores[], так и audit.criteria[])
   let rawCriteria: any[] = Array.isArray(parsed.criteria_scores)
-    ? parsed.criteria_scores
+    ? parsed.criteria_scores.map((c: any) => ({
+        ...c,
+        id: mapAuditCriterionId(c?.id || c?.name || '') || normalizeCriterionId(c?.id),
+      }))
     : Array.isArray(parsed.evaluation?.criteria)
-    ? parsed.evaluation.criteria
+    ? parsed.evaluation.criteria.map((c: any) => ({
+        ...c,
+        id: mapAuditCriterionId(c?.id || c?.name || '') || normalizeCriterionId(c?.id),
+      }))
     : Array.isArray(rawAudit?.criteria)
     ? rawAudit.criteria.map((c: any) => {
         const mappedId = mapAuditCriterionId(c?.id || c?.name || '');
+        const canonicalDef = mappedId
+          ? EVALUATION_CRITERIA_DEFINITIONS.find(d => d.id === mappedId)
+          : undefined;
+        const russianName =
+          canonicalDef?.name ||
+          (typeof c?.name === 'string' && /[а-яё]/i.test(c.name) ? c.name.trim() : c?.name);
         const quoteStr = c?.quote && String(c.quote).trim();
         const isValidQuote =
           quoteStr &&
@@ -1793,8 +1840,8 @@ export function parseGigaChatJson(text: string, customSalonName?: string, origin
             ? Boolean(c.is_applicable)
             : c?.score !== null;
         return {
-          id: mappedId || c?.id,
-          name: c?.name,
+          id: mappedId || normalizeCriterionId(c?.id),
+          name: russianName,
           score: applicable ? c?.score : null,
           is_applicable: applicable,
           explanation: c?.reasoning || c?.explanation || '',
@@ -1899,9 +1946,13 @@ export function parseGigaChatJson(text: string, customSalonName?: string, origin
       modelStepsStr.includes('онлайн-запись'));
 
   const modelBookedTextLower = String(modelStruct.booking_status_text || '').toLowerCase();
+  const isPriorBookingConfirmPhrase = modelBookedTextLower.includes('подтверждение ранее сделанной записи');
   const hasContradictoryBookedText =
-    (dialogueCtx.isConfirmedBooking && /(?:не оформлял|не состоял|консультац)/i.test(modelBookedTextLower)) ||
+    ((dialogueCtx.isConfirmedBooking || bookingStatus === 'согласие') &&
+      !isPriorBookingConfirmPhrase &&
+      /(?:не оформлял|не состоял|консультац)/i.test(modelBookedTextLower)) ||
     (!dialogueCtx.isConfirmedBooking &&
+      bookingStatus !== 'согласие' &&
       !dialogueCtx.isRescheduleOrCheck &&
       /(?:запись оформлена|записан|подтверждена|запись состоялась)/i.test(modelBookedTextLower));
 
@@ -2368,7 +2419,6 @@ ${call.transcript}
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`
           },
-          httpsAgent,
           timeout: 60000
         }
       );
@@ -2568,7 +2618,6 @@ export async function clarifyCallContextWithGigaChat({
               Authorization: `Bearer ${token}`,
               'Content-Type': 'application/json'
             },
-            httpsAgent,
             timeout: 60000
           }
         );

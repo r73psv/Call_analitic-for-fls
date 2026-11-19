@@ -4,14 +4,9 @@
  */
 
 import axios from 'axios';
-import https from 'https';
 import { getYandexAuthHeader, getYandexFolderId, isYandexAuthConfigured } from './yandex-auth.js';
 import { getGigaChatToken, isGigaChatConfigured } from './gigachat-auth.js';
 import { CallRecord, ContextClarification, TokenUsage } from '../types.js';
-
-const httpsAgent = new https.Agent({
-  rejectUnauthorized: false,
-});
 
 export interface ClarifyContextParams {
   call: CallRecord;
@@ -110,7 +105,6 @@ async function queryYandexGPTApi(
       'Content-Type': 'application/json',
       'x-folder-id': folderId
     },
-    httpsAgent,
     timeout: 60000
   });
 
@@ -157,7 +151,6 @@ async function queryGigaChatFallback(
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json'
       },
-      httpsAgent,
       timeout: 60000
     }
   );

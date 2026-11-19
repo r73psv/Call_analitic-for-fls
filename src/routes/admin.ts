@@ -5,7 +5,6 @@
 
 import { Router, Request, Response } from 'express';
 import axios from 'axios';
-import https from 'https';
 import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import path from 'path';
@@ -573,8 +572,6 @@ adminRouter.post('/test/gigachat', async (req: Request, res: Response) => {
       ? authKey
       : `Basic ${authKey}`;
 
-    const httpsAgent = new https.Agent({ rejectUnauthorized: false });
-
     const authRes = await axios.post(
       'https://ngw.devices.sberbank.ru:9443/api/v2/oauth',
       `scope=${encodeURIComponent(scope)}`,
@@ -585,7 +582,6 @@ adminRouter.post('/test/gigachat', async (req: Request, res: Response) => {
           Accept: 'application/json',
           RqUID: randomUUID(),
         },
-        httpsAgent,
         timeout: 15000,
       }
     );
