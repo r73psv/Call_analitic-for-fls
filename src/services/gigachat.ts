@@ -115,23 +115,81 @@ export async function getCrmMastersList(): Promise<string[]> {
   return list;
 }
 
-export function getSystemPrompt(customSalonName?: string, mastersList?: string[]): string {
+const DEFAULT_SALON_TIMEZONE = 'Europe/Samara';
+const DEFAULT_SALON_TZ_OFFSET_HOURS = 4;
+
+/**
+ * Форматирует timestamp звонка в часовом поясе салона: «ДД.ММ.ГГГГ ЧЧ:ММ, часовой пояс салона».
+ */
+export function formatCallDateTimeInSalonTz(timestamp?: string | Date): string | null {
+  if (!timestamp) return null;
+  const tz = (process.env.SALON_TIMEZONE || DEFAULT_SALON_TIMEZONE).trim();
+  const tzLabel = tz === 'Europe/Samara' ? 'Europe/Samara, UTC+4' : tz;
+
+  if (typeof timestamp === 'string') {
+    const trimmed = timestamp.trim();
+    if (!trimmed) return null;
+    // Если уже передана человекочитаемая строка формата ДД.ММ.ГГГГ ЧЧ:ММ
+    if (/^\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}/.test(trimmed)) {
+      return trimmed.includes('UTC') || trimmed.includes(tz) ? trimmed : `${trimmed}, ${tzLabel}`;
+    }
+  }
+
+  const parsedDate = timestamp instanceof Date ? timestamp : new Date(timestamp);
+  if (isNaN(parsedDate.getTime())) {
+    return typeof timestamp === 'string' && timestamp.trim() ? `${timestamp.trim()}, ${tzLabel}` : null;
+  }
+
+  try {
+    const parts = new Intl.DateTimeFormat('ru-RU', {
+      timeZone: tz,
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(parsedDate);
+    const getPart = (type: string) => parts.find((p) => p.type === type)?.value || '00';
+    const day = getPart('day');
+    const month = getPart('month');
+    const year = getPart('year');
+    const hour = getPart('hour');
+    const minute = getPart('minute');
+    return `${day}.${month}.${year} ${hour}:${minute}, ${tzLabel}`;
+  } catch {
+    const shifted = new Date(parsedDate.getTime() + DEFAULT_SALON_TZ_OFFSET_HOURS * 60 * 60 * 1000);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${pad(shifted.getUTCDate())}.${pad(shifted.getUTCMonth() + 1)}.${shifted.getUTCFullYear()} ${pad(shifted.getUTCHours())}:${pad(shifted.getUTCMinutes())}, Europe/Samara, UTC+4`;
+  }
+}
+
+export function buildCallMetadataBlock(callTimestamp?: string | Date): string {
+  const formatted = formatCallDateTimeInSalonTz(callTimestamp);
+  const dtValue = formatted || 'не указано (часовой пояс салона: Europe/Samara, UTC+4)';
+  return `МЕТАДАННЫЕ ЗВОНКА: дата и время звонка — ${dtValue}. Используй эти данные для интерпретации относительных слов стенограммы («сегодня», «завтра», «через N минут», «уже»): определяй, произошёл ли звонок до или после времени визита.`;
+}
+
+export function getSystemPrompt(customSalonName?: string, mastersList?: string[], callTimestamp?: string | Date): string {
   const salon = customSalonName || process.env.SALON_NAME || 'Fashion Look Studio';
   const effectiveMasters =
     Array.isArray(mastersList) && mastersList.length > 0 ? mastersList : FALLBACK_SALON_MASTERS;
   const mastersBlock = effectiveMasters.join(', ');
+  const metadataBlock = callTimestamp ? `\n${buildCallMetadataBlock(callTimestamp)}\n` : '';
 
   return `Ты — аудитор телефонных звонков салона красоты «${salon}». Ты работаешь строго по стенограмме. Ни одного факта вне стенограммы.
-
+${metadataBlock}
 [СПИСОК МАСТЕРОВ]
 Актуальный список мастеров салона: ${mastersBlock}.
 Если имя мастера в стенограмме искажено распознаванием речи (например, «уволюовой Татьяны»), сопоставь с этим списком (Татьяна Валиулова) и укажи примечание в поле note. Выдумывать других мастеров вне стенограммы и этого списка ЗАПРЕЩЕНО.
 
 === ЭТАП 1. ИЗВЛЕЧЕНИЕ ФАКТОВ ===
 Выпиши КАЖДЫЙ факт, релевантный резюме, в JSON. Каждому факту — точная дословная цитата из стенограммы. Факт без цитаты не существует.
+Различай ДВА времени: (а) время самого звонка — из метаданных, (б) дата и время визита/записи — из стенограммы. Сопоставляй их: звонок ДО визита, ВО ВРЕМЯ визита или ПОСЛЕ наступления времени визита.
 Мастера извлекай ТОЛЬКО из фраз менеджера вида "записаны к <Имя>", "запись к <Имя>", "у мастера <Имя>". Глаголы и слова клиента о движении ("иду", "идём", "приду", "еду", "подойду") — НЕ имена мастеров, в поле master их запрещено записывать. Если менеджер назвал мастера, а клиент произнёс глагол "иду" — мастером является имя из фразы менеджера.
 
 {
+  "call_datetime": "ДД.ММ.ГГГГ ЧЧ:ММ (из метаданных звонка)",
   "client_name": {"value": "...", "quote": "..."},
   "desired_service": {"value": "услуга или 'не озвучено'", "quote": "..."},
   "master": {"value": "имя или 'не озвучено'", "quote": "...", "note": "если имя в стенограмме искажено"},
@@ -168,6 +226,11 @@ export function getSystemPrompt(customSalonName?: string, mastersList?: string[]
 ЗАПРЕЩЕНО домысливать услуги, имена, цены, причины, отсутствующие в ЭТАПЕ 1.
 Время всегда приводи к формату ЧЧ:ММ (например, «в 10 подойдёте?» -> «10:00», «15 0 0» -> «15:00»).
 
+ПРАВИЛА ДЛЯ manager_next_steps В ЗАВИСИМОСТИ ОТ СООТНОШЕНИЯ ВРЕМЁН (время звонка из метаданных vs время визита из стенограммы):
+- Запись только что оформлена или подтверждена заранее (звонок за часы/дни до визита): допустимы «зафиксировать бронь», «подтверждение клиенту», «напоминание за 24 часа».
+- Звонок-подтверждение существующей записи в день визита: вместо «зафиксировать бронь» пиши «проверить/подтвердить существующую бронь в CRM»; напоминание за 24 часа не указывать — окно прошло.
+- Звонок ПОСЛЕ наступления времени визита или клиент уже в пути («иду», «буду через N минут»): шаги вида «сообщить мастеру <Имя> о скором прибытии клиента», «уточнить, до какого времени удерживается слот при опоздании», «отметить опоздание в карточке клиента, если клиент не явился вовремя». Фразы «напомнить за 24 часа» и «зафиксировать новую бронь» в таких случаях ЗАПРЕЩЕНЫ.
+
 === ЭТАП 4. АУДИТ МЕНЕДЖЕРА ===
 Оценивай по 10 критериям от 0 до 10 баллов (применимость определяй строго по диалогу; неприменимые критерии отмечай applicable: false и score: null):
 1. Приветствие и представление
@@ -187,11 +250,13 @@ export function getSystemPrompt(customSalonName?: string, mastersList?: string[]
 Правило по возражениям и альтернативам: если не было отказа или несогласия по времени/цене, критерии 5 и 8 имеют applicable: false, score: null.
 Критерий 8 (альтернативы) применим ТОЛЬКО если в диалоге был отказ или несогласие клиента по времени/цене/услуге. Если клиент подтвердил или согласился — критерий 8 не применим.
 Критерий 9 (закрытие на запись): если запись подтверждена — оценка 9–10, а не 5; формулировка "визит не согласован" при подтверждённой записи запрещена.
+Контекст опоздания: если клиент предупреждает об опоздании на уже существующую запись — менеджер действует корректно (уточняет время прибытия, подтверждает ожидание). Не снижать оценки за «отсутствие альтернатив» или «незакрытую запись»: цель звонка — уведомление, и она достигнута.
 
 ЗАПРЕЩЕНО:
 - Писать "не представился", если в приветствии звучали приветствие + имя клиента или название салона.
 - Писать "менеджер не переспросил про...", если клиент сам завершил тему.
 - Ставить оценку 5 или формулировку "визит не согласован" по критерию 9 (закрытие на запись), если запись подтверждена — в этом случае оценка должна быть 9–10.
+- Снижать оценки за «отсутствие альтернатив» или «незакрытую запись», если клиент предупреждает об опоздании на уже существующую запись и менеджер подтвердил ожидание.
 - Признавать критерий 8 (альтернативы) применимым, если клиент подтвердил или согласился и не было отказа/несогласия по времени/цене/услуге.
 - Придумывать ошибки и советы про SMS/автоподтверждения или допродажи, если диалог короткий/подтверждающий или для этого не было основания в стенограмме.
 - Копировать шаблонные фразы из примеров.
@@ -202,6 +267,7 @@ export function getSystemPrompt(customSalonName?: string, mastersList?: string[]
   "is_conversation": true,
   "formatted_transcript": "Менеджер: ...\\nКлиент: ...",
   "facts": {
+    "call_datetime": "ДД.ММ.ГГГГ ЧЧ:ММ (из метаданных звонка)",
     "client_name": {"value": "имя или 'не озвучено'", "quote": "точная цитата или null"},
     "desired_service": {"value": "услуга или 'не озвучено'", "quote": "точная цитата или null"},
     "master": {"value": "имя из [СПИСОК МАСТЕРОВ] / стенограммы или 'не озвучено'", "quote": "точная цитата или null", "note": ""},
@@ -219,7 +285,7 @@ export function getSystemPrompt(customSalonName?: string, mastersList?: string[]
     "date_time": "дата и время (ЧЧ:ММ) или 'не озвучено'",
     "booking_done": "итоговый статус записи строго по фактам...",
     "reason_if_not": "причина если не состоялась или 'не применимо'",
-    "manager_next_steps": ["конкретный шаг 1 строго по диалогу"],
+    "manager_next_steps": ["конкретный шаг 1 строго по диалогу и времени звонка"],
     "short_summary": "Суть обращения + краткий фактологический пересказ (2–6 предложений по этапам диалога) + фактический вывод.",
     "quotes_support": ["точная цитата 1 из стенограммы", "точная цитата 2"]
   },
@@ -456,6 +522,63 @@ export const FEW_SHOT_EDGE_CASES = `
     "mistakes": []
   },
   "recommendations": ["Уточнять вид окрашивания и длину волос перед перезвоном для расчёта времени."],
+  "missed_opportunities": []
+}
+
+ПРИМЕР 6 (звонок-подтверждение с опозданием — звонок ПОСЛЕ наступления времени визита)
+Метаданные: дата и время звонка — сегодня ~17:45 (часовой пояс салона: Europe/Samara, UTC+4); время визита по стенограмме — 17:40 (звонок произошёл ПОСЛЕ наступления времени визита).
+Транскрипт: "Менеджер: Добрый день, Олег. Салон красоты «Фешен лук студио». Вы записаны к Екатерине сегодня на 17:40, уточняем, вы подойдёте? Клиент: Да, добрый день, извините, немного задерживаюсь, уже иду к вам, буду через 5 минут. Менеджер: Хорошо, Олег, спасибо, что предупредили! Будем ожидать вас. Клиент: Спасибо, скоро буду."
+Ответ:
+{
+  "is_conversation": true,
+  "formatted_transcript": "Менеджер: Добрый день, Олег. Салон красоты «Фешен лук студио». Вы записаны к Екатерине сегодня на 17:40, уточняем, вы подойдёте?\\nКлиент: Да, добрый день, извините, немного задерживаюсь, уже иду к вам, буду через 5 минут.\\nМенеджер: Хорошо, Олег, спасибо, что предупредили! Будем ожидать вас.\\nКлиент: Спасибо, скоро буду.",
+  "facts": {
+    "call_datetime": "сегодня 17:45 (из метаданных звонка; звонок ПОСЛЕ времени визита 17:40)",
+    "client_name": {"value": "Олег", "quote": "Добрый день, Олег."},
+    "desired_service": {"value": "не озвучено", "quote": null},
+    "master": {"value": "Екатерина", "quote": "Вы записаны к Екатерине сегодня на 17:40", "note": ""},
+    "prices_mentioned": [],
+    "date_time_offered": {"value": "сегодня 17:40 (прибытие через 5 минут)", "quote": "Вы записаны к Екатерине сегодня на 17:40"},
+    "booking_markers": [
+      {"value": "Вы записаны к Екатерине сегодня на 17:40", "quote": "Вы записаны к Екатерине сегодня на 17:40"},
+      {"value": "уже иду к вам, буду через 5 минут.", "quote": "уже иду к вам, буду через 5 минут."},
+      {"value": "Будем ожидать вас.", "quote": "Будем ожидать вас."}
+    ],
+    "greeting_check": {"greeted": true, "addressed_client_by_name": true, "named_salon": true, "named_self": false, "quote": "Добрый день, Олег. Салон красоты «Фешен лук студио»."}
+  },
+  "booking_status": "Запись состоялась",
+  "summary": {
+    "goal": "Уточнение прибытия клиента и подтверждение существующей записи на 17:40 к Екатерине",
+    "service": "не озвучено",
+    "master": "Екатерина",
+    "price": "не озвучено",
+    "date_time": "сегодня 17:40",
+    "booking_done": "Подтверждение ранее сделанной записи",
+    "reason_if_not": "не применимо",
+    "manager_next_steps": [
+      "Сообщить мастеру Екатерине о прибытии клиента в ближайшие минуты",
+      "Уточнить предел удержания слота на случай опоздания"
+    ],
+    "short_summary": "Суть обращения: услуга — не озвучено, дата — сегодня, время — 17:40, мастер — Екатерина. Пересказ диалога: Администратор позвонил клиенту Олегу около 17:45 по поводу существующей записи к мастеру Екатерине на 17:40. Клиент предупредил об опоздании, сообщил, что уже в пути и подойдёт через 5 минут. Менеджер поблагодарил за уведомление и подтвердил ожидание. Вывод: Подтверждение ранее сделанной записи — клиент предупредил об опоздании, менеджер подтвердил ожидание.",
+    "quotes_support": ["Вы записаны к Екатерине сегодня на 17:40, уточняем, вы подойдёте?", "уже иду к вам, буду через 5 минут.", "Будем ожидать вас."]
+  },
+  "audit": {
+    "criteria": [
+      {"name": "Приветствие и представление", "score": 10, "applicable": true, "reasoning": "Вежливое приветствие с обращением по имени Олег и названием салона.", "quote": "Добрый день, Олег. Салон красоты «Фешен лук студио»."},
+      {"name": "Выявление потребности гостя", "score": null, "applicable": false, "reasoning": "Звонок-уведомление по уже существующей записи.", "quote": "не применимо"},
+      {"name": "Презентация услуги и мастера", "score": null, "applicable": false, "reasoning": "Услуга и мастер были согласованы ранее.", "quote": "не применимо"},
+      {"name": "Корректная презентация стоимости", "score": null, "applicable": false, "reasoning": "Стоимость не озвучивалась.", "quote": "не применимо"},
+      {"name": "Работа с возражениями", "score": null, "applicable": false, "reasoning": "Возражений не было.", "quote": "не применимо"},
+      {"name": "Предложение дополнительных услуг", "score": null, "applicable": false, "reasoning": "Короткий оперативный звонок по опозданию.", "quote": "не применимо"},
+      {"name": "Предложение параллельной записи", "score": null, "applicable": false, "reasoning": "Не применимо к звонку-уведомлению об опоздании.", "quote": "не применимо"},
+      {"name": "Предложение альтернативных вариантов", "score": null, "applicable": false, "reasoning": "Клиент подтвердил скорое прибытие на свой слот, отказа не было.", "quote": "не применимо"},
+      {"name": "Закрытие на запись", "score": 10, "applicable": true, "reasoning": "Менеджер уточнил время прибытия и корректно подтвердил ожидание по существующей записи — цель звонка достигнута.", "quote": "Будем ожидать вас."},
+      {"name": "Качество коммуникации и завершение разговора", "score": 10, "applicable": true, "reasoning": "Доброжелательный тон, корректная реакция на предупреждение об опоздании.", "quote": "Хорошо, Олег, спасибо, что предупредили! Будем ожидать вас."}
+    ],
+    "overall_score": 10,
+    "mistakes": []
+  },
+  "recommendations": ["Оперативно предупредить мастера Екатерину о задержке клиента на 5 минут."],
   "missed_opportunities": []
 }
 `;
@@ -706,11 +829,12 @@ export async function analyzeWithRetry(
   onLog?: GigaChatLogCallback,
   callDurationSeconds?: number,
   customSalonName?: string,
-  customSystemPrompt?: string
+  customSystemPrompt?: string,
+  callTimestamp?: string
 ): Promise<AnalysisResult> {
   const modelName = model || 'GigaChat:Lite';
   return gigaChatQueue.enqueue(async () => {
-    return executeWithExponentialBackoff(transcript, modelName, onLog, callDurationSeconds, customSalonName, customSystemPrompt);
+    return executeWithExponentialBackoff(transcript, modelName, onLog, callDurationSeconds, customSalonName, customSystemPrompt, callTimestamp);
   }, `Анализ транскрипта (${modelName})`);
 }
 
@@ -720,13 +844,14 @@ async function executeWithExponentialBackoff(
   onLog?: GigaChatLogCallback,
   callDurationSeconds?: number,
   customSalonName?: string,
-  customSystemPrompt?: string
+  customSystemPrompt?: string,
+  callTimestamp?: string
 ): Promise<AnalysisResult> {
   let lastError: any = null;
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      return await analyzeWithGigaChat(transcript, model, callDurationSeconds, customSalonName, customSystemPrompt);
+      return await analyzeWithGigaChat(transcript, model, callDurationSeconds, customSalonName, customSystemPrompt, callTimestamp);
     } catch (error: any) {
       lastError = error;
       const status = error.response?.status;
@@ -793,7 +918,8 @@ export async function analyzeWithGigaChat(
   modelOverride?: GigaChatModel,
   callDurationSeconds?: number,
   customSalonName?: string,
-  customSystemPrompt?: string
+  customSystemPrompt?: string,
+  callTimestamp?: string
 ): Promise<AnalysisResult> {
   const model: GigaChatModel = modelOverride || (process.env.GIGACHAT_DEFAULT_MODEL as GigaChatModel) || 'GigaChat:Lite';
 
@@ -809,17 +935,28 @@ export async function analyzeWithGigaChat(
   }
 
   const token = await getGigaChatToken();
-  console.log(`[GigaChat] Анализ моделью: ${model} (длительность звонка: ${callDurationSeconds ?? 'не указана'} сек.)`);
+  const formattedCallDateTime = formatCallDateTimeInSalonTz(callTimestamp);
+  console.log(
+    `[GigaChat] Анализ моделью: ${model} (длительность звонка: ${callDurationSeconds ?? 'не указана'} сек., время звонка: ${formattedCallDateTime || 'не указано'})`
+  );
 
   const gigachatApiUrl = process.env.GIGACHAT_API_URL || 'https://gigachat.devices.sberbank.ru/api/v1/chat/completions';
 
-  // Системная часть: кастомный системный промпт из настроек администратора (если задан), иначе дефолтный шаблон с актуальным списком мастеров из CRM
+  // Системная часть: кастомный системный промпт из настроек администратора (если задан), иначе дефолтный шаблон с актуальным списком мастеров из CRM.
+  // В обоих случаях добавляем блок МЕТАДАННЫЕ ЗВОНКА с датой и временем звонка в часовом поясе салона.
+  const metadataBlock = buildCallMetadataBlock(callTimestamp);
   let systemPromptContent: string;
   if (customSystemPrompt && customSystemPrompt.trim().length > 30) {
-    systemPromptContent = customSystemPrompt.trim();
+    const trimmedCustom = customSystemPrompt.trim();
+    systemPromptContent = trimmedCustom.includes('МЕТАДАННЫЕ ЗВОНКА:')
+      ? trimmedCustom
+      : `${trimmedCustom}\n\n${metadataBlock}`;
   } else {
     const crmMasters = await getCrmMastersList();
-    systemPromptContent = getSystemPrompt(customSalonName, crmMasters);
+    systemPromptContent = getSystemPrompt(customSalonName, crmMasters, callTimestamp);
+    if (!systemPromptContent.includes('МЕТАДАННЫЕ ЗВОНКА:')) {
+      systemPromptContent = `${systemPromptContent}\n\n${metadataBlock}`;
+    }
   }
   const messages = [
     { role: 'system', content: systemPromptContent },
@@ -851,7 +988,7 @@ export async function analyzeWithGigaChat(
   // Пытаемся распарсить JSON, при неудаче — просим модель исправить формат.
   let draft: AnalysisResult;
   try {
-    draft = parseGigaChatJson(rawContent, customSalonName, transcript);
+    draft = parseGigaChatJson(rawContent, customSalonName, transcript, callTimestamp);
   } catch (parseErr) {
     console.warn('[GigaChat] Первый парсинг JSON не удался, отправка запроса на исправление формата...');
     const retryRes = await axios.post(
@@ -876,7 +1013,7 @@ export async function analyzeWithGigaChat(
     );
 
     const retryContent = retryRes.data.choices?.[0]?.message?.content || '';
-    draft = parseGigaChatJson(retryContent, customSalonName, transcript);
+    draft = parseGigaChatJson(retryContent, customSalonName, transcript, callTimestamp);
   }
 
   // Второй независимый проход верификации (Pass 2): проверяет ТОЛЬКО стенограмму и черновик
@@ -1494,7 +1631,12 @@ function cleanFactValue(val: unknown): string | null {
  * Разбирает ответ модели (поддерживает как новую 4-этапную схему { facts, booking_status, summary, audit },
  * так и совместимую плоскую схему), программно проверяет цитаты и возвращает согласованный AnalysisResult.
  */
-export function parseGigaChatJson(text: string, customSalonName?: string, originalTranscript?: string): AnalysisResult {
+export function parseGigaChatJson(
+  text: string,
+  customSalonName?: string,
+  originalTranscript?: string,
+  callTimestamp?: string
+): AnalysisResult {
   const salon = customSalonName || process.env.SALON_NAME || 'Fashion Look Studio';
   // Явно вырезаем markdown-обёртки ```json / ``` перед JSON.parse
   let clean = (text || '')
@@ -2113,6 +2255,11 @@ export function parseGigaChatJson(text: string, customSalonName?: string, origin
         parsed.key_facts?.client_issue ||
         cleanFactValue(rawSummaryObj?.goal) ||
         (essence.service ? `Запись на ${essence.service}` : `Обращение в салон «${salon}»`),
+      call_datetime:
+        (typeof parsed.facts?.call_datetime === 'string' && parsed.facts.call_datetime.trim()) ||
+        (typeof parsed.facts?.call_datetime?.value === 'string' && parsed.facts.call_datetime.value.trim()) ||
+        formatCallDateTimeInSalonTz(callTimestamp) ||
+        null,
       service: essence.service,
       date: essence.date,
       time: essence.time,

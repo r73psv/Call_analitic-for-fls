@@ -171,6 +171,7 @@ export interface KeyFacts {
   booking_status?: 'согласие' | 'отказ' | 'консультация' | 'не применимо' | string;
   client_issue?: string;
   // Суть обращения: услуга, дата, время, мастер
+  call_datetime?: string | null;
   service?: string | null;
   date?: string | null;
   time?: string | null;
@@ -509,6 +510,7 @@ export interface AnalysisResult {
     call_outcome: string;
     booking_status?: 'согласие' | 'отказ' | 'консультация' | 'не применимо' | string;
     client_issue: string | null;
+    call_datetime?: string | null;
     service?: string | null;
     date?: string | null;
     time?: string | null;

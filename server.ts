@@ -765,7 +765,8 @@ function isTechnicalErrorResult(res: Partial<CallRecord>): boolean {
 async function executeSingleModelAttempt(
   model: ModelType | GigaChatModel,
   cleanTranscript: string,
-  _audioBase64?: { data: string; mimeType: string }
+  _audioBase64?: { data: string; mimeType: string },
+  callTimestamp?: string
 ): Promise<{ success: boolean; result?: Partial<CallRecord>; errorReason?: string }> {
   try {
     const anonymizedText = anonymizeTranscript(cleanTranscript);
@@ -777,7 +778,7 @@ async function executeSingleModelAttempt(
     const salonName = getEffectiveSalonName(db.config);
     const customPrompt = db.config?.customSystemPrompt || db.config?.credentials?.customSystemPrompt;
     appendLog('info', 'gigachat', `Отправка запроса на анализ в модель ${gigaModel} (салон «${salonName}»)...`);
-    const analysis = await analyzeWithRetry(anonymizedText, gigaModel, (type, msg) => appendLog(type, 'gigachat', msg), undefined, salonName, customPrompt);
+    const analysis = await analyzeWithRetry(anonymizedText, gigaModel, (type, msg) => appendLog(type, 'gigachat', msg), undefined, salonName, customPrompt, callTimestamp);
     appendLog('success', 'gigachat', `Звонок успешно проанализирован моделью ${gigaModel}. [Summary source: ${analysis.summary_source || 'model'}]`);
     return {
       success: true,
@@ -821,7 +822,8 @@ async function analyzeCallTextOrAudio(
   audioBase64?: { data: string; mimeType: string },
   audioDownloadFailed: boolean = false,
   callDurationSeconds?: number,
-  sttProviderOverride?: SttProvider
+  sttProviderOverride?: SttProvider,
+  callTimestamp?: string
 ): Promise<Partial<CallRecord>> {
   let cleanTranscript = (transcriptInput || '').trim();
   let usedTranscriptionEngine: string | undefined;
@@ -1025,7 +1027,8 @@ async function analyzeCallTextOrAudio(
       (type, msg) => appendLog(type, 'gigachat', msg),
       callDurationSeconds,
       currentSalon,
-      customPrompt
+      customPrompt,
+      callTimestamp
     );
     appendLog('success', 'gigachat', `Анализ звонка успешно выполнен моделью ${modelToUse}. [Summary source: ${analysis.summary_source || 'model'}]`);
     return {
@@ -2527,7 +2530,9 @@ async function importCallRecord(extCall: any): Promise<boolean> {
           extCall.transcript,
           audioBase64,
           audioDownloadFailed,
-          extCall.duration_seconds
+          extCall.duration_seconds,
+          undefined,
+          extCall.timestamp
         );
 
         const updatedDb = readDb();
@@ -4247,7 +4252,7 @@ app.post('/api/calls/webhook', async (req, res) => {
         const gModel = (db.config.default_gigachat_model || 'GigaChat:Lite') as GigaChatModel;
         const currentSalon = getEffectiveSalonName(db.config);
         const customPrompt = db.config?.customSystemPrompt || db.config?.credentials?.customSystemPrompt;
-        const analysis = await analyzeWithRetry(payload.transcript, gModel, undefined, undefined, currentSalon, customPrompt);
+        const analysis = await analyzeWithRetry(payload.transcript, gModel, undefined, undefined, currentSalon, customPrompt, newCall.timestamp);
         if (analysis) {
           newCall.summary = analysis.transcript_summary || newCall.summary;
           newCall.booking_status = analysis.booking_status || newCall.booking_status;
@@ -4638,7 +4643,8 @@ app.post('/api/calls/analyze', async (req, res) => {
       audioBase64,
       false,
       durationSec,
-      sttOverride
+      sttOverride,
+      newCall.timestamp
     );
 
     // Update in Db
@@ -4859,7 +4865,8 @@ async function performCallReanalysis(
       audioBase64 || undefined,
       audioDownloadFailed,
       call.duration_seconds,
-      options?.sttProvider
+      options?.sttProvider,
+      call.timestamp
     );
 
     const finalDb = readDb();
@@ -5132,7 +5139,7 @@ app.post('/api/gigachat/test', async (req, res) => {
     const db = readDb();
     const salonName = getEffectiveSalonName(db.config);
     const customPrompt = db.config?.customSystemPrompt || db.config?.credentials?.customSystemPrompt;
-    const result = await analyzeWithRetry(testSample, targetModel, (type, msg) => appendLog(type, 'gigachat', msg), undefined, salonName, customPrompt);
+    const result = await analyzeWithRetry(testSample, targetModel, (type, msg) => appendLog(type, 'gigachat', msg), undefined, salonName, customPrompt, new Date().toISOString());
     appendLog('success', 'gigachat', `Тест подключения к GigaChat (${targetModel}) успешен!`);
     return res.json({
       success: true,
@@ -5577,7 +5584,7 @@ async function startServer() {
           const anonymized = anonymizeTranscript(call.transcript);
           const currentSalon = getEffectiveSalonName(db.config);
           const customPrompt = db.config?.customSystemPrompt || db.config?.credentials?.customSystemPrompt;
-          analyzeWithRetry(anonymized, 'GigaChat:Lite', (l, m) => console.log(`[GigaChat AutoSync] ${m}`), undefined, currentSalon, customPrompt)
+          analyzeWithRetry(anonymized, 'GigaChat:Lite', (l, m) => console.log(`[GigaChat AutoSync] ${m}`), call.duration_seconds, currentSalon, customPrompt, call.timestamp)
             .then(analysis => {
               const updatedDb = readDb();
               const idx = updatedDb.calls.findIndex((c: any) => c.call_id === 'megafon-real-84462946');
