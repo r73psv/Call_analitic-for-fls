@@ -679,6 +679,134 @@ export function extractCallEvaluation(
   return buildCallEvaluation(criteria);
 }
 
+const REMINDER_EVE_MISTAKE_REGEX =
+  /предварительн(?:ого|ом)?\s+напоминани|напоминани[еяий]\s+(?:о\s+визите\s+)?накануне|напоминани[еяий]\s+за\s+(?:24\s*час|день|сутки)|регламент(?:а)?\s+предварительного\s+напоминани/i;
+
+const RUSSIAN_MONTHS_GENITIVE: Record<string, number> = {
+  января: 1,
+  февраля: 2,
+  марта: 3,
+  апреля: 4,
+  мая: 5,
+  июня: 6,
+  июля: 7,
+  августа: 8,
+  сентября: 9,
+  октября: 10,
+  ноября: 11,
+  декабря: 12,
+};
+
+export function isReminderEveMistake(text: string): boolean {
+  return REMINDER_EVE_MISTAKE_REGEX.test(String(text || ''));
+}
+
+function getDatePartsInSalonTz(timestamp?: string | null): { year: number; month: number; day: number } | null {
+  if (!timestamp) return null;
+  const dt = new Date(timestamp);
+  if (isNaN(dt.getTime())) return null;
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Europe/Samara',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(dt);
+    const year = Number(parts.find(p => p.type === 'year')?.value);
+    const month = Number(parts.find(p => p.type === 'month')?.value);
+    const day = Number(parts.find(p => p.type === 'day')?.value);
+    if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+      return { year, month, day };
+    }
+  } catch {
+    // fallback to UTC+4
+  }
+  const shifted = new Date(dt.getTime() + 4 * 3600 * 1000);
+  return {
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth() + 1,
+    day: shifted.getUTCDate(),
+  };
+}
+
+/**
+ * Определяет, попадает ли время звонка (по метаданным и контексту визита)
+ * в день визита или после наступления времени визита — когда окно напоминаний накануне уже прошло.
+ */
+export function isCallOnOrAfterVisitDay(
+  callTimestamp?: string | null,
+  visitDateText?: string | null,
+  transcript?: string | null
+): boolean {
+  const visitLower = String(visitDateText || '').toLowerCase();
+  const transcriptLower = String(transcript || '').toLowerCase();
+
+  // 1. Явные маркеры визита сегодня / клиент уже в пути / опоздание
+  if (/(?:сегодня|сейчас|через\s+\d+\s*(?:мин|минут)|через\s+полчаса|уже\s+иду|уже\s+еду|опаздыва|в\s+пути)/i.test(visitLower)) {
+    return true;
+  }
+  if (
+    /(?:вы\s+записаны\s+(?:на\s+)?сегодня|запись\s+(?:на\s+)?сегодня|сегодня\s+(?:на|в)\s+\d{1,2}[:.]\d{2}|уже\s+иду|уже\s+еду|буду\s+через\s+\d+\s*(?:мин|минут)|подхожу|подъезжаю|опаздываю)/i.test(
+      transcriptLower
+    )
+  ) {
+    return true;
+  }
+
+  // 2. Сравнение календарной даты визита с датой звонка из метаданных (в часовом поясе салона UTC+4)
+  const callDate = getDatePartsInSalonTz(callTimestamp);
+  if (callDate && visitLower) {
+    // Формат ДД.ММ(.ГГГГ)
+    const dotMatch = visitLower.match(/\b([0-3]?\d)\.([01]?\d)(?:\.(\d{2,4}))?\b/);
+    if (dotMatch) {
+      const vDay = parseInt(dotMatch[1], 10);
+      const vMonth = parseInt(dotMatch[2], 10);
+      let vYear = callDate.year;
+      if (dotMatch[3]) {
+        const rawY = parseInt(dotMatch[3], 10);
+        vYear = rawY < 100 ? 2000 + rawY : rawY;
+      }
+      if (vMonth >= 1 && vMonth <= 12 && vDay >= 1 && vDay <= 31) {
+        const callKey = callDate.year * 10000 + callDate.month * 100 + callDate.day;
+        const visitKey = vYear * 10000 + vMonth * 100 + vDay;
+        if (visitKey <= callKey) return true;
+      }
+    }
+
+    // Формат "15 мая"
+    const wordMatch = visitLower.match(
+      /\b([0-3]?\d)\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\b/i
+    );
+    if (wordMatch) {
+      const vDay = parseInt(wordMatch[1], 10);
+      const vMonth = RUSSIAN_MONTHS_GENITIVE[wordMatch[2].toLowerCase()];
+      if (vMonth && vDay >= 1 && vDay <= 31) {
+        const callKey = callDate.month * 100 + callDate.day;
+        const visitKey = vMonth * 100 + vDay;
+        if (visitKey <= callKey) return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Удаляет устаревшие ошибки про напоминание накануне, если звонок произошёл в день визита или после него.
+ */
+export function filterOutdatedReminderMistakes(
+  mistakes: string[],
+  callTimestamp?: string | null,
+  visitDateText?: string | null,
+  transcript?: string | null
+): string[] {
+  if (!Array.isArray(mistakes) || mistakes.length === 0) return [];
+  if (!isCallOnOrAfterVisitDay(callTimestamp, visitDateText, transcript)) {
+    return mistakes;
+  }
+  return mistakes.filter((m) => !isReminderEveMistake(m));
+}
+
 /**
  * Синхронизирует список ошибок (mistakes) и советов (advice) с критериями оценки.
  * Гарантирует отсутствие противоречий и навязанных шаблонов, не относящихся к диалогу.
@@ -687,12 +815,15 @@ export function harmonizeMistakesAndEvaluation(
   inputMistakes: string[] = [],
   inputAdvice: string[] = [],
   evaluation: CallEvaluation,
-  transcript?: string
+  transcript?: string,
+  callTimestamp?: string | null,
+  visitDateText?: string | null
 ): {
   mistakes: string[];
   advice: string[];
 } {
   const ctx = transcript ? classifyCallContext(transcript) : null;
+  const reminderWindowPassed = isCallOnOrAfterVisitDay(callTimestamp, visitDateText, transcript);
   const criteriaMap = new Map<string, CallEvaluationCriterion>();
   (evaluation.criteria || []).forEach(c => criteriaMap.set(normalizeCriterionId(c.id), c));
 
@@ -853,7 +984,7 @@ export function harmonizeMistakesAndEvaluation(
             if (ctx?.isLateWarning) {
               derivedMistakes.push('При подтверждении ожидания не уточнены имя клиента и точное время исходной записи.');
               derivedAdvice.push('При звонке об опоздании всегда уточнять имя гостя/время брони для быстрой отметки в расписании.');
-            } else if (ctx?.isConfirmedBooking) {
+            } else if (ctx?.isConfirmedBooking && !reminderWindowPassed) {
               derivedMistakes.push('Не оговорён регламент предварительного напоминания о визите накануне.');
               derivedAdvice.push('Предупреждать клиента об отправке напоминания накануне визита.');
             }
@@ -887,13 +1018,17 @@ export function harmonizeMistakesAndEvaluation(
     } else {
       filteredAdvice = [
         'Соблюдать корпоративный регламент ведения телефонных переговоров салона.',
-        ...(ctx?.isConfirmedBooking ? ['Направлять клиенту подтверждение записи и напоминание накануне визита.'] : [])
+        ...(ctx?.isConfirmedBooking && !reminderWindowPassed
+          ? ['Направлять клиенту подтверждение записи и напоминание накануне визита.']
+          : [])
       ];
     }
   }
 
+  const finalMistakes = filterOutdatedReminderMistakes(filteredMistakes, callTimestamp, visitDateText, transcript);
+
   return {
-    mistakes: filteredMistakes,
+    mistakes: finalMistakes,
     advice: filteredAdvice
   };
 }

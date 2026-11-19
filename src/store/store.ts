@@ -72,7 +72,46 @@ export function getDefaultConfig(): SystemConfig {
       salonId: yclientsSalonId,
       enabled: Boolean(yclientsUserToken && yclientsSalonId),
     },
+    credentials: {
+      ...(((process.env.GIGACHAT_AUTH_KEY || process.env.GIGACHAT_CREDENTIALS || '').trim())
+        ? { gigachatAuthKey: (process.env.GIGACHAT_AUTH_KEY || process.env.GIGACHAT_CREDENTIALS || '').trim() }
+        : {}),
+      gigachatScope: ((process.env.GIGACHAT_SCOPE || 'GIGACHAT_API_PERS').trim() as 'GIGACHAT_API_PERS' | 'GIGACHAT_API_B2B' | 'GIGACHAT_API_CORP'),
+    },
   };
+}
+
+function hydrateGigaChatCredentials(db: AppDatabase): void {
+  if (!db.config) {
+    db.config = getDefaultConfig();
+  }
+  if (!db.config.credentials) {
+    db.config.credentials = {};
+  }
+
+  const envKey = (process.env.GIGACHAT_AUTH_KEY || process.env.GIGACHAT_CREDENTIALS || '').trim();
+  const validEnvKey = envKey && envKey !== '<ключ-авторизации-GigaChat>' ? envKey : '';
+  const storeKey = (db.config.credentials.gigachatAuthKey || '').trim();
+  const validStoreKey = storeKey && storeKey !== '<ключ-авторизации-GigaChat>' ? storeKey : '';
+
+  if (validStoreKey) {
+    db.config.credentials.gigachatAuthKey = validStoreKey;
+    if (!validEnvKey) {
+      process.env.GIGACHAT_AUTH_KEY = validStoreKey;
+    }
+  } else if (validEnvKey) {
+    db.config.credentials.gigachatAuthKey = validEnvKey;
+  }
+
+  const storeScope = (db.config.credentials.gigachatScope || '').trim();
+  const envScope = (process.env.GIGACHAT_SCOPE || '').trim();
+  if (storeScope) {
+    if (!envScope) {
+      process.env.GIGACHAT_SCOPE = storeScope;
+    }
+  } else if (envScope) {
+    db.config.credentials.gigachatScope = envScope as 'GIGACHAT_API_PERS' | 'GIGACHAT_API_B2B' | 'GIGACHAT_API_CORP';
+  }
 }
 
 export const DEFAULT_CONFIG: SystemConfig = getDefaultConfig();
@@ -216,6 +255,7 @@ export function readStoreSync(): AppDatabase {
             }
           }
         }
+        hydrateGigaChatCredentials(parsed);
         memCache = parsed;
         return memCache;
       } else if (payload && Array.isArray(payload.calls)) {
@@ -236,6 +276,7 @@ export function readStoreSync(): AppDatabase {
             }
           }
         }
+        hydrateGigaChatCredentials(payload);
         memCache = payload;
         return memCache;
       }
@@ -275,6 +316,7 @@ export function readStoreSync(): AppDatabase {
             }
           }
         }
+        hydrateGigaChatCredentials(parsed);
         memCache = parsed;
         return memCache;
       }
@@ -296,6 +338,7 @@ export function readStoreSync(): AppDatabase {
         if (!Array.isArray(parsed.notifications)) {
           parsed.notifications = [];
         }
+        hydrateGigaChatCredentials(parsed);
         memCache = parsed;
         return memCache;
       }
@@ -351,6 +394,7 @@ export async function readStore(): Promise<AppDatabase> {
           parsed.config.megafon.token = process.env.MEGAFON_TOKEN.trim();
           parsed.config.megafon.active = true;
         }
+        hydrateGigaChatCredentials(parsed);
         memCache = parsed;
         return memCache;
       } else if (payload && Array.isArray(payload.calls)) {
@@ -358,6 +402,7 @@ export async function readStore(): Promise<AppDatabase> {
         if (!payload.users || payload.users.length === 0) {
           payload.users = getInitialUsers();
         }
+        hydrateGigaChatCredentials(payload);
         memCache = payload;
         return memCache;
       }
@@ -377,6 +422,7 @@ export async function readStore(): Promise<AppDatabase> {
         if (Array.isArray(parsed.calls)) {
           parsed.calls = deduplicateCalls(parsed.calls);
         }
+        hydrateGigaChatCredentials(parsed);
         memCache = parsed;
         return memCache;
       }
@@ -397,6 +443,7 @@ export async function readStore(): Promise<AppDatabase> {
           parsed.users = getInitialUsers();
         }
         console.log(`[Store] Миграция открытого ${legacyPath} в зашифрованный data-store.enc (152-ФЗ)...`);
+        hydrateGigaChatCredentials(parsed);
         memCache = parsed;
         await writeStore(memCache);
         return memCache;

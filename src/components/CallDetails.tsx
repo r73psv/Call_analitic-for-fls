@@ -14,12 +14,40 @@ import {
   MessageSquareQuote, Send, Target, Banknote, CalendarClock, ArrowRightCircle,
   Award, Gauge, BarChart3, Filter, CheckCheck, MinusCircle, ChevronDown, ChevronUp, Info, Sparkle, RefreshCw
 } from 'lucide-react';
-import { CallRecord, NextStepItem, ContextClarification, StructuredCallSummary, CallEvaluation, CallEvaluationCriterion, VerifierField } from '../types.js';
+import { CallRecord, NextStepItem, ContextClarification, StructuredCallSummary, CallEvaluation, CallEvaluationCriterion, VerifierField, CriteriaVerificationItem } from '../types.js';
 import { ReanalyzeButton } from './ReanalyzeButton.js';
 import { getSttEngineDisplayName } from './TranscriptionModelSelector.js';
 import { refineTranscriptRoles } from '../services/transcriptUtils.js';
 import { extractStructuredCallSummary } from '../services/summaryUtils.js';
-import { extractCallEvaluation, EVALUATION_CRITERIA_DEFINITIONS, harmonizeMistakesAndEvaluation } from '../services/evaluationUtils.js';
+import { extractCallEvaluation, EVALUATION_CRITERIA_DEFINITIONS, harmonizeMistakesAndEvaluation, filterOutdatedReminderMistakes } from '../services/evaluationUtils.js';
+
+const VERIFIER_FIELD_LABELS: Record<string, string> = {
+  call_purpose: 'Цель обращения',
+  requested_service: 'Желаемая услуга',
+  service: 'Услуга',
+  offered_master: 'Предложенный мастер',
+  master: 'Мастер',
+  offered_price: 'Озвученная цена',
+  offered_date_time: 'Дата и время визита',
+  date: 'Дата визита',
+  time: 'Время визита',
+  booking_done: 'Статус записи',
+  booking_status: 'Статус записи',
+  reason_if_not: 'Причина отсутствия записи',
+  short_summary: 'Краткий пересказ',
+  manager_next_steps: 'Дальнейшие действия менеджера',
+  outcome: 'Итог звонка',
+  tone_client: 'Тональность клиента',
+  tone_manager: 'Тональность менеджера',
+  is_dispute: 'Наличие конфликта',
+  dispute_reason: 'Причина конфликта',
+};
+
+const VERIFIER_VERDICT_LABELS: Record<string, string> = {
+  confirmed: 'Подтверждено стенограммой',
+  unconfirmed: 'Не подтверждено цитатой (unconfirmed)',
+  contradicts: 'Противоречит стенограмме (contradicts)',
+};
 
 interface CallDetailsProps {
   call: CallRecord;
@@ -97,13 +125,17 @@ export function CallDetails({
   const [criteriaSearch, setCriteriaSearch] = useState('');
   const [expandedCriteriaId, setExpandedCriteriaId] = useState<string | null>(null);
 
-  // Состояние аудиоплеера
+  // Состояние аудиоплеера, ошибки пересчёта и раскрытой подсказки верификатора
   const [audioError, setAudioError] = useState<string | null>(null);
   const [audioReloadKey, setAudioReloadKey] = useState(0);
+  const [reanalyzeError, setReanalyzeError] = useState<string | null>(null);
+  const [openVerifierKey, setOpenVerifierKey] = useState<string | null>(null);
 
   useEffect(() => {
     setAudioError(null);
     setAudioReloadKey(0);
+    setReanalyzeError(null);
+    setOpenVerifierKey(null);
   }, [call.call_id, call.audio_url]);
 
   const proxiedAudioSrc = useMemo(() => {
@@ -156,6 +188,22 @@ export function CallDetails({
     return list;
   }, [callEvaluation, criteriaFilter, criteriaSearch]);
 
+  // Единая согласованная оценка: приоритет всегда у среднего по применимым критериям (evaluation.overall_score).
+  // Запрещено показывать в карточке число, расходящееся с общим баллом по критериям.
+  const effectiveScore = useMemo<number | null>(() => {
+    if (
+      callEvaluation.overall_score !== null &&
+      callEvaluation.overall_score !== undefined &&
+      !isNaN(callEvaluation.overall_score)
+    ) {
+      return callEvaluation.overall_score;
+    }
+    if (typeof call.operator_score === 'number' && !isNaN(call.operator_score)) {
+      return call.operator_score;
+    }
+    return null;
+  }, [callEvaluation.overall_score, call.operator_score]);
+
   const verificationMeta = useMemo(() => {
     const report = call.verification_report;
     const fieldMap = new Map<string, VerifierField>();
@@ -164,33 +212,195 @@ export function CallDetails({
         if (f?.field) fieldMap.set(f.field, f);
       }
     }
+    const criteriaItemMap = new Map<string, CriteriaVerificationItem>();
+    if (report?.criteria_items) {
+      for (const item of report.criteria_items) {
+        if (item?.id) criteriaItemMap.set(item.id, item);
+      }
+    }
+    const criteriaNameMap = new Map<string, string>();
+    for (const def of EVALUATION_CRITERIA_DEFINITIONS) {
+      criteriaNameMap.set(def.id, def.name);
+    }
+    for (const c of callEvaluation.criteria) {
+      criteriaNameMap.set(c.id, c.name);
+    }
+
     const flagSet = new Set<string>([
       ...(call.verification_flags || []),
       ...(report?.flags || []),
     ]);
     const criteriaFlagSet = new Set<string>(report?.criteria_flags || []);
+
+    type DisputedItem = {
+      key: string;
+      kind: 'field' | 'criterion';
+      label: string;
+      verdict: string;
+      verdictLabel: string;
+      draftValue?: string | null;
+      rejectedQuote?: string | null;
+      correctedValue?: string | null;
+      suspectedFalsePositive?: boolean;
+      summaryLine: string;
+    };
+
+    const disputedItems: DisputedItem[] = [];
+
+    for (const fieldKey of Array.from(flagSet)) {
+      const f = fieldMap.get(fieldKey);
+      const label = VERIFIER_FIELD_LABELS[fieldKey] || fieldKey;
+      const verdict = f?.verdict || 'unconfirmed';
+      const verdictLabel = VERIFIER_VERDICT_LABELS[verdict] || verdict;
+      const rejectedQuote = f?.rejected_quote || (f?.hallucinated_quote ? f.quote : null) || null;
+      const draftValue = f?.draft_value || null;
+      const correctedValue = f?.corrected_value || null;
+      const parts = [`${label} — ${verdictLabel}`];
+      if (rejectedQuote) {
+        parts.push(`цитата не найдена в стенограмме: «${rejectedQuote}»`);
+      } else if (correctedValue) {
+        parts.push(`исправлено на: «${correctedValue}»`);
+      } else if (draftValue) {
+        parts.push(`не найдена цитата для: «${draftValue}»`);
+      }
+      disputedItems.push({
+        key: `field:${fieldKey}`,
+        kind: 'field',
+        label,
+        verdict,
+        verdictLabel,
+        draftValue,
+        rejectedQuote,
+        correctedValue,
+        suspectedFalsePositive: Boolean(f?.suspected_false_positive),
+        summaryLine: parts.join(' • '),
+      });
+    }
+
+    for (const critId of Array.from(criteriaFlagSet)) {
+      const ci = criteriaItemMap.get(critId);
+      const label = criteriaNameMap.get(critId) || critId;
+      const verdict = ci?.verdict || 'unconfirmed';
+      const verdictLabel = VERIFIER_VERDICT_LABELS[verdict] || verdict;
+      const rejectedQuote = ci?.rejected_quote || (ci?.hallucinated_quote ? ci.quote : null) || null;
+      const parts = [`Критерий «${label}» — ${verdictLabel}`];
+      if (rejectedQuote) {
+        parts.push(`цитата не найдена в стенограмме: «${rejectedQuote}»`);
+      } else {
+        parts.push('в стенограмме не найдена подтверждающая цитата');
+      }
+      disputedItems.push({
+        key: `criterion:${critId}`,
+        kind: 'criterion',
+        label: `Критерий: ${label}`,
+        verdict,
+        verdictLabel,
+        rejectedQuote,
+        suspectedFalsePositive: Boolean(ci?.suspected_false_positive),
+        summaryLine: parts.join(' • '),
+      });
+    }
+
     const totalFlags = flagSet.size + criteriaFlagSet.size;
     return {
       hasReport: Boolean(report),
       fieldMap,
+      criteriaItemMap,
       flagSet,
       criteriaFlagSet,
+      disputedItems,
       totalFlags,
       hallucinatedCaught: report?.hallucinated_quotes_caught || 0,
     };
-  }, [call.verification_report, call.verification_flags]);
+  }, [call.verification_report, call.verification_flags, callEvaluation.criteria]);
 
   const renderFieldVerificationBadge = (fieldKeys: string[], currentValue?: string | null) => {
     const isUnconfirmedText = String(currentValue || '').toLowerCase().includes('не подтверждено стенограммой');
-    const isFlagged = isUnconfirmedText || fieldKeys.some((k) => verificationMeta.flagSet.has(k));
+    const matchedKeys = fieldKeys.filter((k) => verificationMeta.flagSet.has(k));
+    const isFlagged = isUnconfirmedText || matchedKeys.length > 0;
     if (!isFlagged) return null;
+
+    const primaryKey = matchedKeys[0] || fieldKeys[0];
+    const fieldRecord =
+      matchedKeys.map((k) => verificationMeta.fieldMap.get(k)).find(Boolean) ||
+      fieldKeys.map((k) => verificationMeta.fieldMap.get(k)).find(Boolean);
+
+    const fieldLabel = VERIFIER_FIELD_LABELS[primaryKey] || primaryKey;
+    const verdict = fieldRecord?.verdict || 'unconfirmed';
+    const verdictLabel = VERIFIER_VERDICT_LABELS[verdict] || verdict;
+    const rejectedQuote = fieldRecord?.rejected_quote || (fieldRecord?.hallucinated_quote ? fieldRecord.quote : null) || null;
+    const draftValue = fieldRecord?.draft_value || (isUnconfirmedText ? null : currentValue || null);
+    const correctedValue = fieldRecord?.corrected_value || null;
+
+    const tooltipLines = [
+      `Поле: ${fieldLabel}`,
+      `Вердикт: ${verdictLabel}`,
+      rejectedQuote
+        ? `Цитата не найдена в стенограмме: «${rejectedQuote}»`
+        : draftValue
+        ? `Не найдена подтверждающая цитата для значения: «${draftValue}»`
+        : 'Не подтверждено прямой цитатой на втором проходе верификации',
+      ...(correctedValue ? [`Скорректированное значение: «${correctedValue}»`] : []),
+    ];
+
+    const popoverKey = `field:${primaryKey}`;
+    const isOpen = openVerifierKey === popoverKey;
+
     return (
-      <span
-        className="text-[9px] font-bold px-1.5 py-0.2 rounded-md bg-amber-50 text-amber-800 border border-amber-300 inline-flex items-center gap-0.5 shrink-0"
-        title="Не подтверждено прямой цитатой на втором проходе верификации — требует ручной проверки"
-      >
-        <AlertTriangle className="w-2.5 h-2.5" />
-        <span>Требует проверки</span>
+      <span className="relative inline-flex items-center shrink-0">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setOpenVerifierKey((prev) => (prev === popoverKey ? null : popoverKey));
+          }}
+          className="text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 inline-flex items-center gap-0.5 shrink-0 cursor-pointer transition-colors"
+          title={tooltipLines.join('\n')}
+          aria-expanded={isOpen}
+        >
+          <AlertTriangle className="w-2.5 h-2.5" />
+          <span>Требует проверки</span>
+          <Info className="w-2.5 h-2.5 opacity-75 ml-0.5" />
+        </button>
+        {isOpen && (
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="absolute right-0 top-full mt-1.5 z-30 w-72 max-w-[85vw] p-2.5 rounded-lg bg-white border border-amber-300 shadow-lg text-left text-[11px] text-slate-700 space-y-1.5"
+          >
+            <div className="flex items-start justify-between gap-2 pb-1 border-b border-amber-100">
+              <div className="font-bold text-amber-900 leading-tight">{fieldLabel}</div>
+              <button
+                type="button"
+                onClick={() => setOpenVerifierKey(null)}
+                className="text-slate-400 hover:text-slate-600 p-0.5"
+                aria-label="Закрыть причину проверки"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+            <div>
+              <span className="font-semibold text-slate-800">Вердикт: </span>
+              <span className="text-amber-800 font-medium">{verdictLabel}</span>
+            </div>
+            {rejectedQuote ? (
+              <div className="bg-amber-50/70 border border-amber-200/80 rounded p-1.5 text-[10.5px]">
+                <span className="font-semibold text-amber-900 block">Цитата не найдена в стенограмме:</span>
+                <span className="italic text-slate-800">«{rejectedQuote}»</span>
+              </div>
+            ) : (
+              <div className="text-[10.5px] text-slate-600">
+                Прямая подтверждающая цитата в стенограмме не найдена
+                {draftValue ? ` (значение черновика: «${draftValue}»)` : ''}.
+              </div>
+            )}
+            {correctedValue && (
+              <div className="text-[10.5px] text-emerald-800 bg-emerald-50/70 border border-emerald-200 rounded p-1.5">
+                <span className="font-semibold">Скорректировано: </span>
+                <span>«{correctedValue}»</span>
+              </div>
+            )}
+          </div>
+        )}
       </span>
     );
   };
@@ -244,7 +454,7 @@ export function CallDetails({
         managerEvaluation: '',
         mistakes: [] as string[],
         advice: [] as string[],
-        score: call.operator_score ?? null,
+        score: effectiveScore,
         hasEvaluation: false,
         raw: 'Резюме не сформировано'
       };
@@ -273,35 +483,62 @@ export function CallDetails({
       conclusion = summaryClean;
     }
 
-    // Извлечение оценки
-    let score: number | null = typeof call.operator_score === 'number' ? call.operator_score : null;
-    const scoreMatch = summary.match(/оценка\s*(\d{1,2})\s*\/\s*10/i);
+    // Единая оценка: всегда равна evaluation.overall_score (если есть применимые критерии)
+    let score: number | null = effectiveScore;
+    const scoreMatch = summary.match(/оценка\s*(\d{1,2}(?:[.,]\d)?)\s*\/\s*10/i);
     if (score === null && scoreMatch) {
-      score = parseInt(scoreMatch[1], 10);
+      score = parseFloat(scoreMatch[1].replace(',', '.'));
     }
 
-    // Извлечение конкретных ошибок
+    const isModelSourcedCall = Boolean(
+      call.booking_status !== 'не применимо' &&
+        (call.summary_source === 'model' || call.feedback_source === 'model' || call.verification_report)
+    );
+    const isModelMistakesCall = Boolean(
+      call.booking_status !== 'не применимо' &&
+        (call.mistakes_source === 'model' || isModelSourcedCall)
+    );
+    const visitDateContext =
+      call.structured_summary?.offered_date_time ||
+      call.key_facts?.structured_summary?.offered_date_time ||
+      call.key_facts?.offered_date_time ||
+      call.key_facts?.date ||
+      null;
+
+    // Извлечение конкретных ошибок (модель -> fallback)
     let mistakes: string[] = [];
-    if (Array.isArray(call.operator_mistakes) && call.operator_mistakes.length > 0) {
-      mistakes = call.operator_mistakes.map(m => String(m).trim()).filter(Boolean);
+    const hasExplicitMistakesArray = Array.isArray(call.operator_mistakes);
+    if (isModelMistakesCall && hasExplicitMistakesArray) {
+      // Модельный путь: уважаем массив ошибок модели как есть (в том числе пустой [] = ошибок нет)
+      mistakes = (call.operator_mistakes || []).map(m => String(m).trim()).filter(Boolean);
+    } else if (hasExplicitMistakesArray && call.operator_mistakes!.length > 0) {
+      mistakes = call.operator_mistakes!.map(m => String(m).trim()).filter(Boolean);
     } else if (managerMatch) {
       const mistakesSubMatch = managerMatch[1].match(
         /(?:ошибки и недочеты|ошибки|недочеты)\s*:\s*([\s\S]*?)(?=(?:советы по оптимизации|советы|рекомендации)\s*:|$)/i
       );
       if (mistakesSubMatch) {
         const raw = mistakesSubMatch[1].trim();
-        const split = raw
-          .split(/(?:^|\n)\s*[-•*0-9.)]+\s*/g)
-          .map(s => s.trim().replace(/^;\s*/, ''))
-          .filter(s => s.length > 3);
-        mistakes = split.length > 0 ? split : [raw];
+        if (!/^(?:не выявлены|отсутствуют|нет|—|-)$/i.test(raw)) {
+          const split = raw
+            .split(/(?:^|\n)\s*[-•*0-9.)]+\s*/g)
+            .map(s => s.trim().replace(/^;\s*/, ''))
+            .filter(s => s.length > 3);
+          mistakes = split.length > 0 ? split : [raw];
+        }
       }
     }
 
-    // Извлечение советов по оптимизации
+    // Извлечение советов по оптимизации (модель -> fallback)
     let advice: string[] = [];
     const rawRecs: unknown = call.recommendations;
-    if (Array.isArray(rawRecs) && rawRecs.length > 0) {
+    const hasExplicitRecsField =
+      Array.isArray(rawRecs) || (typeof rawRecs === 'string' && (rawRecs as string).trim().length > 0);
+    if (isModelSourcedCall && hasExplicitRecsField) {
+      advice = Array.isArray(rawRecs)
+        ? rawRecs.map(r => String(r).trim()).filter(Boolean)
+        : [(rawRecs as string).trim()];
+    } else if (Array.isArray(rawRecs) && rawRecs.length > 0) {
       advice = rawRecs.map(r => String(r).trim()).filter(Boolean);
     } else if (typeof rawRecs === 'string' && (rawRecs as string).trim().length > 0) {
       advice = [(rawRecs as string).trim()];
@@ -311,18 +548,34 @@ export function CallDetails({
       );
       if (adviceSubMatch) {
         const raw = adviceSubMatch[1].trim();
-        const split = raw
-          .split(/(?:^|\n)\s*[-•*0-9.)]+\s*/g)
-          .map(s => s.trim().replace(/^;\s*/, ''))
-          .filter(s => s.length > 3);
-        advice = split.length > 0 ? split : [raw];
+        if (!/^(?:не требуются|отсутствуют|нет|—|-)$/i.test(raw)) {
+          const split = raw
+            .split(/(?:^|\n)\s*[-•*0-9.)]+\s*/g)
+            .map(s => s.trim().replace(/^;\s*/, ''))
+            .filter(s => s.length > 3);
+          advice = split.length > 0 ? split : [raw];
+        }
       }
     }
 
-    // Синхронизация ошибок и советов с оценкой по 10 критериям
-    const harmonized = harmonizeMistakesAndEvaluation(mistakes, advice, callEvaluation, call.transcript);
-    mistakes = harmonized.mistakes;
-    advice = harmonized.advice;
+    // Шаблонная гармонизация ошибок и советов применяется ТОЛЬКО как fallback (не для валидного ответа модели)
+    if (!isModelMistakesCall) {
+      const harmonized = harmonizeMistakesAndEvaluation(
+        mistakes,
+        advice,
+        callEvaluation,
+        call.transcript,
+        call.timestamp,
+        visitDateContext
+      );
+      mistakes = harmonized.mistakes;
+      if (!isModelSourcedCall) {
+        advice = harmonized.advice;
+      }
+    }
+
+    // Удаляем ошибку про напоминание накануне, если звонок был в день визита или позже
+    mistakes = filterOutdatedReminderMistakes(mistakes, call.timestamp, visitDateContext, call.transcript);
 
     const hasEvaluation = Boolean(
       managerMatch ||
@@ -374,7 +627,7 @@ export function CallDetails({
       hasEvaluation,
       raw: summary
     };
-  }, [call, callEvaluation]);
+  }, [call, callEvaluation, effectiveScore]);
 
   // Categorical Tag Management State
   const [customTagInput, setCustomTagInput] = useState('');
@@ -977,10 +1230,38 @@ export function CallDetails({
               </span>
             )}
 
-            {/* Model Badge */}
+            {/* Model Badge & Analysis Source Indicator */}
             <span className="text-[11px] bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full font-semibold">
               {call.model_used || 'GigaChat:Lite'}
             </span>
+
+            {(() => {
+              const isTemplateSource = call.summary_source === 'template' || Boolean(call.fallback_reason);
+              const shortModelName = (call.model_used || 'GigaChat:Lite').replace(/^GigaChat:/i, '');
+              return isTemplateSource ? (
+                <span
+                  id={`analysis-source-badge-${call.call_id}`}
+                  className="text-[11px] bg-amber-100 text-amber-900 border border-amber-300 px-2.5 py-0.5 rounded-full font-bold inline-flex items-center gap-1"
+                  title={
+                    call.fallback_reason
+                      ? `Анализ выполнен локальным резервом: ${call.fallback_reason}`
+                      : 'Анализ выполнен локальным резервным шаблоном'
+                  }
+                >
+                  <AlertTriangle className="w-3 h-3 text-amber-700 shrink-0" />
+                  <span>Анализ: резервный шаблон</span>
+                </span>
+              ) : (
+                <span
+                  id={`analysis-source-badge-${call.call_id}`}
+                  className="text-[11px] bg-indigo-50 text-indigo-700 border border-indigo-200 px-2.5 py-0.5 rounded-full font-semibold inline-flex items-center gap-1"
+                  title={`Анализ выполнен языковой моделью ${call.model_used || 'GigaChat:Lite'}`}
+                >
+                  <Sparkles className="w-3 h-3 text-indigo-600 shrink-0" />
+                  <span>Анализ: модель {shortModelName}</span>
+                </span>
+              );
+            })()}
 
             {/* Visual Indicator (Badge) статуса записи из JSON-анализа ИИ */}
             {bookingStatusConfig && (
@@ -1049,8 +1330,12 @@ export function CallDetails({
             currentSttEngine={call.transcription_engine}
             hasAudio={Boolean(call.audio_url && !call.audio_deleted)}
             onReanalyzed={(updated) => {
+              if (updated.summary_source === 'model') {
+                setReanalyzeError(null);
+              }
               if (onCallUpdated) onCallUpdated(updated);
             }}
+            onError={(msg) => setReanalyzeError(msg)}
             userRole={userRole}
           />
 
@@ -1196,6 +1481,43 @@ export function CallDetails({
       </div>
 
       <div className="flex-1 overflow-y-auto p-5 grid grid-cols-1 lg:grid-cols-12 gap-6">
+        {(reanalyzeError || call.summary_source === 'template' || call.fallback_reason) && (() => {
+          const reason = call.fallback_reason || '';
+          const isShortOrEmptyFallback =
+            !reanalyzeError &&
+            Boolean(reason) &&
+            /<\s*10\s*сек|0\s*сек|автоответчик|пустая стенограмма/i.test(reason);
+          const bannerText =
+            reanalyzeError ||
+            (isShortOrEmptyFallback
+              ? `Анализ выполнен резервным шаблоном (${reason}).`
+              : `Анализ выполнен резервным генератором, модель недоступна: ${reason || 'модель GigaChat не вернула валидный ответ'}`);
+          return (
+            <div
+              id="fallback-analysis-banner"
+              className={`lg:col-span-12 rounded-xl p-4 text-xs flex items-start gap-3 border ${
+                isShortOrEmptyFallback
+                  ? 'bg-amber-50 border-amber-200 text-amber-900'
+                  : 'bg-rose-50 border-rose-300 text-rose-900'
+              }`}
+            >
+              <AlertTriangle
+                className={`w-5 h-5 shrink-0 mt-0.5 ${
+                  isShortOrEmptyFallback ? 'text-amber-600' : 'text-rose-600'
+                }`}
+              />
+              <div className="space-y-0.5">
+                <p className="font-bold">{bannerText}</p>
+                {!isShortOrEmptyFallback && (
+                  <p className="text-[11px] opacity-90">
+                    Текущие резюме, ошибки и рекомендации сформированы локальным шаблонным резервом, а не языковой моделью. Проверьте ключ авторизации GigaChat в настройках и нажмите «Пересчитать».
+                  </p>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
         {vkError && (
           <div className="lg:col-span-12 bg-rose-50 border border-rose-200 rounded-xl p-4 text-xs text-rose-800 flex items-start gap-3">
             <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
@@ -1382,17 +1704,27 @@ export function CallDetails({
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {verificationMeta.hasReport && (
                     verificationMeta.totalFlags > 0 ? (
-                      <span
-                        className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-300 inline-flex items-center gap-1"
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOpenVerifierKey((prev) =>
+                            prev === 'header-summary' ? null : 'header-summary'
+                          )
+                        }
+                        className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 inline-flex items-center gap-1 cursor-pointer transition-colors"
                         title={
-                          verificationMeta.hallucinatedCaught > 0
+                          verificationMeta.disputedItems.length > 0
+                            ? verificationMeta.disputedItems.map((d) => d.summaryLine).join('\n')
+                            : verificationMeta.hallucinatedCaught > 0
                             ? `Отсечено выдуманных цитат: ${verificationMeta.hallucinatedCaught}`
                             : 'Часть фактов не подтвердилась цитатой во втором проходе'
                         }
+                        aria-expanded={openVerifierKey === 'header-summary'}
                       >
                         <AlertTriangle className="w-3 h-3" />
                         <span>Требует проверки ({verificationMeta.totalFlags})</span>
-                      </span>
+                        <Info className="w-3 h-3 opacity-80" />
+                      </button>
                     ) : (
                       <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 inline-flex items-center gap-1">
                         <ShieldCheck className="w-3 h-3" />
@@ -1405,6 +1737,59 @@ export function CallDetails({
                   </span>
                 </div>
               </div>
+
+              {/* Раскрываемый список причин верификатора по всем спорным полям и критериям */}
+              {openVerifierKey === 'header-summary' && verificationMeta.disputedItems.length > 0 && (
+                <div className="rounded-lg bg-amber-50/80 border border-amber-300/90 p-2.5 text-[11px] text-amber-950 space-y-2">
+                  <div className="flex items-center justify-between gap-2 pb-1 border-b border-amber-200/80">
+                    <span className="font-bold text-amber-900 flex items-center gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-700" />
+                      <span>Спорные пункты верификации ({verificationMeta.disputedItems.length})</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setOpenVerifierKey(null)}
+                      className="text-amber-700 hover:text-amber-900 p-0.5"
+                      aria-label="Скрыть детали верификации"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <ul className="space-y-1.5">
+                    {verificationMeta.disputedItems.map((item) => (
+                      <li key={item.key} className="bg-white/90 border border-amber-200/80 rounded-md p-2 leading-snug">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="font-bold text-slate-900">{item.label}</span>
+                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-100 text-amber-900">
+                            {item.verdictLabel}
+                          </span>
+                        </div>
+                        {item.rejectedQuote ? (
+                          <div className="mt-1 text-[10.5px] text-slate-700">
+                            <span className="font-semibold text-amber-900">Цитата не найдена в стенограмме: </span>
+                            <span className="italic">«{item.rejectedQuote}»</span>
+                          </div>
+                        ) : item.draftValue ? (
+                          <div className="mt-1 text-[10.5px] text-slate-700">
+                            <span className="font-semibold text-slate-800">Не найдена цитата для: </span>
+                            <span>«{item.draftValue}»</span>
+                          </div>
+                        ) : (
+                          <div className="mt-1 text-[10.5px] text-slate-600">
+                            Подтверждающая цитата в стенограмме не обнаружена.
+                          </div>
+                        )}
+                        {item.correctedValue && (
+                          <div className="mt-1 text-[10.5px] text-emerald-800">
+                            <span className="font-semibold">Скорректировано на: </span>
+                            <span>«{item.correctedValue}»</span>
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               {/* Сетка параметров 1 - 5 */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
@@ -1954,12 +2339,76 @@ export function CallDetails({
                                 </span>
                               )}
 
-                              {(crit.requires_verification || verificationMeta.criteriaFlagSet.has(crit.id)) && (
-                                <span className="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-300 px-1.5 py-0.2 rounded-md inline-flex items-center gap-0.5">
-                                  <AlertTriangle className="w-2.5 h-2.5" />
-                                  <span>Требует проверки</span>
-                                </span>
-                              )}
+                              {(crit.requires_verification || verificationMeta.criteriaFlagSet.has(crit.id)) && (() => {
+                                const critVerif = verificationMeta.criteriaItemMap.get(crit.id);
+                                const critVerdict = critVerif?.verdict || 'unconfirmed';
+                                const critVerdictLabel = VERIFIER_VERDICT_LABELS[critVerdict] || critVerdict;
+                                const critRejectedQuote =
+                                  critVerif?.rejected_quote ||
+                                  (critVerif?.hallucinated_quote ? critVerif.quote : null) ||
+                                  null;
+                                const critTooltip = [
+                                  `Критерий: ${crit.name}`,
+                                  `Вердикт: ${critVerdictLabel}`,
+                                  critRejectedQuote
+                                    ? `Цитата не найдена в стенограмме: «${critRejectedQuote}»`
+                                    : 'В стенограмме не найдена прямая цитата, подтверждающая выполнение критерия',
+                                ].join('\n');
+                                const critPopoverKey = `criterion:${crit.id}`;
+                                const isCritPopoverOpen = openVerifierKey === critPopoverKey;
+                                return (
+                                  <span className="relative inline-flex items-center">
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setOpenVerifierKey((prev) =>
+                                          prev === critPopoverKey ? null : critPopoverKey
+                                        );
+                                      }}
+                                      className="text-[10px] font-bold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-300 px-1.5 py-0.5 rounded-md inline-flex items-center gap-0.5 cursor-pointer transition-colors"
+                                      title={critTooltip}
+                                      aria-expanded={isCritPopoverOpen}
+                                    >
+                                      <AlertTriangle className="w-2.5 h-2.5" />
+                                      <span>Требует проверки</span>
+                                      <Info className="w-2.5 h-2.5 opacity-75 ml-0.5" />
+                                    </button>
+                                    {isCritPopoverOpen && (
+                                      <div
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="absolute left-0 top-full mt-1.5 z-30 w-72 max-w-[85vw] p-2.5 rounded-lg bg-white border border-amber-300 shadow-lg text-left text-[11px] text-slate-700 space-y-1.5"
+                                      >
+                                        <div className="flex items-start justify-between gap-2 pb-1 border-b border-amber-100">
+                                          <span className="font-bold text-amber-900 leading-tight">{crit.name}</span>
+                                          <button
+                                            type="button"
+                                            onClick={() => setOpenVerifierKey(null)}
+                                            className="text-slate-400 hover:text-slate-600 p-0.5"
+                                            aria-label="Закрыть причину проверки критерия"
+                                          >
+                                            <X className="w-3 h-3" />
+                                          </button>
+                                        </div>
+                                        <div>
+                                          <span className="font-semibold text-slate-800">Вердикт: </span>
+                                          <span className="text-amber-800 font-medium">{critVerdictLabel}</span>
+                                        </div>
+                                        {critRejectedQuote ? (
+                                          <div className="bg-amber-50/70 border border-amber-200/80 rounded p-1.5 text-[10.5px]">
+                                            <span className="font-semibold text-amber-900 block">Цитата не найдена в стенограмме:</span>
+                                            <span className="italic text-slate-800">«{critRejectedQuote}»</span>
+                                          </div>
+                                        ) : (
+                                          <div className="text-[10.5px] text-slate-600">
+                                            В стенограмме не найдена дословная цитата, подтверждающая выполнение данного критерия.
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+                                  </span>
+                                );
+                              })()}
                             </div>
 
                             {/* Прогресс-бар оценки */}
@@ -2545,14 +2994,14 @@ export function CallDetails({
         {/* Right column */}
         <div className="lg:col-span-5 space-y-5">
           {/* Operator Score */}
-          <div className={`border rounded-xl p-4 space-y-3 ${getScoreColor(call.operator_score)}`}>
+          <div className={`border rounded-xl p-4 space-y-3 ${getScoreColor(effectiveScore)}`}>
             <div className="flex items-center justify-between">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Оценка качества</h3>
               <div className="flex items-baseline gap-0.5">
                 <span className="text-2xl font-black font-mono">
-                  {call.operator_score !== null && call.operator_score !== undefined ? call.operator_score : '—'}
+                  {effectiveScore !== null && effectiveScore !== undefined ? effectiveScore : '—'}
                 </span>
-                {call.operator_score !== null && call.operator_score !== undefined && (
+                {effectiveScore !== null && effectiveScore !== undefined && (
                   <span className="text-xs text-slate-400">/ 10</span>
                 )}
               </div>

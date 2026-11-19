@@ -511,11 +511,28 @@ export default function App() {
 
   const handleReanalyze = async (id: string) => {
     try {
-      const updated = await safeFetchJson<CallRecord>(`/api/calls/${id}/reanalyze`, { 
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'x-user-role': userRole,
+      };
+      if (authToken) {
+        headers['Authorization'] = `Bearer ${authToken}`;
+      }
+      const res = await fetch(`/api/calls/${id}/reanalyze`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: config?.default_gigachat_model || 'GigaChat:Lite' })
-      }, authToken, userRole);
+        headers,
+        body: JSON.stringify({ model: config?.default_gigachat_model || 'GigaChat:Lite' }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (payload?.call) {
+          setCalls(prev => prev.map(c => c.call_id === id ? payload.call : c));
+          await loadData(true);
+        }
+        console.error('[Reanalyze Error]', payload?.error || `HTTP ${res.status}`);
+        return false;
+      }
+      const updated = payload as CallRecord;
       setCalls(prev => prev.map(c => c.call_id === id ? updated : c));
       await loadData(true);
       return true;
@@ -883,6 +900,14 @@ export default function App() {
               >
                 <Sparkles className="w-4 h-4 text-indigo-600" />
                 <span>Системный промпт ИИ</span>
+                {Boolean((config?.customSystemPrompt || (config as any)?.credentials?.customSystemPrompt || '').trim()) && (
+                  <span
+                    className="text-[10px] bg-amber-100 text-amber-800 border border-amber-300 font-bold px-1.5 py-0.5 rounded-md"
+                    title="Активен пользовательский промпт (перекрывает встроенный эталон)"
+                  >
+                    Кастомный
+                  </span>
+                )}
               </button>
             )}
 

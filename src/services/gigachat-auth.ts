@@ -9,28 +9,71 @@ import { readStoreSync } from '../store/store.js';
 
 let gigaTokenCache: { token: string; expiresAt: number } | null = null;
 
+function isUsableGigaChatKey(key?: string | null): boolean {
+  const trimmed = (key || '').trim();
+  return Boolean(trimmed && trimmed !== '<ключ-авторизации-GigaChat>');
+}
+
 export function getEffectiveGigaChatKey(): string {
   try {
     const store = readStoreSync();
-    if (store.config?.credentials?.gigachatAuthKey) {
-      return store.config.credentials.gigachatAuthKey;
+    const storeKey = store.config?.credentials?.gigachatAuthKey;
+    if (isUsableGigaChatKey(storeKey)) {
+      return storeKey!.trim();
     }
   } catch (e) {
     // Ignore store read issues and fallback to env
   }
-  return process.env.GIGACHAT_AUTH_KEY || '';
+  const envKey = process.env.GIGACHAT_AUTH_KEY || process.env.GIGACHAT_CREDENTIALS || '';
+  return isUsableGigaChatKey(envKey) ? envKey.trim() : '';
 }
 
 export function getEffectiveGigaChatScope(): string {
   try {
     const store = readStoreSync();
     if (store.config?.credentials?.gigachatScope) {
-      return store.config.credentials.gigachatScope;
+      return store.config.credentials.gigachatScope.trim();
     }
   } catch (e) {
     // Ignore
   }
-  return process.env.GIGACHAT_SCOPE || 'GIGACHAT_API_PERS';
+  return (process.env.GIGACHAT_SCOPE || 'GIGACHAT_API_PERS').trim();
+}
+
+export interface GigaChatConfigStatus {
+  configured: boolean;
+  source: 'store' | 'env' | 'both' | 'none';
+  hasStoreKey: boolean;
+  hasEnvKey: boolean;
+  scope: string;
+  missing: string[];
+}
+
+export function getGigaChatConfigStatus(): GigaChatConfigStatus {
+  let hasStoreKey = false;
+  try {
+    const store = readStoreSync();
+    hasStoreKey = isUsableGigaChatKey(store.config?.credentials?.gigachatAuthKey);
+  } catch {
+    hasStoreKey = false;
+  }
+  const hasEnvKey = isUsableGigaChatKey(process.env.GIGACHAT_AUTH_KEY || process.env.GIGACHAT_CREDENTIALS);
+  const scope = getEffectiveGigaChatScope();
+  const configured = hasStoreKey || hasEnvKey;
+  const source: GigaChatConfigStatus['source'] =
+    hasStoreKey && hasEnvKey ? 'both' : hasStoreKey ? 'store' : hasEnvKey ? 'env' : 'none';
+  const missing: string[] = [];
+  if (!configured) {
+    missing.push('GIGACHAT_AUTH_KEY (отсутствует в env и в хранилище credentials)');
+  }
+  return {
+    configured,
+    source,
+    hasStoreKey,
+    hasEnvKey,
+    scope,
+    missing,
+  };
 }
 
 export async function getGigaChatToken(): Promise<string> {
@@ -86,5 +129,5 @@ export function invalidateGigaChatTokenCache(): void {
 
 export function isGigaChatConfigured(): boolean {
   const key = getEffectiveGigaChatKey();
-  return !!key && key !== '<ключ-авторизации-GigaChat>';
+  return isUsableGigaChatKey(key);
 }

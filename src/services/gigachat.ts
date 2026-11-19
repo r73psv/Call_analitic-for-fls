@@ -259,6 +259,7 @@ ${metadataBlock}
 - Снижать оценки за «отсутствие альтернатив» или «незакрытую запись», если клиент предупреждает об опоздании на уже существующую запись и менеджер подтвердил ожидание.
 - Признавать критерий 8 (альтернативы) применимым, если клиент подтвердил или согласился и не было отказа/несогласия по времени/цене/услуге.
 - Придумывать ошибки и советы про SMS/автоподтверждения или допродажи, если диалог короткий/подтверждающий или для этого не было основания в стенограмме.
+- Не выставлять ошибку "не оговорён регламент предварительного напоминания о визите" и не советовать про напоминание накануне, если звонок произошёл в день визита или после наступления времени визита — окно напоминаний в этом случае прошло.
 - Копировать шаблонные фразы из примеров.
 - Выводить любой текст вне JSON.
 
@@ -823,6 +824,11 @@ export type GigaChatLogCallback = (
  * Выполняет анализ через GigaChat с очередью FIFO (параллелизм = 1)
  * и экспоненциальной задержкой retry (особенно при ошибках 429 Too Many Requests).
  */
+export interface AnalyzeWithRetryOptions {
+  throwOnUnavailable?: boolean;
+  _timestampWarned?: boolean;
+}
+
 export async function analyzeWithRetry(
   transcript: string,
   model?: GigaChatModel,
@@ -830,11 +836,28 @@ export async function analyzeWithRetry(
   callDurationSeconds?: number,
   customSalonName?: string,
   customSystemPrompt?: string,
-  callTimestamp?: string
+  callTimestamp?: string,
+  options?: AnalyzeWithRetryOptions
 ): Promise<AnalysisResult> {
   const modelName = model || 'GigaChat:Lite';
+  let timestampWarned = false;
+  if ((!callTimestamp || !String(callTimestamp).trim()) && transcript && transcript.trim().length > 0) {
+    const warnMsg = '[GigaChat WARNING] call_timestamp отсутствует — временные правила next_steps не применяются';
+    console.warn(warnMsg);
+    onLog?.('warning', warnMsg);
+    timestampWarned = true;
+  }
   return gigaChatQueue.enqueue(async () => {
-    return executeWithExponentialBackoff(transcript, modelName, onLog, callDurationSeconds, customSalonName, customSystemPrompt, callTimestamp);
+    return executeWithExponentialBackoff(
+      transcript,
+      modelName,
+      onLog,
+      callDurationSeconds,
+      customSalonName,
+      customSystemPrompt,
+      callTimestamp,
+      { ...options, _timestampWarned: timestampWarned }
+    );
   }, `Анализ транскрипта (${modelName})`);
 }
 
@@ -845,15 +868,33 @@ async function executeWithExponentialBackoff(
   callDurationSeconds?: number,
   customSalonName?: string,
   customSystemPrompt?: string,
-  callTimestamp?: string
+  callTimestamp?: string,
+  options?: AnalyzeWithRetryOptions
 ): Promise<AnalysisResult> {
   let lastError: any = null;
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      return await analyzeWithGigaChat(transcript, model, callDurationSeconds, customSalonName, customSystemPrompt, callTimestamp);
+      return await analyzeWithGigaChat(
+        transcript,
+        model,
+        callDurationSeconds,
+        customSalonName,
+        customSystemPrompt,
+        callTimestamp,
+        options
+      );
     } catch (error: any) {
       lastError = error;
+
+      // Если ключ GigaChat вообще не задан — не тратим время на 4 ретрая, сразу пробрасываем причину наверх
+      if (error?.isGigaChatUnavailable) {
+        const unavailMsg = error.fallbackReason || error.message || 'GigaChat не настроен (ключ отсутствует)';
+        console.error(`[GigaChat] ${unavailMsg}`);
+        if (onLog) onLog('error', unavailMsg);
+        throw error;
+      }
+
       const status = error.response?.status;
       const responseData = error.response?.data;
       const responseMsg = responseData?.message || responseData?.description || error.message || String(error);
@@ -906,10 +947,13 @@ async function executeWithExponentialBackoff(
     }
   }
 
-  const failMsg = `GigaChat недоступен после ${MAX_RETRIES} попыток: ${lastError?.message || lastError}`;
+  const fallbackReason = `ошибка после ${MAX_RETRIES} попыток: ${lastError?.message || lastError}`;
+  const failMsg = `GigaChat недоступен (${fallbackReason})`;
   console.error(`[GigaChat] ${failMsg}`);
   if (onLog) onLog('error', failMsg);
-  throw new Error(failMsg);
+  const err: any = new Error(failMsg);
+  err.fallbackReason = fallbackReason;
+  throw err;
 }
 
 
@@ -919,19 +963,39 @@ export async function analyzeWithGigaChat(
   callDurationSeconds?: number,
   customSalonName?: string,
   customSystemPrompt?: string,
-  callTimestamp?: string
+  callTimestamp?: string,
+  options?: AnalyzeWithRetryOptions
 ): Promise<AnalysisResult> {
   const model: GigaChatModel = modelOverride || (process.env.GIGACHAT_DEFAULT_MODEL as GigaChatModel) || 'GigaChat:Lite';
 
   // Жёсткий предохранитель: при длительности менее 10 секунд LLM не вызываем —
   // возвращаем результат «разговор не состоялся», чтобы исключить фантазии модели.
   if (callDurationSeconds !== undefined && callDurationSeconds < 10) {
-    return generateLocalFallbackAnalysis(transcript, model, callDurationSeconds, customSalonName);
+    return generateLocalFallbackAnalysis(
+      transcript,
+      model,
+      callDurationSeconds,
+      customSalonName,
+      `длительность звонка < 10 сек (${callDurationSeconds} сек)`,
+      callTimestamp
+    );
+  }
+
+  const hasCallTimestamp = Boolean(callTimestamp && String(callTimestamp).trim().length > 0);
+  if (!hasCallTimestamp && !options?._timestampWarned && transcript && transcript.trim().length > 0) {
+    console.warn('[GigaChat WARNING] call_timestamp отсутствует — временные правила next_steps не применяются');
   }
 
   if (!isGigaChatConfigured()) {
-    // Если GigaChat не настроен — возвращаем локальный резервный анализ.
-    return generateLocalFallbackAnalysis(transcript, model, callDurationSeconds, customSalonName);
+    const reason = 'GigaChat не настроен (ключ отсутствует)';
+    if (options?.throwOnUnavailable) {
+      const err: any = new Error(reason);
+      err.isGigaChatUnavailable = true;
+      err.fallbackReason = reason;
+      throw err;
+    }
+    // Если GigaChat не настроен — возвращаем локальный резервный анализ с явным указанием причины.
+    return generateLocalFallbackAnalysis(transcript, model, callDurationSeconds, customSalonName, reason, callTimestamp);
   }
 
   const token = await getGigaChatToken();
@@ -1028,8 +1092,26 @@ export async function analyzeWithGigaChat(
       const flagsCount = verified.verification_flags?.length || 0;
       const critFlagsCount = verified.verification_report?.criteria_flags?.length || 0;
       const caughtQuotes = verified.verification_report?.hallucinated_quotes_caught || 0;
+      const disputedFieldDetails = (verified.verification_report?.fields || [])
+        .filter((f) => verified.verification_flags?.includes(f.field))
+        .map((f) => {
+          const quoteDetail = f.rejected_quote
+            ? `, цитата не найдена: "${f.rejected_quote.slice(0, 60)}"`
+            : f.verdict === 'contradicts' && f.corrected_value
+            ? `, исправлено на: "${f.corrected_value}"`
+            : '';
+          return `${f.field} (${f.verdict}${quoteDetail})`;
+        });
+      const disputedCriteriaDetails = (verified.verification_report?.criteria_flags || []).map((cid) => {
+        const item = verified.verification_report?.criteria_items?.find((it) => it.id === cid);
+        const quoteDetail = item?.rejected_quote ? `, цитата не найдена: "${item.rejected_quote.slice(0, 60)}"` : '';
+        return `критерий:${cid} (${item?.verdict || 'unconfirmed'}${quoteDetail})`;
+      });
+      const disputedList = [...disputedFieldDetails, ...disputedCriteriaDetails];
       console.log(
-        `[GigaChat Verifier] Фактчек завершён: вердикт="${verified.verification_report?.summary_verdict || 'ок'}", флагов полей=${flagsCount}, флагов критериев=${critFlagsCount}, отсечено фейковых цитат=${caughtQuotes}`
+        `[GigaChat Verifier] Фактчек завершён: вердикт="${verified.verification_report?.summary_verdict || 'ок'}", флагов полей=${flagsCount}, флагов критериев=${critFlagsCount}, отсечено фейковых цитат=${caughtQuotes}${
+          disputedList.length > 0 ? ` | Спорные поля: ${disputedList.join('; ')}` : ''
+        }`
       );
       return verified;
     } catch (verifyErr: any) {
@@ -1057,6 +1139,9 @@ export {
   buildCallEvaluation,
   extractCallEvaluation,
   harmonizeMistakesAndEvaluation,
+  isReminderEveMistake,
+  isCallOnOrAfterVisitDay,
+  filterOutdatedReminderMistakes,
   splitSpeakerLines
 } from './evaluationUtils.js';
 
@@ -1083,6 +1168,7 @@ import {
   buildCallEvaluation,
   extractCallEvaluation,
   harmonizeMistakesAndEvaluation,
+  filterOutdatedReminderMistakes,
   splitSpeakerLines
 } from './evaluationUtils.js';
 
@@ -1280,7 +1366,8 @@ export function formatSummaryWithEssence(
   operatorMistakes?: string[] | string | null,
   recommendations?: string[] | string | null,
   operatorComment?: string | null,
-  callEvaluation?: CallEvaluation | null
+  callEvaluation?: CallEvaluation | null,
+  callTimestamp?: string
 ): {
   formattedSummary: string;
   essence: EssenceDetails;
@@ -1541,10 +1628,17 @@ export function formatSummaryWithEssence(
   );
 
   if (evalForHarmonization.overall_score !== null && !isNaN(evalForHarmonization.overall_score)) {
-    resolvedScore = Math.max(1, Math.min(10, Math.round(evalForHarmonization.overall_score)));
+    resolvedScore = evalForHarmonization.overall_score;
   }
 
-  const harmonized = harmonizeMistakesAndEvaluation(mistakesList, adviceList, evalForHarmonization, transcript);
+  const harmonized = harmonizeMistakesAndEvaluation(
+    mistakesList,
+    adviceList,
+    evalForHarmonization,
+    transcript,
+    callTimestamp,
+    essence.date
+  );
   mistakesList = harmonized.mistakes;
   adviceList = harmonized.advice;
 
@@ -1742,6 +1836,8 @@ export function parseGigaChatJson(
       recommendations: `Повторить попытку дозвона клиенту в рабочее время салона «${salon}».`,
       missed_opportunities: [],
       summary_source: 'template',
+      mistakes_source: 'template',
+      feedback_source: 'template',
     };
   }
 
@@ -1872,10 +1968,12 @@ export function parseGigaChatJson(
   }
 
   // Извлечение конкретных ошибок оператора из json ответа модели (поддерживает audit.mistakes и operator_mistakes)
+  const hasModelMistakesField =
+    parsed.operator_mistakes !== undefined || (rawAudit !== null && rawAudit.mistakes !== undefined);
   let rawMistakes: string[] = [];
-  const sourceMistakes = parsed.operator_mistakes ?? rawAudit?.mistakes;
+  const sourceMistakes = parsed.operator_mistakes !== undefined ? parsed.operator_mistakes : rawAudit?.mistakes;
   if (Array.isArray(sourceMistakes)) {
-    rawMistakes = sourceMistakes.map((m: any) => String(m).trim()).filter(Boolean);
+    rawMistakes = sourceMistakes.map((m: any) => String(m ?? '').trim()).filter(Boolean);
   } else if (typeof sourceMistakes === 'string' && sourceMistakes.trim().length > 0) {
     rawMistakes = [sourceMistakes.trim()];
   }
@@ -1966,7 +2064,15 @@ export function parseGigaChatJson(
     parsed.operator_comment && parsed.operator_comment.trim().length > 0
       ? parsed.operator_comment
       : `Администратор обработал обращение по регламенту салона «${salon}».`;
-  const recommendations = parsed.recommendations || `Соблюдать стандарты сервиса салона «${salon}».`;
+  const hasModelRecommendationsField = parsed.recommendations !== undefined && parsed.recommendations !== null;
+  const rawModelRecommendations: string[] = Array.isArray(parsed.recommendations)
+    ? parsed.recommendations.map((r: any) => String(r ?? '').trim()).filter(Boolean)
+    : typeof parsed.recommendations === 'string' && parsed.recommendations.trim().length > 0
+    ? [parsed.recommendations.trim()]
+    : [];
+  const recommendations = hasModelRecommendationsField
+    ? rawModelRecommendations
+    : [`Соблюдать стандарты сервиса салона «${salon}».`];
 
   // Оценка звонка по 10 критериям (принимает как criteria_scores[], так и audit.criteria[])
   let rawCriteria: any[] = Array.isArray(parsed.criteria_scores)
@@ -2049,9 +2155,9 @@ export function parseGigaChatJson(
     }));
   }
 
-  // Итоговый балл оператора синхронизируется со средним баллом по применимым критериям
+  // Итоговый балл оператора строго равен среднему баллу по применимым критериям (evaluation.overall_score)
   if (evaluation.overall_score !== null && !isNaN(evaluation.overall_score)) {
-    score = Math.max(1, Math.min(10, Math.round(evaluation.overall_score)));
+    score = evaluation.overall_score;
   }
 
   // Структурированное резюме от модели: маппинг как parsed.structured_summary, так и нового parsed.summary
@@ -2086,21 +2192,22 @@ export function parseGigaChatJson(
 
   const summarySource: 'model' | 'template' = hasValidModelSummary ? 'model' : 'template';
 
-  const recArray: string[] = Array.isArray(recommendations)
-    ? recommendations.map((r: any) => String(r ?? '').trim()).filter(Boolean)
-    : typeof recommendations === 'string' && recommendations.trim()
-    ? [recommendations.trim()]
-    : [];
+  const recArray: string[] = recommendations.map((r) => String(r ?? '').trim()).filter(Boolean);
+  const visitDateContext = [date, rawDateTimeFromFacts, modelStruct.offered_date_time].filter(Boolean).join(' ');
 
   let formattedSummary: string;
   let essence: EssenceDetails;
   let finalStructuredSummary: StructuredCallSummary;
   let finalMistakes: string[];
   let finalAdvice: string[];
+  let mistakesSource: 'model' | 'template' = 'template';
+  let feedbackSource: 'model' | 'template' = 'template';
 
   if (hasValidModelSummary) {
-    // ПРИОРИТЕТ МОДЕЛИ: сохраняем summary.short_summary, summary.booking_done и summary.manager_next_steps КАК ЕСТЬ.
-    // Шаблоны buildContextGroundedSummary и extractStructuredCallSummary НЕ перезаписывают валидный ответ модели.
+    // ПРИОРИТЕТ МОДЕЛИ: сохраняем summary.short_summary, summary.booking_done, summary.manager_next_steps,
+    // а также audit.mistakes / operator_mistakes и recommendations КАК ЕСТЬ.
+    // Шаблоны buildContextGroundedSummary, extractStructuredCallSummary и harmonizeMistakesAndEvaluation
+    // НЕ перезаписывают валидный ответ модели и применяются ТОЛЬКО как fallback при отсутствии поля.
     essence = {
       service: service || null,
       date: date || null,
@@ -2108,9 +2215,44 @@ export function parseGigaChatJson(
       master: master || null,
     };
 
-    const harmonized = harmonizeMistakesAndEvaluation(rawMistakes, recArray, evaluation, fullTranscript);
-    finalMistakes = harmonized.mistakes && harmonized.mistakes.length > 0 ? harmonized.mistakes : [];
-    finalAdvice = harmonized.advice && harmonized.advice.length > 0 ? harmonized.advice : recArray;
+    let lazyHarmonized: { mistakes: string[]; advice: string[] } | null = null;
+    const getLazyHarmonized = () => {
+      if (!lazyHarmonized) {
+        lazyHarmonized = harmonizeMistakesAndEvaluation(
+          rawMistakes,
+          rawModelRecommendations,
+          evaluation,
+          fullTranscript,
+          callTimestamp,
+          visitDateContext
+        );
+      }
+      return lazyHarmonized;
+    };
+
+    const usedModelMistakes = hasModelMistakesField;
+    const usedModelRecommendations =
+      hasModelRecommendationsField && (rawModelRecommendations.length > 0 || Array.isArray(parsed.recommendations));
+
+    if (usedModelMistakes) {
+      finalMistakes = filterOutdatedReminderMistakes(rawMistakes, callTimestamp, visitDateContext, fullTranscript);
+    } else {
+      finalMistakes = filterOutdatedReminderMistakes(
+        getLazyHarmonized().mistakes,
+        callTimestamp,
+        visitDateContext,
+        fullTranscript
+      );
+    }
+
+    if (usedModelRecommendations) {
+      finalAdvice = rawModelRecommendations;
+    } else {
+      finalAdvice = getLazyHarmonized().advice;
+    }
+
+    mistakesSource = usedModelMistakes ? 'model' : 'template';
+    feedbackSource = usedModelMistakes || usedModelRecommendations ? 'model' : 'template';
 
     const serviceStr = essence.service || 'не указана';
     const dateStr = essence.date || 'не указана';
@@ -2118,8 +2260,8 @@ export function parseGigaChatJson(
     const masterStr = essence.master || 'не выбран';
     const essencePrefix = `Суть обращения: услуга — ${serviceStr}, дата — ${dateStr}, время — ${timeStr}, мастер — ${masterStr}.`;
 
-    const mistakesFormatted = finalMistakes.join('; ');
-    const adviceFormatted = finalAdvice.join('; ');
+    const mistakesFormatted = finalMistakes.length > 0 ? finalMistakes.join('; ') : 'не выявлены';
+    const adviceFormatted = finalAdvice.length > 0 ? finalAdvice.join('; ') : 'не требуются';
     const managerEvaluationBlock = `Разбор работы менеджера (оценка ${score}/10):\n- Ошибки и недочеты: ${mistakesFormatted}\n- Советы по оптимизации: ${adviceFormatted}`;
 
     // Сохраняем summary.short_summary модели verbatim (не подменяем шаблонным пересказом)
@@ -2228,14 +2370,19 @@ export function parseGigaChatJson(
     formattedSummary = templateFormatted.formattedSummary;
     essence = templateFormatted.essence;
     finalStructuredSummary = templateFormatted.structuredSummary;
-    finalMistakes = templateFormatted.mistakes && templateFormatted.mistakes.length > 0 ? templateFormatted.mistakes : [];
+    finalMistakes = filterOutdatedReminderMistakes(
+      templateFormatted.mistakes && templateFormatted.mistakes.length > 0 ? templateFormatted.mistakes : [],
+      callTimestamp,
+      visitDateContext,
+      fullTranscript
+    );
     finalAdvice =
       templateFormatted.advice && templateFormatted.advice.length > 0
         ? templateFormatted.advice
         : recArray;
   }
 
-  console.log(`[Summary source: ${summarySource}]`);
+  console.log(`[Summary source: ${summarySource}] [Mistakes source: ${mistakesSource}] [Feedback source: ${feedbackSource}]`);
 
   const result: AnalysisResult = {
     transcript_summary: formattedSummary,
@@ -2282,6 +2429,8 @@ export function parseGigaChatJson(
     recommendations: finalAdvice,
     missed_opportunities: [],
     summary_source: summarySource,
+    mistakes_source: mistakesSource,
+    feedback_source: feedbackSource,
   };
 
   // Прокидывание упущенных возможностей из ответа модели (ШАГ 7 системного промпта)
@@ -2321,15 +2470,20 @@ export function generateLocalFallbackAnalysis(
   transcript: string,
   _model: GigaChatModel,
   callDurationSeconds?: number,
-  customSalonName?: string
+  customSalonName?: string,
+  fallbackReason?: string,
+  callTimestamp?: string
 ): AnalysisResult {
   const salon = (customSalonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
   const rawClean = (transcript || '').trim();
   const rawLower = rawClean.toLowerCase();
+  const explicitReason = (fallbackReason || '').trim();
 
   // 1. Жёсткий предохранитель: звонки менее 10 секунд без реального диалога
   if (callDurationSeconds !== undefined && callDurationSeconds < 10) {
-    console.log('[Summary source: template]');
+    const reason = explicitReason || `длительность звонка < 10 сек (${callDurationSeconds} сек)`;
+    console.warn(`[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${reason}`);
+    console.log('[Summary source: template] [Mistakes source: template] [Feedback source: template]');
     const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
     const failedStruct = extractStructuredCallSummary('', 'Разговор не состоялся', undefined, salon, 'не применимо');
     return {
@@ -2360,6 +2514,9 @@ export function generateLocalFallbackAnalysis(
       operator_comment: `Оценка не выставляется: разговор не состоялся (длительность ${callDurationSeconds} сек менее 10 секунд).`,
       recommendations: `Повторить попытку дозвона клиенту в рабочее время салона «${salon}».`,
       summary_source: 'template',
+      mistakes_source: 'template',
+      feedback_source: 'template',
+      fallback_reason: reason,
     };
   }
 
@@ -2370,7 +2527,9 @@ export function generateLocalFallbackAnalysis(
     rawLower.includes('запись разговора и стенограмма отсутствуют');
 
   if (isPlaceholderOrEmpty) {
-    console.log('[Summary source: template]');
+    const reason = explicitReason || 'пустая стенограмма / отсутствует разборчивая речь';
+    console.warn(`[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${reason}`);
+    console.log('[Summary source: template] [Mistakes source: template] [Feedback source: template]');
     const durLabel = callDurationSeconds !== undefined ? ` (длительность ${callDurationSeconds} сек.)` : '';
     const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
     const failedStruct = extractStructuredCallSummary('', 'Разговор не состоялся', undefined, salon, 'не применимо');
@@ -2402,6 +2561,9 @@ export function generateLocalFallbackAnalysis(
       operator_comment: `Оценка не выставляется: аудиозапись${durLabel} не содержит разборчивого диалога оператора и клиента.`,
       recommendations: 'Проверить качество связи или повторить вызов.',
       summary_source: 'template',
+      mistakes_source: 'template',
+      feedback_source: 'template',
+      fallback_reason: reason,
     };
   }
 
@@ -2411,7 +2573,9 @@ export function generateLocalFallbackAnalysis(
 
   // 4. Несостоявшийся разговор / чистый автоответчик (после удаления IVR живого диалога не осталось)
   if (ctx.category === 'not_happened') {
-    console.log('[Summary source: template]');
+    const reason = explicitReason || 'разговор не состоялся (автоответчик или обрыв)';
+    console.warn(`[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${reason}`);
+    console.log('[Summary source: template] [Mistakes source: template] [Feedback source: template]');
     const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
     const failedStruct = extractStructuredCallSummary('', 'Разговор не состоялся', undefined, salon, 'не применимо');
     return {
@@ -2442,8 +2606,14 @@ export function generateLocalFallbackAnalysis(
       operator_comment: 'Разговор не состоялся: зафиксирован автоответчик или обрыв до начала диалога (оценка не выставляется).',
       recommendations: `Повторить звонок клиенту в рабочие часы салона «${salon}».`,
       summary_source: 'template',
+      mistakes_source: 'template',
+      feedback_source: 'template',
+      fallback_reason: reason,
     };
   }
+
+  const finalFallbackReason = explicitReason || 'локальный резервный генератор (причина не передана)';
+  console.warn(`[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${finalFallbackReason}`);
 
   // 5. Состоявшийся разговор — классифицированный строго по очищенной стенограмме (без IVR)
   const essence = extractEssenceDetails(formattedTranscript, undefined, salon);
@@ -2481,9 +2651,10 @@ export function generateLocalFallbackAnalysis(
     salon
   );
 
-  const score = evaluation.overall_score !== null && !isNaN(evaluation.overall_score)
-    ? Math.max(1, Math.min(10, Math.round(evaluation.overall_score)))
-    : 8;
+  const score =
+    evaluation.overall_score !== null && !isNaN(evaluation.overall_score)
+      ? evaluation.overall_score
+      : 8;
 
   const { formattedSummary, structuredSummary, mistakes, advice } = formatSummaryWithEssence(
     conclusion,
@@ -2494,10 +2665,16 @@ export function generateLocalFallbackAnalysis(
     undefined,
     undefined,
     undefined,
-    evaluation
+    evaluation,
+    callTimestamp
   );
 
-  const finalMistakes = mistakes && mistakes.length > 0 ? mistakes : [];
+  const finalMistakes = filterOutdatedReminderMistakes(
+    mistakes && mistakes.length > 0 ? mistakes : [],
+    callTimestamp,
+    essence.date,
+    formattedTranscript
+  );
   const finalAdvice = advice && advice.length > 0 ? advice : [`Соблюдать стандарты сервиса салона «${salon}».`];
 
   let comment = `Администратор обработал обращение по регламенту салона «${salon}».`;
@@ -2527,7 +2704,7 @@ export function generateLocalFallbackAnalysis(
     ? `Обращение по услуге: ${essence.service}`
     : 'Консультация / обращение в салон';
 
-  console.log('[Summary source: template]');
+  console.log('[Summary source: template] [Mistakes source: template] [Feedback source: template]');
   return {
     transcript_summary: formattedSummary,
     booking_status: bookingStatus,
@@ -2564,6 +2741,9 @@ export function generateLocalFallbackAnalysis(
     operator_comment: comment,
     recommendations: finalAdvice,
     summary_source: 'template',
+    mistakes_source: 'template',
+    feedback_source: 'template',
+    fallback_reason: finalFallbackReason,
   };
 }
 
@@ -2612,10 +2792,16 @@ export async function generateNextStepsWithAI(
     return { steps: fallbackSteps, items };
   }
 
+  if ((!call.timestamp || !String(call.timestamp).trim()) && call.transcript && call.transcript.trim().length > 0) {
+    console.warn('[GigaChat WARNING] call_timestamp отсутствует — временные правила next_steps не применяются');
+  }
+  const formattedCallDt = formatCallDateTimeInSalonTz(call.timestamp) || 'не указано';
+
   const prompt = `Ты — старший управляющий и координатор клиентского сервиса салона красоты «${salon}».
 Твоя задача — составить четкий, практичный список задач (Next Steps / Следующие шаги) для дежурного администратора салона по итогам телефонного разговора.
 
 ДАННЫЕ ЗВОНКА:
+- Дата и время звонка (метаданные): ${formattedCallDt}
 - Статус записи: ${call.booking_status || call.key_facts?.booking_status || 'консультация'}
 - Суть обращения: ${call.key_facts?.client_issue || 'консультация'}
 - Услуга: ${call.key_facts?.service || 'не указана'}
@@ -2632,7 +2818,7 @@ ${call.transcript}
 ТРЕБОВАНИЯ К NEXT STEPS:
 1. Составь от 3 до 5 конкретных шагов для администратора салона.
 2. Каждый шаг должен начинаться с глагола в неопределенной форме (Внести, Отправить, Позвонить, Проверить, Подготовить, Согласовать).
-3. Шаги должны учитывать специфику работы салона красоты (CRM Yclients, мессенджеры WhatsApp/Telegram, напоминания, расходники, график мастеров).
+3. Обязательно учитывай соотношение времени звонка и времени визита: если звонок произошёл в день визита или после наступления времени визита (или клиент уже в пути), ЗАПРЕЩЕНО предлагать «напомнить за 24 часа» или «зафиксировать новую бронь» для уже существующей записи.
 4. Обязательно учти договоренности и обещания, зафиксированные в диалоге.
 5. Верни результат СТРОГО в формате JSON-массива строк, без пояснительного текста до и после:
 ["действие 1", "действие 2", "действие 3"]`;

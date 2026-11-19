@@ -675,11 +675,12 @@ async function tryChatAudioFallback(
   config: GigaAmConfig,
   label: string
 ): Promise<{ ok: boolean; status: number; statusText: string; rawBody: string; text: string }> {
-  // Для OpenAI-совместимого input_audio гарантированно принимаются wav/mp3
+  // Для Cloud.ru сразу перекодируем MP3/OGG и любые не-WAV контейнеры в чистый WAV 16кГц моно PCM,
+  // чтобы не получать HTTP 400 на первой отправке.
   let effectiveBuf = audioBuffer;
   let effectiveMeta = meta;
   let wasConvertedToWav = false;
-  if (meta.ext !== 'wav' && meta.ext !== 'mp3') {
+  if ((config.isCloudRu && meta.ext !== 'wav') || (meta.ext !== 'wav' && meta.ext !== 'mp3')) {
     const wavBuf = convertToWav16kMono(audioBuffer);
     if (wavBuf && wavBuf.length > 44) {
       effectiveBuf = wavBuf;
@@ -783,6 +784,23 @@ async function postAudioToGigaAm(
   const label = config.isCloudRu ? 'GigaASR (Cloud.ru)' : 'GigaAM v3';
 
   if (config.isCloudRu) {
+    // Cloud.ru GigaASR стабильно отклоняет MP3/OGG с HTTP 400 — сразу конвертируем в WAV 16кГц моно PCM
+    // перед первым запросом, чтобы не тратить время на лишние 400-ответы.
+    let cloudBuffer = audioBuffer;
+    let cloudMeta = meta;
+    let cloudAllowWavFallback = allowWavFallback;
+    if (meta.ext !== 'wav') {
+      const wavBuf = convertToWav16kMono(audioBuffer);
+      if (wavBuf && wavBuf.length > 44) {
+        console.log(
+          `[${label}] Конвертация ${meta.ext} -> WAV 16кГц моно (${Math.round(wavBuf.length / 1024)} КБ) до отправки в Cloud.ru`
+        );
+        cloudBuffer = wavBuf;
+        cloudMeta = { ext: 'wav', mime: 'audio/wav' };
+        cloudAllowWavFallback = false;
+      }
+    }
+
     const {
       config: resolvedConfig,
       catalogModels,
@@ -796,7 +814,7 @@ async function postAudioToGigaAm(
       (isDirectChatUrl || chatCompletionsFallbackUrls.has(resolvedConfig.apiUrl)) &&
       !transcriptionsFallbackUrls.has(resolvedConfig.apiUrl)
     ) {
-      const chatRes = await tryChatAudioFallback(audioBuffer, meta, resolvedConfig, label);
+      const chatRes = await tryChatAudioFallback(cloudBuffer, cloudMeta, resolvedConfig, label);
       if (chatRes.ok) {
         if (onRawSegments && chatRes.text) {
           onRawSegments([{ text: chatRes.text }]);
@@ -808,8 +826,8 @@ async function postAudioToGigaAm(
       if (isDirectChatUrl && (chatRes.status === 400 || chatRes.status === 404 || chatRes.status === 405 || chatRes.status === 422)) {
         const txUrl = getTranscriptionsUrlFromConfig(resolvedConfig.apiUrl);
         const txRes = await sendMultipartOnce(
-          audioBuffer,
-          meta,
+          cloudBuffer,
+          cloudMeta,
           { ...resolvedConfig, apiUrl: txUrl },
           fieldName,
           { responseFormat: preferVerboseJson ? 'verbose_json' : 'json', includeLanguage: true }
@@ -824,8 +842,8 @@ async function postAudioToGigaAm(
         }
         const txMinimalRes = !txRes.ok && txRes.status !== 401 && txRes.status !== 403 && txRes.status !== 404
           ? await sendMultipartOnce(
-              audioBuffer,
-              meta,
+              cloudBuffer,
+              cloudMeta,
               { ...resolvedConfig, apiUrl: txUrl },
               fieldName,
               { includeLanguage: false }
@@ -865,7 +883,7 @@ async function postAudioToGigaAm(
 
     let lastRes: { status: number; ok: boolean; statusText: string; rawBody: string } | null = null;
     for (const profile of paramProfiles) {
-      const res = await sendMultipartOnce(audioBuffer, meta, effectiveTxConfig, fieldName, profile);
+      const res = await sendMultipartOnce(cloudBuffer, cloudMeta, effectiveTxConfig, fieldName, profile);
       lastRes = res;
 
       if (res.ok) {
@@ -904,7 +922,7 @@ async function postAudioToGigaAm(
         );
         const altCfg: GigaAmConfig = { ...effectiveTxConfig, variant: altModel };
         for (const profile of [{ responseFormat: 'json', includeLanguage: true }, { includeLanguage: false }] as CloudRuAttemptOpts[]) {
-          const altRes = await sendMultipartOnce(audioBuffer, meta, altCfg, fieldName, profile);
+          const altRes = await sendMultipartOnce(cloudBuffer, cloudMeta, altCfg, fieldName, profile);
           if (altRes.ok) {
             const parsedText = parseTranscriptionBody(altRes.rawBody, label);
             if (parsedText) {
@@ -927,7 +945,7 @@ async function postAudioToGigaAm(
         console.warn(
           `[${label}] ${effectiveTxConfig.apiUrl} вернул HTTP ${lastRes.status}, переключение на ${getChatCompletionsUrlFromConfig(effectiveTxConfig.apiUrl)}...`
         );
-        const chatRes = await tryChatAudioFallback(audioBuffer, meta, effectiveTxConfig, label);
+        const chatRes = await tryChatAudioFallback(cloudBuffer, cloudMeta, effectiveTxConfig, label);
         if (chatRes.ok) {
           chatCompletionsFallbackUrls.add(resolvedConfig.apiUrl);
           return chatRes.text;
@@ -952,8 +970,8 @@ async function postAudioToGigaAm(
 
     // Если запрос прошёл (200 OK), но текст пустой — не считаем это HTTP-ошибкой
     if (lastRes?.ok) {
-      if (allowWavFallback && meta.ext !== 'wav') {
-        const wavBuf = convertToWav16kMono(audioBuffer);
+      if (cloudAllowWavFallback && cloudMeta.ext !== 'wav') {
+        const wavBuf = convertToWav16kMono(cloudBuffer);
         if (wavBuf && wavBuf.length > 44) {
           console.log(`[${label}] Повторная отправка в универсальном формате WAV 16кГц моно...`);
           return postAudioToGigaAm(wavBuf, 'audio/wav', config, fieldName, false);
@@ -962,16 +980,16 @@ async function postAudioToGigaAm(
       return '';
     }
 
-    // Если шлюз отклонил формат контейнера (например GSM WAV, OGG или нестандартный MP3) — перекодируем в WAV 16kHz PCM
+    // Если шлюз отклонил нестандартный WAV (например GSM WAV или не 16кГц) — перекодируем в WAV 16kHz PCM
     if (
-      allowWavFallback &&
+      cloudAllowWavFallback &&
       lastRes &&
       (lastRes.status === 400 || lastRes.status === 415 || lastRes.status === 422 || lastRes.status === 500)
     ) {
-      const wavBuf = convertToWav16kMono(audioBuffer);
+      const wavBuf = convertToWav16kMono(cloudBuffer);
       if (wavBuf && wavBuf.length > 44) {
         console.warn(
-          `[${label}] Ответ HTTP ${lastRes.status} для ${meta.ext}. Конвертация в стандартный WAV 16кГц моно и повтор...`
+          `[${label}] Ответ HTTP ${lastRes.status} для ${cloudMeta.ext}. Конвертация в стандартный WAV 16кГц моно и повтор...`
         );
         return postAudioToGigaAm(wavBuf, 'audio/wav', config, fieldName, false);
       }

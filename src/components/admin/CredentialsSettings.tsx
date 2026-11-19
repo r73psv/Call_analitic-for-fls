@@ -1221,13 +1221,35 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
             <div className="flex items-center gap-2">
               <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full border ${
                 customSystemPrompt.trim().length > 0
-                  ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
-                  : 'bg-slate-100 text-slate-700 border-slate-200'
+                  ? 'bg-amber-50 text-amber-800 border-amber-300'
+                  : 'bg-emerald-50 text-emerald-800 border-emerald-200'
               }`}>
-                {customSystemPrompt.trim().length > 0 ? '✓ Пользовательский промпт активен' : '⚙️ Заводской эталон (по умолчанию)'}
+                {customSystemPrompt.trim().length > 0 ? '⚠️ Кастомный промпт перекрывает встроенный' : '✓ Встроенный эталон активен'}
               </span>
             </div>
           </div>
+
+          {customSystemPrompt.trim().length > 0 && (
+            <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-900">
+              <div className="flex items-start gap-2.5">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-bold">Внимание: используется кастомный промпт вместо встроенного</div>
+                  <p className="text-[11px] text-amber-800 mt-0.5 leading-relaxed">
+                    Сохранённый пользовательский текст полностью перекрывает встроенный системный шаблон (поэтому правки встроенного эталона, правил этапов 1–4 и few-shot примеров не применяются, хотя метаданные времени звонка добавляются автоматически). Чтобы вернуться к актуальному встроенному промпту, очистите поле или нажмите кнопку справа.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleResetPromptToDefault}
+                disabled={savingPromptOnly}
+                className="shrink-0 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-semibold rounded-lg text-[11px] transition-colors shadow-xs"
+              >
+                Сбросить к встроенному
+              </button>
+            </div>
+          )}
 
           {/* Информационный баннер по правилам извлечения (ФИО с заглавной буквы, 152-ФЗ, запрет паразитных слов) */}
           <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-2 text-xs">

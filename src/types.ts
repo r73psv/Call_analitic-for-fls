@@ -124,6 +124,8 @@ export interface VerifierField {
   quote: string | null;
   corrected_value: string | null;
   hallucinated_quote?: boolean;
+  rejected_quote?: string | null;
+  suspected_false_positive?: boolean;
 }
 
 export interface CriteriaVerificationItem {
@@ -131,6 +133,8 @@ export interface CriteriaVerificationItem {
   verdict: VerifierVerdict;
   quote: string | null;
   hallucinated_quote?: boolean;
+  rejected_quote?: string | null;
+  suspected_false_positive?: boolean;
 }
 
 export interface CallVerificationReport {
@@ -138,7 +142,9 @@ export interface CallVerificationReport {
   fields: VerifierField[];
   flags: string[];
   criteria_flags?: string[];
+  criteria_items?: CriteriaVerificationItem[];
   hallucinated_quotes_caught?: number;
+  suspected_false_positives?: string[];
   verified_at?: string;
 }
 
@@ -276,6 +282,9 @@ export interface CallRecord {
   verification_flags?: string[];
   missed_opportunities?: { type: string; evidence: string; what_to_say: string }[];
   summary_source?: 'model' | 'template';
+  mistakes_source?: 'model' | 'template';
+  feedback_source?: 'model' | 'template';
+  fallback_reason?: string;
 }
 
 export interface ContextClarification {
@@ -540,6 +549,9 @@ export interface AnalysisResult {
   verification_report?: CallVerificationReport;
   verification_flags?: string[];
   summary_source?: 'model' | 'template';
+  mistakes_source?: 'model' | 'template';
+  feedback_source?: 'model' | 'template';
+  fallback_reason?: string;
 }
 
 export type NotificationType = 'call_analyzed' | 'dispute_detected' | 'booking_confirmed' | 'call_failed' | 'incoming_call';

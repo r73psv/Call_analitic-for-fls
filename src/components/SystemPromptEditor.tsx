@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { 
-  Sparkles, CheckCircle2, AlertCircle, FileText, RotateCcw, 
+  Sparkles, CheckCircle2, AlertCircle, AlertTriangle, FileText, RotateCcw, 
   Save, RefreshCw, Check, BookOpen, ShieldCheck, Zap
 } from 'lucide-react';
 
@@ -150,15 +150,36 @@ export function SystemPromptEditor({
         <div className="flex items-center gap-2">
           <span className={`text-[11px] font-bold px-3 py-1 rounded-full border ${
             customSystemPrompt.trim().length > 0
-              ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/40'
-              : 'bg-white/10 text-slate-300 border-white/20'
+              ? 'bg-amber-500/20 text-amber-200 border-amber-400/50'
+              : 'bg-emerald-500/20 text-emerald-200 border-emerald-400/40'
           }`}>
-            {customSystemPrompt.trim().length > 0 ? '✓ Пользовательский промпт активен' : '⚙️ Заводской эталон'}
+            {customSystemPrompt.trim().length > 0 ? '⚠️ Кастомный промпт перекрывает встроенный' : '✓ Встроенный эталон активен'}
           </span>
         </div>
       </div>
 
       <div className="p-6 space-y-5">
+        {customSystemPrompt.trim().length > 0 && (
+          <div className="p-4 bg-amber-50 border border-amber-300 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-900">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <div className="font-bold">Используется кастомный промпт вместо встроенного</div>
+                <p className="text-[11px] text-amber-800 mt-0.5 leading-relaxed">
+                  Пользовательский текст сейчас перекрывает встроенный системный шаблон, поэтому обновления встроенных инструкций и примеров к звонкам не применяются (блок метаданных времени звонка добавляется автоматически). Для возврата к встроенному промпту сбросьте изменения.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleResetToDefault}
+              disabled={saving}
+              className="shrink-0 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-semibold rounded-lg text-[11px] transition-colors shadow-xs"
+            >
+              Вернуть встроенный
+            </button>
+          </div>
+        )}
         {/* Информационный регламент */}
         <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2 text-xs">
           <div className="font-bold text-slate-800 flex items-center gap-2">

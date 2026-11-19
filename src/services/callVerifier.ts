@@ -287,7 +287,7 @@ export async function verifySummary(
 
   let hallucinatedQuotesCaught = 0;
 
-  // Программная проверка цитат БЕЗ повторного запроса к LLM
+  // Программная проверка цитат БЕЗ повторного запроса к LLM + детекция suspected false positive
   const verifiedFields: VerifierField[] = parsed.fields.map((f) => {
     if (f.quote && !isQuotePresentInTranscript(transcript, f.quote)) {
       hallucinatedQuotesCaught++;
@@ -298,8 +298,26 @@ export async function verifySummary(
         ...f,
         verdict: 'unconfirmed',
         quote: null,
+        rejected_quote: f.quote,
         hallucinated_quote: true,
       };
+    }
+    if (f.verdict === 'unconfirmed' && !isAbsenceValue(f.draft_value)) {
+      const candidateMatch =
+        f.quote && isQuotePresentInTranscript(transcript, f.quote)
+          ? f.quote
+          : isQuotePresentInTranscript(transcript, f.draft_value)
+          ? f.draft_value
+          : null;
+      if (candidateMatch) {
+        console.warn(
+          `[GigaChat Verifier] suspected false positive: поле="${f.field}", вердикт="unconfirmed", цитата найдена дословно в стенограмме: "${candidateMatch.slice(0, 120)}"`
+        );
+        return {
+          ...f,
+          suspected_false_positive: true,
+        };
+      }
     }
     if (f.verdict === 'confirmed' && !f.quote && !isAbsenceValue(f.draft_value)) {
       return {
@@ -370,6 +388,9 @@ export async function verifyCriteriaWithTranscript(
   );
 
   let hallucinatedQuotesCaught = 0;
+  const origCriteriaById = new Map<string, CallEvaluationCriterion>();
+  applicable.forEach((c) => origCriteriaById.set(c.id, c));
+
   const sanitized = items.map((it) => {
     if (it.quote && !isQuotePresentInTranscript(transcript, it.quote)) {
       hallucinatedQuotesCaught++;
@@ -377,8 +398,27 @@ export async function verifyCriteriaWithTranscript(
         ...it,
         verdict: 'unconfirmed' as VerifierVerdict,
         quote: null,
+        rejected_quote: it.quote,
         hallucinated_quote: true,
       };
+    }
+    if (it.verdict === 'unconfirmed') {
+      const origQuote = origCriteriaById.get(it.id)?.evidence_quote || null;
+      const candidateMatch =
+        it.quote && isQuotePresentInTranscript(transcript, it.quote)
+          ? it.quote
+          : origQuote && isQuotePresentInTranscript(transcript, origQuote)
+          ? origQuote
+          : null;
+      if (candidateMatch) {
+        console.warn(
+          `[GigaChat Verifier] suspected false positive: критерий="${it.id}", вердикт="unconfirmed", цитата найдена дословно в стенограмме: "${candidateMatch.slice(0, 120)}"`
+        );
+        return {
+          ...it,
+          suspected_false_positive: true,
+        };
+      }
     }
     if (it.verdict === 'confirmed' && !it.quote) {
       return {
@@ -563,12 +603,12 @@ export function applyVerdicts(
         applicable_count: scoreCalc.applicableCount,
       };
     }
-    if (scoreCalc.overallScore !== null && typeof updatedOperatorScore === 'number') {
-      updatedOperatorScore = Math.max(1, Math.min(10, Math.round(scoreCalc.overallScore)));
+    if (scoreCalc.overallScore !== null) {
+      updatedOperatorScore = scoreCalc.overallScore;
     }
   }
 
-  // Синхронизируем строку «Суть обращения: ...» в transcript_summary, если поля уточнились/помечены
+  // Синхронизируем строку «Суть обращения: ...» и число оценки в «Разбор работы менеджера (оценка X/10)»
   let updatedTranscriptSummary = draft.transcript_summary;
   if (fieldFlags.length > 0 && updatedTranscriptSummary) {
     const svc = keyFacts.service || struct.requested_service || 'не озвучено';
@@ -580,9 +620,19 @@ export function applyVerdicts(
       updatedTranscriptSummary = updatedTranscriptSummary.replace(/^Суть обращения:[^\n]*/i, newEssence);
     }
   }
+  if (updatedTranscriptSummary && typeof updatedOperatorScore === 'number' && !isNaN(updatedOperatorScore)) {
+    updatedTranscriptSummary = updatedTranscriptSummary.replace(
+      /(Разбор работы менеджера\s*\(оценка\s*)[\d.,]+(\/10\))/i,
+      `$1${updatedOperatorScore}$2`
+    );
+  }
 
   const uniqueFlags = Array.from(new Set(fieldFlags));
   const uniqueCriteriaFlags = Array.from(new Set(criteriaFlags));
+  const suspectedFalsePositives = [
+    ...report.filter((f) => f.suspected_false_positive).map((f) => f.field),
+    ...criteriaReport.filter((c) => c.suspected_false_positive).map((c) => c.id),
+  ];
 
   const verificationReport: CallVerificationReport = {
     summary_verdict:
@@ -590,7 +640,9 @@ export function applyVerdicts(
     fields: report,
     flags: uniqueFlags,
     criteria_flags: uniqueCriteriaFlags,
+    criteria_items: criteriaReport,
     hallucinated_quotes_caught: hallucinatedQuotesCaught,
+    ...(suspectedFalsePositives.length > 0 ? { suspected_false_positives: suspectedFalsePositives } : {}),
     verified_at: new Date().toISOString(),
   };
 

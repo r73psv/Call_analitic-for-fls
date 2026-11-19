@@ -14,6 +14,7 @@ interface ReanalyzeButtonProps {
   currentSttEngine?: string;
   hasAudio?: boolean;
   onReanalyzed: (updatedCall: CallRecord) => void;
+  onError?: (errorMessage: string | null) => void;
   userRole?: string;
 }
 
@@ -23,6 +24,7 @@ export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
   currentSttEngine,
   hasAudio = false,
   onReanalyzed,
+  onError,
   userRole = 'admin',
 }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -44,6 +46,7 @@ export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
     setLoading(true);
     setLoadingLabel(sttProvider ? `Транскрибация (${getSttEngineDisplayName(sttProvider)})...` : 'Анализ...');
     setError(null);
+    onError?.(null);
     setIsOpen(false);
 
     try {
@@ -65,20 +68,42 @@ export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
         }),
       });
 
+      const data = await res.json().catch(() => ({}));
+
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `Ошибка сервера: HTTP ${res.status}`);
+        if (data?.call) {
+          onReanalyzed(data.call as CallRecord);
+        }
+        const errMsg = data?.error || `Ошибка сервера: HTTP ${res.status}`;
+        setError(errMsg);
+        onError?.(errMsg);
+        return;
       }
 
-      const updated: CallRecord = await res.json();
+      const updated: CallRecord = data as CallRecord;
       onReanalyzed(updated);
       if (updated.error_message) {
         setError(updated.error_message);
+        onError?.(updated.error_message);
+      } else if (
+        updated.summary_source === 'template' &&
+        updated.fallback_reason &&
+        !/<\s*10\s*сек|0\s*сек/i.test(updated.fallback_reason)
+      ) {
+        const fbMsg = `Анализ выполнен резервным генератором, модель недоступна: ${updated.fallback_reason}`;
+        setError(fbMsg);
+        onError?.(fbMsg);
       } else if (sttProvider && updated.transcription_engine === 'none') {
-        setError(`Не удалось выполнить транскрибацию (${getSttEngineDisplayName(sttProvider)}). Проверьте настройки и журнал логов.`);
+        const sttMsg = `Не удалось выполнить транскрибацию (${getSttEngineDisplayName(sttProvider)}). Проверьте настройки и журнал логов.`;
+        setError(sttMsg);
+        onError?.(sttMsg);
+      } else {
+        onError?.(null);
       }
     } catch (err: any) {
-      setError(err.message || 'Ошибка повторного анализа');
+      const msg = err.message || 'Ошибка повторного анализа';
+      setError(msg);
+      onError?.(msg);
     } finally {
       setLoading(false);
     }

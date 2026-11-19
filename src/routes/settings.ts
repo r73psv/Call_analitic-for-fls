@@ -12,6 +12,7 @@ import { resolveActiveSttProvider } from '../services/transcriptionService.js';
 import { isYandexAuthConfigured } from '../services/yandex-auth.js';
 import { isTbankVoiceKitConfigured } from '../services/tbank-voicekit.js';
 import { getGigaAmConfig, isGigaAmConfigured, normalizeGigaamVariant } from '../services/gigaam-asr.js';
+import { isGigaChatConfigured } from '../services/gigachat-auth.js';
 
 export const settingsRouter = Router();
 
@@ -36,7 +37,7 @@ settingsRouter.get('/', async (req: Request, res: Response) => {
       yandex_speechkit_configured: isYandexAuthConfigured(),
       tbank_voicekit_configured: isTbankVoiceKitConfigured(),
       gigaam_v3_configured: isGigaAmConfigured(),
-      gigachat_configured: !!process.env.GIGACHAT_AUTH_KEY,
+      gigachat_configured: isGigaChatConfigured(),
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

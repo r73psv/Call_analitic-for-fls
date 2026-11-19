@@ -17,7 +17,7 @@ import { transcribeWithRetry, fixDuplicatedTranscript, refineTranscriptRoles } f
 import { transcribeAudio, resolveActiveSttProvider, getSttProviderLabel, normalizeSttProvider } from './src/services/transcriptionService.js';
 import { isTbankVoiceKitConfigured } from './src/services/tbank-voicekit.js';
 import { getGigaAmConfig, isGigaAmConfigured } from './src/services/gigaam-asr.js';
-import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation, harmonizeMistakesAndEvaluation, generateLocalFallbackAnalysis } from './src/services/gigachat.js';
+import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation, harmonizeMistakesAndEvaluation, filterOutdatedReminderMistakes, generateLocalFallbackAnalysis } from './src/services/gigachat.js';
 import { classifyCallContext } from './src/services/summaryUtils.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
 import { readStoreSync, writeStore } from './src/store/store.js';
@@ -29,7 +29,7 @@ import { settingsRouter } from './src/routes/settings.js';
 import { authRouter, adminUsersRouter, getCurrentUserRole, getCurrentUser, logAccess } from './src/routes/auth.js';
 import { adminRouter } from './src/routes/admin.js';
 import { isYandexAuthConfigured } from './src/services/yandex-auth.js';
-import { isGigaChatConfigured } from './src/services/gigachat-auth.js';
+import { isGigaChatConfigured, getGigaChatConfigStatus } from './src/services/gigachat-auth.js';
 import { hydrateFromS3, scheduleSyncToS3, manualSync, getSyncStatus } from './src/services/s3-sync.js';
 import { generateCallAuditPdf, generatePeriodStatsPdf, generateCallsTablePdf, PeriodStatsReportData } from './src/services/pdfReport.js';
 import { generateCallCsv, generateCallsTableCsv } from './src/services/csvExport.js';
@@ -779,7 +779,7 @@ async function executeSingleModelAttempt(
     const customPrompt = db.config?.customSystemPrompt || db.config?.credentials?.customSystemPrompt;
     appendLog('info', 'gigachat', `Отправка запроса на анализ в модель ${gigaModel} (салон «${salonName}»)...`);
     const analysis = await analyzeWithRetry(anonymizedText, gigaModel, (type, msg) => appendLog(type, 'gigachat', msg), undefined, salonName, customPrompt, callTimestamp);
-    appendLog('success', 'gigachat', `Звонок успешно проанализирован моделью ${gigaModel}. [Summary source: ${analysis.summary_source || 'model'}]`);
+    appendLog('success', 'gigachat', `Звонок успешно проанализирован моделью ${gigaModel}. [Summary source: ${analysis.summary_source || 'model'}] [Mistakes source: ${analysis.mistakes_source || 'model'}] [Feedback source: ${analysis.feedback_source || 'model'}]`);
     return {
       success: true,
       result: {
@@ -798,7 +798,7 @@ async function executeSingleModelAttempt(
           promises: []
         },
         trigger_phrases: [],
-        recommendations: Array.isArray(analysis.recommendations) ? analysis.recommendations : [analysis.recommendations],
+        recommendations: Array.isArray(analysis.recommendations) ? analysis.recommendations : (analysis.recommendations ? [analysis.recommendations] : []),
         operator_score: analysis.operator_score,
         operator_mistakes: analysis.operator_mistakes || [],
         operator_comment: analysis.operator_comment,
@@ -806,6 +806,8 @@ async function executeSingleModelAttempt(
         verification_report: analysis.verification_report,
         verification_flags: analysis.verification_flags,
         summary_source: analysis.summary_source || 'model',
+        mistakes_source: analysis.mistakes_source || 'model',
+        feedback_source: analysis.feedback_source || 'model',
         model_used: gigaModel
       }
     };
@@ -823,14 +825,17 @@ async function analyzeCallTextOrAudio(
   audioDownloadFailed: boolean = false,
   callDurationSeconds?: number,
   sttProviderOverride?: SttProvider,
-  callTimestamp?: string
+  callTimestamp?: string,
+  options?: { isManual?: boolean }
 ): Promise<Partial<CallRecord>> {
   let cleanTranscript = (transcriptInput || '').trim();
   let usedTranscriptionEngine: string | undefined;
 
   // 0. Strict check: calls under 10 seconds MUST NOT hallucinate dialogue or receive scores
   if (callDurationSeconds !== undefined && callDurationSeconds < 10) {
-    appendLog('info', 'megafon', `Звонок длительностью ${callDurationSeconds} сек (<10 сек): анализ ИИ пропущен, оценка оператора не выставляется.`);
+    const shortReason = `длительность звонка < 10 сек (${callDurationSeconds} сек)`;
+    console.warn(`[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${shortReason}`);
+    appendLog('info', 'megafon', `[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${shortReason}. Оценка оператора не выставляется.`);
     return {
       transcript: cleanTranscript || 'Разговор не состоялся (длительность менее 10 сек, диалог отсутствует).',
       summary: `Разговор не состоялся: длительность вызова ${callDurationSeconds} сек (менее 10 секунд), диалог между оператором и клиентом отсутствует.`,
@@ -848,7 +853,11 @@ async function analyzeCallTextOrAudio(
       trigger_phrases: [],
       recommendations: ['При необходимости связаться с клиентом повторно.'],
       operator_score: null,
-      operator_comment: `Оценка не выставляется: разговор не состоялся (длительность ${callDurationSeconds} сек менее 10 секунд, диалог отсутствует).`
+      operator_comment: `Оценка не выставляется: разговор не состоялся (длительность ${callDurationSeconds} сек менее 10 секунд, диалог отсутствует).`,
+      summary_source: 'template',
+      mistakes_source: 'template',
+      feedback_source: 'template',
+      fallback_reason: shortReason
     };
   }
 
@@ -1028,9 +1037,14 @@ async function analyzeCallTextOrAudio(
       callDurationSeconds,
       currentSalon,
       customPrompt,
-      callTimestamp
+      callTimestamp,
+      { throwOnUnavailable: Boolean(options?.isManual) }
     );
-    appendLog('success', 'gigachat', `Анализ звонка успешно выполнен моделью ${modelToUse}. [Summary source: ${analysis.summary_source || 'model'}]`);
+    if (analysis.summary_source === 'template' && analysis.fallback_reason) {
+      appendLog('warning', 'gigachat', `[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${analysis.fallback_reason}`);
+    } else {
+      appendLog('success', 'gigachat', `Анализ звонка успешно выполнен моделью ${modelToUse}. [Summary source: ${analysis.summary_source || 'model'}] [Mistakes source: ${analysis.mistakes_source || 'model'}] [Feedback source: ${analysis.feedback_source || 'model'}]`);
+    }
     return {
       transcript: analysis.formatted_transcript || cleanTranscript,
       summary: analysis.transcript_summary,
@@ -1047,7 +1061,7 @@ async function analyzeCallTextOrAudio(
         promises: analysis.key_facts?.promises || []
       },
       trigger_phrases: [],
-      recommendations: Array.isArray(analysis.recommendations) ? analysis.recommendations : [analysis.recommendations],
+      recommendations: Array.isArray(analysis.recommendations) ? analysis.recommendations : (analysis.recommendations ? [analysis.recommendations] : []),
       operator_score: analysis.operator_score,
       operator_mistakes: analysis.operator_mistakes || [],
       operator_comment: analysis.operator_comment,
@@ -1055,12 +1069,56 @@ async function analyzeCallTextOrAudio(
       verification_report: analysis.verification_report,
       verification_flags: analysis.verification_flags,
       summary_source: analysis.summary_source || 'model',
+      mistakes_source: analysis.mistakes_source || 'model',
+      feedback_source: analysis.feedback_source || 'model',
+      fallback_reason: analysis.summary_source === 'model' ? undefined : analysis.fallback_reason,
       model_used: modelToUse,
       ...(usedTranscriptionEngine ? { transcription_engine: usedTranscriptionEngine } : {}),
     };
   } catch (llmErr: any) {
-    appendLog('error', 'gigachat', `Ошибка анализа через GigaChat: ${llmErr.message || llmErr}`);
-    return getFallbackAnalysis(cleanTranscript, llmErr.message || String(llmErr), callDurationSeconds);
+    const fallbackReason: string =
+      llmErr?.fallbackReason ||
+      (llmErr?.isGigaChatUnavailable
+        ? 'GigaChat не настроен (ключ отсутствует)'
+        : `ошибка после 4 попыток: ${llmErr?.message || String(llmErr)}`);
+    appendLog('error', 'gigachat', `[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${fallbackReason}`);
+    const fallbackRes = generateLocalFallbackAnalysis(
+      cleanTranscript,
+      modelToUse,
+      callDurationSeconds,
+      currentSalon,
+      fallbackReason,
+      callTimestamp
+    );
+    return {
+      transcript: fallbackRes.formatted_transcript || cleanTranscript,
+      summary: fallbackRes.transcript_summary,
+      booking_status: fallbackRes.booking_status,
+      structured_summary: fallbackRes.structured_summary,
+      evaluation: fallbackRes.evaluation,
+      criteria_scores: fallbackRes.criteria_scores,
+      key_facts: {
+        ...fallbackRes.key_facts,
+        booking_status: fallbackRes.booking_status,
+        structured_summary: fallbackRes.structured_summary,
+        evaluation: fallbackRes.evaluation,
+        criteria_scores: fallbackRes.criteria_scores,
+        promises: []
+      },
+      trigger_phrases: [],
+      recommendations: Array.isArray(fallbackRes.recommendations)
+        ? fallbackRes.recommendations
+        : (fallbackRes.recommendations ? [fallbackRes.recommendations] : []),
+      operator_score: fallbackRes.operator_score,
+      operator_mistakes: fallbackRes.operator_mistakes || [],
+      operator_comment: fallbackRes.operator_comment,
+      summary_source: 'template',
+      mistakes_source: 'template',
+      feedback_source: 'template',
+      fallback_reason: fallbackReason,
+      model_used: modelToUse,
+      ...(usedTranscriptionEngine ? { transcription_engine: usedTranscriptionEngine } : {}),
+    };
   }
 }
 
@@ -1097,12 +1155,17 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
         'В случае проблем со скачиванием убедитесь, что медиасервер АТС Мегафон доступен из внешней сети.'
       ],
       operator_score: (errorReason === 'исчерпан лимит токенов' || errorReason?.includes('quota') || errorReason?.includes('limit')) ? null : 0,
-      operator_comment: `Анализ работы оператора не состоялся по технической причине:\n- ${readableError}\nПожалуйста, устраните проблему и повторите попытку запроса звонков.`
+      operator_comment: `Анализ работы оператора не состоялся по технической причине:\n- ${readableError}\nПожалуйста, устраните проблему и повторите попытку запроса звонков.`,
+      summary_source: 'template',
+      mistakes_source: 'template',
+      feedback_source: 'template',
+      fallback_reason: readableError
     };
   }
 
-  const fallbackRes = generateLocalFallbackAnalysis(transcript, 'GigaChat:Lite', callDurationSeconds, currentSalon);
-  appendLog('info', 'gigachat', 'Использован шаблонный fallback-анализ. [Summary source: template]');
+  const reason = 'вызов резервного генератора getFallbackAnalysis';
+  const fallbackRes = generateLocalFallbackAnalysis(transcript, 'GigaChat:Lite', callDurationSeconds, currentSalon, reason);
+  appendLog('info', 'gigachat', `[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${fallbackRes.fallback_reason || reason}`);
   return {
     transcript: fallbackRes.formatted_transcript || transcript,
     summary: fallbackRes.transcript_summary,
@@ -1121,7 +1184,10 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
     operator_score: fallbackRes.operator_score,
     operator_mistakes: fallbackRes.operator_mistakes || [],
     operator_comment: fallbackRes.operator_comment,
-    summary_source: 'template'
+    summary_source: 'template',
+    mistakes_source: 'template',
+    feedback_source: 'template',
+    fallback_reason: fallbackRes.fallback_reason || reason
   };
 }
 
@@ -2274,7 +2340,7 @@ async function importCallRecord(extCall: any): Promise<boolean> {
     }
 
     // Repair the timestamp timezone if they differ
-    if (existingCall.timestamp !== extCall.timestamp) {
+    if (extCall.timestamp && existingCall.timestamp !== extCall.timestamp) {
       existingCall.timestamp = extCall.timestamp;
       needsUpdate = true;
     }
@@ -2457,10 +2523,11 @@ async function importCallRecord(extCall: any): Promise<boolean> {
   } else {
     const megafonToken = getMegafonAuthContext(db).activeToken;
 
+    const resolvedTimestamp = extCall.timestamp || new Date().toISOString();
     // Answered call with recording ready
     newCall = {
       call_id: extCall.call_id,
-      timestamp: extCall.timestamp,
+      timestamp: resolvedTimestamp,
       duration_seconds: extCall.duration_seconds,
       model_used: db.config.default_gigachat_model || 'GigaChat:Lite',
       transcript: extCall.transcript || 'Загрузка аудиозаписи...',
@@ -2490,7 +2557,7 @@ async function importCallRecord(extCall: any): Promise<boolean> {
     };
 
     try {
-      const consent = await ensureAutoConsent(clientPhoneStr, extCall.call_id, extCall.type || 'incoming', extCall.timestamp);
+      const consent = await ensureAutoConsent(clientPhoneStr, extCall.call_id, extCall.type || 'incoming', resolvedTimestamp);
       newCall.consent_id = consent.consent_id;
       newCall.consent_status = consent.status as any;
     } catch (cErr) {
@@ -2532,7 +2599,7 @@ async function importCallRecord(extCall: any): Promise<boolean> {
           audioDownloadFailed,
           extCall.duration_seconds,
           undefined,
-          extCall.timestamp
+          newCall.timestamp
         );
 
         const updatedDb = readDb();
@@ -3559,8 +3626,17 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
     return changed;
   }
 
+  const visitDateContext =
+    callCopy.structured_summary?.offered_date_time ||
+    callCopy.key_facts?.structured_summary?.offered_date_time ||
+    callCopy.key_facts?.offered_date_time ||
+    callCopy.key_facts?.date ||
+    null;
+
   // Если резюме уже получено из валидного JSON модели (прошло parseGigaChatJson / Pass 2),
   // НЕ перезаписываем его шаблонными текстами buildContextGroundedSummary / extractStructuredCallSummary.
+  // Но согласованность operator_score === evaluation.overall_score и удаление неактуальной ошибки
+  // «напоминание накануне» для звонков в день визита или позже применяем всегда.
   const hasTrustedModelSummary = Boolean(
     (callCopy.summary_source === 'model' || callCopy.verification_report) &&
       rawSummary.trim().length > 0 &&
@@ -3570,6 +3646,25 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
     if (!callCopy.structured_summary && callCopy.key_facts?.structured_summary) {
       callCopy.structured_summary = callCopy.key_facts.structured_summary;
       changed = true;
+    }
+    const trustedEval = callCopy.evaluation || callCopy.key_facts?.evaluation;
+    if (trustedEval && trustedEval.overall_score !== null && trustedEval.overall_score !== undefined && !isNaN(trustedEval.overall_score)) {
+      if (callCopy.operator_score !== trustedEval.overall_score) {
+        callCopy.operator_score = trustedEval.overall_score;
+        changed = true;
+      }
+    }
+    if (Array.isArray(callCopy.operator_mistakes) && callCopy.operator_mistakes.length > 0) {
+      const filteredMistakes = filterOutdatedReminderMistakes(
+        callCopy.operator_mistakes,
+        callCopy.timestamp,
+        visitDateContext,
+        callCopy.transcript
+      );
+      if (JSON.stringify(callCopy.operator_mistakes) !== JSON.stringify(filteredMistakes)) {
+        callCopy.operator_mistakes = filteredMistakes;
+        changed = true;
+      }
     }
     return changed;
   }
@@ -3623,7 +3718,7 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
   }
 
   if (evalObj.overall_score !== null && !isNaN(evalObj.overall_score)) {
-    const targetScore = Math.max(1, Math.min(10, Math.round(evalObj.overall_score)));
+    const targetScore = evalObj.overall_score;
     if (callCopy.operator_score !== targetScore) {
       callCopy.operator_score = targetScore;
       changed = true;
@@ -3634,15 +3729,41 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
   const rawAdvice = Array.isArray(callCopy.recommendations)
     ? callCopy.recommendations
     : [callCopy.recommendations].filter(Boolean) as string[];
-  const harmonized = harmonizeMistakesAndEvaluation(rawMistakes, rawAdvice, evalObj, callCopy.transcript);
+  const isModelCallCopy = Boolean(
+    callCopy.mistakes_source === 'model' ||
+      callCopy.summary_source === 'model' ||
+      callCopy.feedback_source === 'model' ||
+      callCopy.verification_report
+  );
+  if (!isModelCallCopy) {
+    const harmonized = harmonizeMistakesAndEvaluation(
+      rawMistakes,
+      rawAdvice,
+      evalObj,
+      callCopy.transcript,
+      callCopy.timestamp,
+      visitDateContext
+    );
 
-  if (JSON.stringify(rawMistakes) !== JSON.stringify(harmonized.mistakes)) {
-    callCopy.operator_mistakes = harmonized.mistakes;
-    changed = true;
-  }
-  if (JSON.stringify(rawAdvice) !== JSON.stringify(harmonized.advice)) {
-    callCopy.recommendations = harmonized.advice;
-    changed = true;
+    if (JSON.stringify(rawMistakes) !== JSON.stringify(harmonized.mistakes)) {
+      callCopy.operator_mistakes = harmonized.mistakes;
+      changed = true;
+    }
+    if (JSON.stringify(rawAdvice) !== JSON.stringify(harmonized.advice)) {
+      callCopy.recommendations = harmonized.advice;
+      changed = true;
+    }
+  } else if (rawMistakes.length > 0) {
+    const filteredMistakes = filterOutdatedReminderMistakes(
+      rawMistakes,
+      callCopy.timestamp,
+      visitDateContext,
+      callCopy.transcript
+    );
+    if (JSON.stringify(rawMistakes) !== JSON.stringify(filteredMistakes)) {
+      callCopy.operator_mistakes = filteredMistakes;
+      changed = true;
+    }
   }
 
   const prevStructJson = JSON.stringify(callCopy.structured_summary || null);
@@ -4259,8 +4380,10 @@ app.post('/api/calls/webhook', async (req, res) => {
           newCall.operator_score = analysis.operator_score !== null ? analysis.operator_score : newCall.operator_score;
           newCall.operator_mistakes = analysis.operator_mistakes || [];
           newCall.operator_comment = analysis.operator_comment || newCall.operator_comment;
-          if (analysis.recommendations) {
-            newCall.recommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : [analysis.recommendations];
+          if (analysis.recommendations !== undefined) {
+            newCall.recommendations = Array.isArray(analysis.recommendations)
+              ? analysis.recommendations
+              : (analysis.recommendations ? [analysis.recommendations] : []);
           }
           if (analysis.structured_summary) {
             newCall.structured_summary = analysis.structured_summary;
@@ -4283,6 +4406,12 @@ app.post('/api/calls/webhook', async (req, res) => {
           }
           if (analysis.summary_source) {
             newCall.summary_source = analysis.summary_source;
+          }
+          if (analysis.mistakes_source) {
+            newCall.mistakes_source = analysis.mistakes_source;
+          }
+          if (analysis.feedback_source) {
+            newCall.feedback_source = analysis.feedback_source;
           }
         }
       } catch (analysisErr: any) {
@@ -4417,7 +4546,22 @@ app.post('/api/calls/:id/reanalyze', async (req, res) => {
     const updatedCall = await performCallReanalysis(id, modelOverride, {
       sttProvider: normalizedStt,
       forceRetranscribe: Boolean(forceRetranscribe || sttProvider),
+      isManual: true,
     });
+    const isModelUnavailableFallback = Boolean(
+      updatedCall &&
+        updatedCall.summary_source === 'template' &&
+        updatedCall.fallback_reason &&
+        !/<\s*10\s*сек|0\s*сек/i.test(updatedCall.fallback_reason)
+    );
+    if (isModelUnavailableFallback) {
+      return res.status(503).json({
+        error: `Анализ выполнен резервным генератором, модель недоступна: ${updatedCall.fallback_reason}`,
+        fallback_used: true,
+        fallback_reason: updatedCall.fallback_reason,
+        call: updatedCall,
+      });
+    }
     res.json(updatedCall);
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Внутренняя ошибка переанализа звонка' });
@@ -4558,9 +4702,10 @@ app.post('/api/calls/:id/clarify-context', async (req, res) => {
 
 // 3. ANALYZE NEW CALL (REST API)
 app.post('/api/calls/analyze', async (req, res) => {
-  const { transcript, client_name, operator_name, duration_seconds, model, audioBase64 } = req.body;
+  const { transcript, client_name, operator_name, duration_seconds, model, audioBase64, timestamp } = req.body;
   const db = readDb();
   const selectedModel = model || db.config.activeModel || 'GigaChat:Lite';
+  const resolvedTimestamp = (typeof timestamp === 'string' && timestamp.trim()) ? timestamp.trim() : new Date().toISOString();
 
   const durationSec = duration_seconds !== undefined ? Number(duration_seconds) : 120;
 
@@ -4569,7 +4714,7 @@ app.post('/api/calls/analyze', async (req, res) => {
     const newCallId = `call-${Date.now()}`;
     const shortCall: CallRecord = {
       call_id: newCallId,
-      timestamp: new Date().toISOString(),
+      timestamp: resolvedTimestamp,
       duration_seconds: durationSec,
       model_used: selectedModel,
       transcript: durationSec === 0
@@ -4609,7 +4754,7 @@ app.post('/api/calls/analyze', async (req, res) => {
   const newCallId = `call-${Date.now()}`;
   const newCall: CallRecord = {
     call_id: newCallId,
-    timestamp: new Date().toISOString(),
+    timestamp: resolvedTimestamp,
     duration_seconds: durationSec,
     model_used: selectedModel,
     transcript: transcript || 'Обработка аудио...',
@@ -4696,7 +4841,7 @@ app.post('/api/calls/analyze', async (req, res) => {
 async function performCallReanalysis(
   callId: string,
   modelOverride?: string,
-  options?: { sttProvider?: SttProvider; forceRetranscribe?: boolean }
+  options?: { sttProvider?: SttProvider; forceRetranscribe?: boolean; isManual?: boolean }
 ): Promise<any> {
   const db = readDb();
   const callIdx = db.calls.findIndex((c: any) => c.call_id === callId);
@@ -4708,6 +4853,11 @@ async function performCallReanalysis(
 
   // If call duration is less than 10s or 0 or missed, do not attempt AI analysis
   if (call.duration_seconds < 10 || call.duration_seconds === 0 || call.is_answered === false || call.status === 'missed') {
+    const shortReason =
+      call.duration_seconds === 0
+        ? 'длительность звонка < 10 сек (0 сек / пропущен)'
+        : `длительность звонка < 10 сек (${call.duration_seconds} сек)`;
+    console.warn(`[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${shortReason}`);
     call.operator_score = null;
     call.status = call.duration_seconds === 0 ? 'missed' : 'completed';
     call.transcript = call.duration_seconds === 0
@@ -4720,6 +4870,10 @@ async function performCallReanalysis(
       ? 'Разговор не состоялся: длительность вызова 00:00.'
       : `Оценка не выставляется: разговор не состоялся (длительность ${call.duration_seconds} сек менее 10 секунд, диалог отсутствует).`;
     call.booking_status = 'не применимо';
+    call.summary_source = 'template';
+    call.mistakes_source = 'template';
+    call.feedback_source = 'template';
+    call.fallback_reason = shortReason;
     call.key_facts = {
       is_dispute: false,
       dispute_reason: null,
@@ -4859,6 +5013,7 @@ async function performCallReanalysis(
       audioBase64 &&
       !audioDownloadFailed
     );
+    const reanalysisTimestamp = call.timestamp || (call.key_facts as any)?.call_datetime || undefined;
     const analysisResult = await analyzeCallTextOrAudio(
       selectedModel,
       shouldRetranscribeFromAudio ? '' : existingTranscript,
@@ -4866,7 +5021,8 @@ async function performCallReanalysis(
       audioDownloadFailed,
       call.duration_seconds,
       options?.sttProvider,
-      call.timestamp
+      reanalysisTimestamp,
+      { isManual: options?.isManual }
     );
 
     const finalDb = readDb();
@@ -4882,6 +5038,7 @@ async function performCallReanalysis(
         verification_report: analysisResult.verification_report,
         verification_flags: analysisResult.verification_flags,
         missed_opportunities: analysisResult.missed_opportunities,
+        fallback_reason: analysisResult.summary_source === 'model' ? undefined : analysisResult.fallback_reason,
         error_message: analysisResult.error_message || undefined,
         status: isFailed ? 'failed' : 'completed',
         is_demo: false,
@@ -5460,7 +5617,7 @@ async function startServer() {
     res.status(404).json({ error: `API endpoint not found: ${req.method} ${req.originalUrl}` });
   });
 
-  // 1. Mount Vite dev server middleware (in development) or static files (in production) BEFORE listening
+  // 1. Mount Vite dev server middleware (non-blocking relative to port bind) or static files (in production)
   if (process.env.NODE_ENV === 'production') {
     app.use(express.static(DIST_PATH));
     app.get('*', (req, res) => {
@@ -5472,24 +5629,61 @@ async function startServer() {
       }
     });
   } else {
-    try {
-      const { createServer: createViteServer } = await import('vite');
-      const viteServer = await createViteServer({
-        server: { middlewareMode: true },
-        appType: 'spa'
+    let viteMiddleware: express.RequestHandler | null = null;
+    const viteReadyPromise = import('vite')
+      .then(({ createServer: createViteServer }) =>
+        createViteServer({
+          server: { middlewareMode: true },
+          appType: 'spa',
+        })
+      )
+      .then((viteServer) => {
+        viteMiddleware = viteServer.middlewares;
+        console.log('[Dev] Vite middleware успешно смонтирован в Express');
+      })
+      .catch((err) => {
+        console.error('Не удалось запустить Vite dev server:', err);
       });
-      app.use(viteServer.middlewares);
-      console.log('[Dev] Vite middleware успешно смонтирован в Express');
-    } catch (err) {
-      console.error('Не удалось запустить Vite dev server:', err);
-    }
+
+    app.use(async (req, res, next) => {
+      if (!viteMiddleware) {
+        await viteReadyPromise;
+      }
+      if (viteMiddleware) {
+        return viteMiddleware(req, res, next);
+      }
+      return next();
+    });
   }
 
-  // 2. Start HTTP server on 0.0.0.0:3000
+  // 2. Start HTTP server immediately on 0.0.0.0:3000 so health checks respond right away
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT} (0.0.0.0:${PORT})`);
+    // Диагностика конфигурации GigaChat при старте сервера
+    try {
+      const bootDb = readDb();
+      const gigaStatus = getGigaChatConfigStatus();
+      const defaultModel = bootDb.config?.default_gigachat_model || process.env.GIGACHAT_MODEL || 'GigaChat:Lite';
+      if (gigaStatus.configured) {
+        console.log(
+          `[GigaChat INIT] конфигурация: ок (источник ключа: ${gigaStatus.source}, scope: ${gigaStatus.scope}, модель: ${defaultModel})`
+        );
+      } else {
+        console.warn(
+          `[GigaChat INIT] конфигурация: не настроен (отсутствует: ${gigaStatus.missing.join(', ')})`
+        );
+      }
+    } catch (initErr: any) {
+      console.warn(`[GigaChat INIT] конфигурация: не настроен (ошибка чтения хранилища: ${initErr?.message || initErr})`);
+    }
+    // Defer heavy DB migration / consent sync / S3 hydration so event loop is never blocked during boot
+    setTimeout(() => {
+      runPostStartupMaintenance();
+    }, 300);
   });
+}
 
+function runPostStartupMaintenance() {
   // Initialize 152-ФЗ automatic data retention cleanup scheduler
   try {
     initCleanupScheduler();
@@ -5600,15 +5794,20 @@ async function startServer() {
                   promises: updatedDb.calls[idx].key_facts?.promises || []
                 };
                 updatedDb.calls[idx].operator_score = analysis.operator_score;
+                updatedDb.calls[idx].operator_mistakes = analysis.operator_mistakes || [];
                 updatedDb.calls[idx].operator_comment = analysis.operator_comment;
                 updatedDb.calls[idx].missed_opportunities = analysis.missed_opportunities;
                 updatedDb.calls[idx].verification_report = analysis.verification_report;
                 updatedDb.calls[idx].verification_flags = analysis.verification_flags;
                 updatedDb.calls[idx].summary_source = analysis.summary_source || 'model';
+                updatedDb.calls[idx].mistakes_source = analysis.mistakes_source || 'model';
+                updatedDb.calls[idx].feedback_source = analysis.feedback_source || 'model';
                 if (analysis.structured_summary) {
                   updatedDb.calls[idx].structured_summary = analysis.structured_summary;
                 }
-                updatedDb.calls[idx].recommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : [analysis.recommendations];
+                updatedDb.calls[idx].recommendations = Array.isArray(analysis.recommendations)
+                  ? analysis.recommendations
+                  : (analysis.recommendations ? [analysis.recommendations] : []);
                 writeDb(updatedDb);
                 console.log('[Migration] Резюме и итог звонка megafon-real-84462946 успешно актуализированы в базе данных!');
               }
