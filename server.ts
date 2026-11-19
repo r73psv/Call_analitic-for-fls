@@ -778,7 +778,7 @@ async function executeSingleModelAttempt(
     const customPrompt = db.config?.customSystemPrompt || db.config?.credentials?.customSystemPrompt;
     appendLog('info', 'gigachat', `Отправка запроса на анализ в модель ${gigaModel} (салон «${salonName}»)...`);
     const analysis = await analyzeWithRetry(anonymizedText, gigaModel, (type, msg) => appendLog(type, 'gigachat', msg), undefined, salonName, customPrompt);
-    appendLog('success', 'gigachat', `Звонок успешно проанализирован моделью ${gigaModel}.`);
+    appendLog('success', 'gigachat', `Звонок успешно проанализирован моделью ${gigaModel}. [Summary source: ${analysis.summary_source || 'model'}]`);
     return {
       success: true,
       result: {
@@ -804,6 +804,7 @@ async function executeSingleModelAttempt(
         missed_opportunities: analysis.missed_opportunities,
         verification_report: analysis.verification_report,
         verification_flags: analysis.verification_flags,
+        summary_source: analysis.summary_source || 'model',
         model_used: gigaModel
       }
     };
@@ -1026,7 +1027,7 @@ async function analyzeCallTextOrAudio(
       currentSalon,
       customPrompt
     );
-    appendLog('success', 'gigachat', `Анализ звонка успешно выполнен моделью ${modelToUse}.`);
+    appendLog('success', 'gigachat', `Анализ звонка успешно выполнен моделью ${modelToUse}. [Summary source: ${analysis.summary_source || 'model'}]`);
     return {
       transcript: analysis.formatted_transcript || cleanTranscript,
       summary: analysis.transcript_summary,
@@ -1050,6 +1051,7 @@ async function analyzeCallTextOrAudio(
       missed_opportunities: analysis.missed_opportunities,
       verification_report: analysis.verification_report,
       verification_flags: analysis.verification_flags,
+      summary_source: analysis.summary_source || 'model',
       model_used: modelToUse,
       ...(usedTranscriptionEngine ? { transcription_engine: usedTranscriptionEngine } : {}),
     };
@@ -1097,6 +1099,7 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
   }
 
   const fallbackRes = generateLocalFallbackAnalysis(transcript, 'GigaChat:Lite', callDurationSeconds, currentSalon);
+  appendLog('info', 'gigachat', 'Использован шаблонный fallback-анализ. [Summary source: template]');
   return {
     transcript: fallbackRes.formatted_transcript || transcript,
     summary: fallbackRes.transcript_summary,
@@ -1114,7 +1117,8 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
       : [fallbackRes.recommendations],
     operator_score: fallbackRes.operator_score,
     operator_mistakes: fallbackRes.operator_mistakes || [],
-    operator_comment: fallbackRes.operator_comment
+    operator_comment: fallbackRes.operator_comment,
+    summary_source: 'template'
   };
 }
 
@@ -3550,6 +3554,21 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
     return changed;
   }
 
+  // Если резюме уже получено из валидного JSON модели (прошло parseGigaChatJson / Pass 2),
+  // НЕ перезаписываем его шаблонными текстами buildContextGroundedSummary / extractStructuredCallSummary.
+  const hasTrustedModelSummary = Boolean(
+    (callCopy.summary_source === 'model' || callCopy.verification_report) &&
+      rawSummary.trim().length > 0 &&
+      (callCopy.structured_summary || callCopy.key_facts?.structured_summary)
+  );
+  if (hasTrustedModelSummary) {
+    if (!callCopy.structured_summary && callCopy.key_facts?.structured_summary) {
+      callCopy.structured_summary = callCopy.key_facts.structured_summary;
+      changed = true;
+    }
+    return changed;
+  }
+
   const ctx = classifyCallContext(callCopy.transcript || '', rawSummary);
   if (ctx.category === 'not_happened') {
     return changed;
@@ -4256,6 +4275,9 @@ app.post('/api/calls/webhook', async (req, res) => {
           }
           if (analysis.verification_flags) {
             newCall.verification_flags = analysis.verification_flags;
+          }
+          if (analysis.summary_source) {
+            newCall.summary_source = analysis.summary_source;
           }
         }
       } catch (analysisErr: any) {
@@ -5575,6 +5597,10 @@ async function startServer() {
                 updatedDb.calls[idx].missed_opportunities = analysis.missed_opportunities;
                 updatedDb.calls[idx].verification_report = analysis.verification_report;
                 updatedDb.calls[idx].verification_flags = analysis.verification_flags;
+                updatedDb.calls[idx].summary_source = analysis.summary_source || 'model';
+                if (analysis.structured_summary) {
+                  updatedDb.calls[idx].structured_summary = analysis.structured_summary;
+                }
                 updatedDb.calls[idx].recommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : [analysis.recommendations];
                 writeDb(updatedDb);
                 console.log('[Migration] Резюме и итог звонка megafon-real-84462946 успешно актуализированы в базе данных!');

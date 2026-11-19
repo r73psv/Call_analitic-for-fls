@@ -274,6 +274,7 @@ export interface CallRecord {
   verification_report?: CallVerificationReport;
   verification_flags?: string[];
   missed_opportunities?: { type: string; evidence: string; what_to_say: string }[];
+  summary_source?: 'model' | 'template';
 }
 
 export interface ContextClarification {
@@ -536,6 +537,7 @@ export interface AnalysisResult {
   missed_opportunities?: { type: string; evidence: string; what_to_say: string }[];
   verification_report?: CallVerificationReport;
   verification_flags?: string[];
+  summary_source?: 'model' | 'template';
 }
 
 export type NotificationType = 'call_analyzed' | 'dispute_detected' | 'booking_confirmed' | 'call_failed' | 'incoming_call';

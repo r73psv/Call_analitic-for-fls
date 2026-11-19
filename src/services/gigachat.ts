@@ -1521,7 +1521,7 @@ export function parseGigaChatJson(text: string, customSalonName?: string, origin
       : refineTranscriptRoles(baseTranscriptForRoles || rawFormattedTranscript || '');
 
   const rawOutcome = String(parsed.key_facts?.call_outcome || '').toLowerCase().trim();
-  const rawBooking = String(parsed.booking_status || parsed.key_facts?.booking_status || '').toLowerCase().trim();
+  const rawBooking = String(parsed.booking_status || parsed.facts?.booking_status || parsed.key_facts?.booking_status || '').toLowerCase().trim();
 
   // Классификация контекста по очищенной от IVR стенограмме (защита от галлюцинаций модели)
   const dialogueCtx = classifyCallContext(formattedTranscript || originalTranscript || '');
@@ -1558,13 +1558,16 @@ export function parseGigaChatJson(text: string, customSalonName?: string, origin
     isConversation = false;
   }
 
-  // --- Ветка «разговор не состоялся» ---
+  // --- Ветка «разговор не состоялся» (шаблонный fallback) ---
   if (!isConversation) {
     const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
+    const failedStruct = extractStructuredCallSummary('', 'Разговор не состоялся', undefined, salon, 'не применимо');
+    console.log('[Summary source: template]');
     return {
       transcript_summary: 'Разговор не состоялся: диалог отсутствует (тишина, гудки, сброс, автоответчик или автоинформатор).',
       booking_status: 'не применимо',
       formatted_transcript: formattedTranscript || 'Разговор не состоялся (диалог отсутствует)',
+      structured_summary: failedStruct,
       evaluation: failedEval,
       criteria_scores: failedEval.criteria,
       key_facts: {
@@ -1579,6 +1582,15 @@ export function parseGigaChatJson(text: string, customSalonName?: string, origin
         date: null,
         time: null,
         master: null,
+        call_purpose: failedStruct.call_purpose,
+        requested_service: failedStruct.requested_service,
+        offered_master: failedStruct.offered_master,
+        offered_price: failedStruct.offered_price,
+        offered_date_time: failedStruct.offered_date_time,
+        is_booked_text: failedStruct.booking_status_text,
+        unbooked_reason: failedStruct.unbooked_reason,
+        manager_next_steps: failedStruct.manager_next_steps,
+        structured_summary: failedStruct,
         evaluation: failedEval,
         criteria_scores: failedEval.criteria,
       },
@@ -1587,6 +1599,7 @@ export function parseGigaChatJson(text: string, customSalonName?: string, origin
       operator_comment: 'Разговор не состоялся (диалог отсутствует).',
       recommendations: `Повторить попытку дозвона клиенту в рабочее время салона «${salon}».`,
       missed_opportunities: [],
+      summary_source: 'template',
     };
   }
 
@@ -1640,17 +1653,23 @@ export function parseGigaChatJson(text: string, customSalonName?: string, origin
     /(?:вы\s+записаны\s+(?:на|к)|ваша\s+запись\s+(?:на|к)|напомина(?:ем|ю)\s+о\s+(?:вашей\s+)?записи)/iu.test(dialogueCtx.cleanTranscript) &&
     !/(?:отмен[а-яё]*\s+запис|не\s+смогу\s+прийти|не\s+приду)/iu.test(dialogueCtx.cleanTranscript);
 
-  // Защита от ложного статуса «согласие» на основе IVR или при явном отказе/опоздании/партнёрском звонке,
-  // а также восстановление статуса «согласие», если в конце стенограммы запись подтверждена («записали вас», «запись подтвердили»)
+  const hasVerifiedModelBookingMarker =
+    Array.isArray(parsed.facts?.booking_markers) &&
+    parsed.facts.booking_markers.some(
+      (bm: any) => bm?.quote && isQuotePresentInTranscript(formattedTranscript || originalTranscript || '', String(bm.quote))
+    );
+
+  // Защита от ложного статуса «согласие» на основе IVR или при явном отказе/партнёрском звонке,
+  // а также сохранение/восстановление статуса «согласие» при подтверждённой записи
   if (dialogueCtx.isUnavailableServiceRefusal || dialogueCtx.isDeclined) {
     bookingStatus = 'отказ';
   } else if (dialogueCtx.isNonClient) {
     bookingStatus = 'консультация';
-  } else if (dialogueCtx.isLateWarning) {
-    bookingStatus = (isExistingBookingConfirmation && bookingStatus === 'согласие') ? 'согласие' : 'консультация';
   } else if (dialogueCtx.isConfirmedBooking || (isExistingBookingConfirmation && bookingStatus === 'согласие')) {
     bookingStatus = 'согласие';
-  } else if (bookingStatus === 'согласие' && !dialogueCtx.isRescheduleOrCheck) {
+  } else if (dialogueCtx.isLateWarning) {
+    bookingStatus = bookingStatus === 'согласие' && (isExistingBookingConfirmation || hasVerifiedModelBookingMarker) ? 'согласие' : 'консультация';
+  } else if (bookingStatus === 'согласие' && !dialogueCtx.isRescheduleOrCheck && !hasVerifiedModelBookingMarker) {
     bookingStatus = 'консультация';
   }
 
@@ -1662,7 +1681,7 @@ export function parseGigaChatJson(text: string, customSalonName?: string, origin
     outcome = 'не состоялся';
   } else if (bookingStatus === 'отказ' && outcome !== 'отмена') {
     outcome = 'отказ';
-  } else if (dialogueCtx.isNonClient || (dialogueCtx.isLateWarning && !(isExistingBookingConfirmation && bookingStatus === 'согласие'))) {
+  } else if (dialogueCtx.isNonClient || (dialogueCtx.isLateWarning && bookingStatus !== 'согласие')) {
     outcome = 'консультация';
   } else if (rawBooking.includes('отсроч')) {
     outcome = 'перезвон';
@@ -1893,32 +1912,7 @@ export function parseGigaChatJson(text: string, customSalonName?: string, origin
     score = Math.max(1, Math.min(10, Math.round(evaluation.overall_score)));
   }
 
-  const { formattedSummary, essence, structuredSummary, mistakes, advice } = formatSummaryWithEssence(
-    rawSummary,
-    fullTranscript,
-    {
-      service: service || null,
-      date: date || null,
-      time: time || null,
-      master: master || null,
-    },
-    salon,
-    score,
-    rawMistakes,
-    recommendations,
-    comment,
-    evaluation
-  );
-
-  const finalMistakes = mistakes && mistakes.length > 0 ? mistakes : [];
-  const finalAdvice =
-    advice && advice.length > 0
-      ? advice
-      : Array.isArray(recommendations)
-      ? recommendations
-      : [recommendations].filter(Boolean);
-
-  // Структурированное резюме: маппинг как parsed.structured_summary, так и нового parsed.summary
+  // Структурированное резюме от модели: маппинг как parsed.structured_summary, так и нового parsed.summary
   const modelStruct: Record<string, any> = parsed.structured_summary || (rawSummaryObj
     ? {
         call_purpose: rawSummaryObj.goal,
@@ -1932,85 +1926,174 @@ export function parseGigaChatJson(text: string, customSalonName?: string, origin
       }
     : {});
 
-  const modelStepsStr = Array.isArray(modelStruct.manager_next_steps)
-    ? modelStruct.manager_next_steps.join(' ').toLowerCase()
-    : '';
-  const hasCannedConsultationSteps =
-    (dialogueCtx.isNonClient ||
-      dialogueCtx.isLateWarning ||
-      dialogueCtx.isUnavailableServiceRefusal ||
-      dialogueCtx.isDeclined ||
-      dialogueCtx.isConfirmedBooking) &&
-    (modelStepsStr.includes('консультац') ||
-      modelStepsStr.includes('прайс-лист') ||
-      modelStepsStr.includes('онлайн-запись'));
+  const modelShortSummaryRaw =
+    (typeof rawSummaryObj?.short_summary === 'string' && rawSummaryObj.short_summary.trim()) ||
+    (typeof parsed.transcript_summary === 'string' && parsed.transcript_summary.trim()) ||
+    (typeof parsed.summary === 'string' && parsed.summary.trim()) ||
+    '';
+  const modelBookingDoneRaw =
+    typeof modelStruct.booking_status_text === 'string' ? modelStruct.booking_status_text.trim() : '';
+  const modelNextStepsRaw: string[] | null = Array.isArray(modelStruct.manager_next_steps)
+    ? modelStruct.manager_next_steps.map((s: any) => String(s ?? '').trim()).filter(Boolean)
+    : null;
 
-  const modelBookedTextLower = String(modelStruct.booking_status_text || '').toLowerCase();
-  const isPriorBookingConfirmPhrase = modelBookedTextLower.includes('подтверждение ранее сделанной записи');
-  const hasContradictoryBookedText =
-    ((dialogueCtx.isConfirmedBooking || bookingStatus === 'согласие') &&
-      !isPriorBookingConfirmPhrase &&
-      /(?:не оформлял|не состоял|консультац)/i.test(modelBookedTextLower)) ||
-    (!dialogueCtx.isConfirmedBooking &&
-      bookingStatus !== 'согласие' &&
-      !dialogueCtx.isRescheduleOrCheck &&
-      /(?:запись оформлена|записан|подтверждена|запись состоялась)/i.test(modelBookedTextLower));
-
-  const useGroundedStructOverride =
-    dialogueCtx.isNonClient || dialogueCtx.isLateWarning || dialogueCtx.isUnavailableServiceRefusal;
-  const hasEssenceDateMismatch = Boolean(
-    essence.date &&
-      modelStruct.offered_date_time &&
-      !String(modelStruct.offered_date_time).toLowerCase().includes(essence.date.toLowerCase())
-  );
-  const hasEssenceServiceMismatch = Boolean(
-    essence.service &&
-      modelStruct.requested_service &&
-      !String(modelStruct.requested_service).toLowerCase().includes(essence.service.toLowerCase())
+  const hasValidModelSummary = Boolean(
+    bookingStatus !== 'не применимо' &&
+      (modelShortSummaryRaw.length > 0 || modelBookingDoneRaw.length > 0 || (modelNextStepsRaw && modelNextStepsRaw.length > 0))
   );
 
-  // Защита от "не озвучено" при наличии подтверждённых фактов из стенограммы
-  const pickMeaningfulStruct = (modelVal: unknown, fallbackVal: string): string => {
-    const cleaned = cleanFactValue(modelVal);
-    return cleaned ? cleaned : fallbackVal;
-  };
+  const summarySource: 'model' | 'template' = hasValidModelSummary ? 'model' : 'template';
 
-  const finalStructuredSummary: StructuredCallSummary = {
-    call_purpose:
-      useGroundedStructOverride || hasEssenceServiceMismatch
-        ? structuredSummary.call_purpose
-        : pickMeaningfulStruct(modelStruct.call_purpose, structuredSummary.call_purpose),
-    requested_service:
-      useGroundedStructOverride || hasEssenceServiceMismatch
-        ? structuredSummary.requested_service
-        : pickMeaningfulStruct(modelStruct.requested_service, structuredSummary.requested_service),
-    offered_master: useGroundedStructOverride
-      ? structuredSummary.offered_master
-      : isMasterNameValid(modelStruct.offered_master)
-      ? normalizeMasterName(modelStruct.offered_master)!
-      : structuredSummary.offered_master,
-    offered_price: useGroundedStructOverride
-      ? structuredSummary.offered_price
-      : pickMeaningfulStruct(modelStruct.offered_price, structuredSummary.offered_price),
-    offered_date_time:
-      useGroundedStructOverride || hasEssenceDateMismatch
-        ? structuredSummary.offered_date_time
-        : pickMeaningfulStruct(modelStruct.offered_date_time, structuredSummary.offered_date_time),
-    booking_status_text:
-      useGroundedStructOverride || dialogueCtx.isDeclined || hasContradictoryBookedText
-        ? structuredSummary.booking_status_text
-        : pickMeaningfulStruct(modelStruct.booking_status_text, structuredSummary.booking_status_text),
-    unbooked_reason:
-      useGroundedStructOverride || dialogueCtx.isDeclined || hasContradictoryBookedText
-        ? structuredSummary.unbooked_reason
-        : pickMeaningfulStruct(modelStruct.unbooked_reason, structuredSummary.unbooked_reason),
-    manager_next_steps:
-      Array.isArray(modelStruct.manager_next_steps) &&
-      modelStruct.manager_next_steps.length > 0 &&
-      !hasCannedConsultationSteps
-        ? modelStruct.manager_next_steps
-        : structuredSummary.manager_next_steps,
-  };
+  const recArray: string[] = Array.isArray(recommendations)
+    ? recommendations.map((r: any) => String(r ?? '').trim()).filter(Boolean)
+    : typeof recommendations === 'string' && recommendations.trim()
+    ? [recommendations.trim()]
+    : [];
+
+  let formattedSummary: string;
+  let essence: EssenceDetails;
+  let finalStructuredSummary: StructuredCallSummary;
+  let finalMistakes: string[];
+  let finalAdvice: string[];
+
+  if (hasValidModelSummary) {
+    // ПРИОРИТЕТ МОДЕЛИ: сохраняем summary.short_summary, summary.booking_done и summary.manager_next_steps КАК ЕСТЬ.
+    // Шаблоны buildContextGroundedSummary и extractStructuredCallSummary НЕ перезаписывают валидный ответ модели.
+    essence = {
+      service: service || null,
+      date: date || null,
+      time: time || null,
+      master: master || null,
+    };
+
+    const harmonized = harmonizeMistakesAndEvaluation(rawMistakes, recArray, evaluation, fullTranscript);
+    finalMistakes = harmonized.mistakes && harmonized.mistakes.length > 0 ? harmonized.mistakes : [];
+    finalAdvice = harmonized.advice && harmonized.advice.length > 0 ? harmonized.advice : recArray;
+
+    const serviceStr = essence.service || 'не указана';
+    const dateStr = essence.date || 'не указана';
+    const timeStr = essence.time || 'не указано';
+    const masterStr = essence.master || 'не выбран';
+    const essencePrefix = `Суть обращения: услуга — ${serviceStr}, дата — ${dateStr}, время — ${timeStr}, мастер — ${masterStr}.`;
+
+    const mistakesFormatted = finalMistakes.join('; ');
+    const adviceFormatted = finalAdvice.join('; ');
+    const managerEvaluationBlock = `Разбор работы менеджера (оценка ${score}/10):\n- Ошибки и недочеты: ${mistakesFormatted}\n- Советы по оптимизации: ${adviceFormatted}`;
+
+    // Сохраняем summary.short_summary модели verbatim (не подменяем шаблонным пересказом)
+    const cleanedModelShort = modelShortSummaryRaw
+      .replace(/(?:разбор работы менеджера(?:\s*\([^)]*\))?|оценка и разбор работы менеджера|разбор работы оператора)\s*:[\s\S]*$/i, '')
+      .trim();
+
+    if (cleanedModelShort) {
+      const hasRetellingLabel = /(?:пересказ диалога|краткий пересказ(?: разговора)?|пересказ разговора)\s*:/i.test(cleanedModelShort);
+      const hasEssenceLabel = /^суть обращения\s*:/i.test(cleanedModelShort);
+      const hasConclusionLabel = /(?:^|\s)вывод\s*:/i.test(cleanedModelShort);
+
+      if (hasRetellingLabel) {
+        const body = hasEssenceLabel ? cleanedModelShort : `${essencePrefix} ${cleanedModelShort}`;
+        formattedSummary = `${body}\n${managerEvaluationBlock}`;
+      } else if (hasConclusionLabel) {
+        const conclusionIdx = cleanedModelShort.search(/вывод\s*:/i);
+        const beforeConc = cleanedModelShort.slice(0, conclusionIdx).replace(/^суть обращения\s*:[^.]*\.?\s*/i, '').trim();
+        const concPart = cleanedModelShort.slice(conclusionIdx).trim();
+        const body = beforeConc
+          ? `${essencePrefix} Пересказ диалога: ${beforeConc} ${concPart}`
+          : `${essencePrefix} ${concPart}`;
+        formattedSummary = `${body}\n${managerEvaluationBlock}`;
+      } else {
+        const conclusionPart = modelBookingDoneRaw ? ` Вывод: ${modelBookingDoneRaw}` : '';
+        formattedSummary = `${essencePrefix} Пересказ диалога: ${cleanedModelShort}${conclusionPart}\n${managerEvaluationBlock}`;
+      }
+    } else {
+      const conclusionPart = modelBookingDoneRaw ? ` Вывод: ${modelBookingDoneRaw}` : '';
+      formattedSummary = `${essencePrefix}${conclusionPart}\n${managerEvaluationBlock}`;
+    }
+
+    // Ленивый fallback ТОЛЬКО для отдельных незаполненных полей, если модель их вообще не прислала
+    let lazyFallbackStruct: StructuredCallSummary | null = null;
+    const getLazyFallbackStruct = (): StructuredCallSummary => {
+      if (!lazyFallbackStruct) {
+        lazyFallbackStruct = extractStructuredCallSummary(
+          fullTranscript,
+          cleanedModelShort || rawSummary,
+          {
+            service: essence.service,
+            date: essence.date,
+            time: essence.time,
+            master: essence.master,
+          },
+          salon,
+          bookingStatus
+        );
+      }
+      return lazyFallbackStruct;
+    };
+
+    const pickModelFieldAsIs = (val: unknown, fallbackGetter: () => string): string => {
+      if (typeof val === 'string' && val.trim().length > 0 && val.trim().toLowerCase() !== 'null') {
+        return val.trim();
+      }
+      return fallbackGetter();
+    };
+
+    const resolveModelMasterField = (): string => {
+      const rawOffered = typeof modelStruct.offered_master === 'string' ? modelStruct.offered_master.trim() : '';
+      if (!rawOffered || rawOffered.toLowerCase() === 'null') {
+        return essence.master || 'не озвучено';
+      }
+      if (/^(?:не\s+озвучено|не\s+указан[ао]?|не\s+выбран[ао]?|не\s+применимо)$/i.test(rawOffered)) {
+        return essence.master || rawOffered;
+      }
+      if (isMasterNameValid(rawOffered)) {
+        return normalizeMasterName(rawOffered) || rawOffered;
+      }
+      // Защита от глаголов движения вроде «иду» в поле мастера
+      return essence.master || 'не озвучено';
+    };
+
+    finalStructuredSummary = {
+      call_purpose: pickModelFieldAsIs(modelStruct.call_purpose, () => getLazyFallbackStruct().call_purpose),
+      requested_service: pickModelFieldAsIs(modelStruct.requested_service, () => getLazyFallbackStruct().requested_service),
+      offered_master: resolveModelMasterField(),
+      offered_price: pickModelFieldAsIs(modelStruct.offered_price, () => getLazyFallbackStruct().offered_price),
+      offered_date_time: pickModelFieldAsIs(modelStruct.offered_date_time, () => getLazyFallbackStruct().offered_date_time),
+      booking_status_text: pickModelFieldAsIs(modelStruct.booking_status_text, () => getLazyFallbackStruct().booking_status_text),
+      unbooked_reason: pickModelFieldAsIs(modelStruct.unbooked_reason, () => getLazyFallbackStruct().unbooked_reason),
+      manager_next_steps:
+        modelNextStepsRaw !== null
+          ? modelNextStepsRaw
+          : getLazyFallbackStruct().manager_next_steps,
+    };
+  } else {
+    // FALLBACK НА ШАБЛОНЫ: модель не вернула валидных текстовых полей резюме или статус «Не применимо»
+    const templateFormatted = formatSummaryWithEssence(
+      rawSummary,
+      fullTranscript,
+      {
+        service: service || null,
+        date: date || null,
+        time: time || null,
+        master: master || null,
+      },
+      salon,
+      score,
+      rawMistakes,
+      recommendations,
+      comment,
+      evaluation
+    );
+    formattedSummary = templateFormatted.formattedSummary;
+    essence = templateFormatted.essence;
+    finalStructuredSummary = templateFormatted.structuredSummary;
+    finalMistakes = templateFormatted.mistakes && templateFormatted.mistakes.length > 0 ? templateFormatted.mistakes : [];
+    finalAdvice =
+      templateFormatted.advice && templateFormatted.advice.length > 0
+        ? templateFormatted.advice
+        : recArray;
+  }
+
+  console.log(`[Summary source: ${summarySource}]`);
 
   const result: AnalysisResult = {
     transcript_summary: formattedSummary,
@@ -2051,6 +2134,7 @@ export function parseGigaChatJson(text: string, customSalonName?: string, origin
     operator_comment: comment,
     recommendations: finalAdvice,
     missed_opportunities: [],
+    summary_source: summarySource,
   };
 
   // Прокидывание упущенных возможностей из ответа модели (ШАГ 7 системного промпта)
@@ -2098,6 +2182,7 @@ export function generateLocalFallbackAnalysis(
 
   // 1. Жёсткий предохранитель: звонки менее 10 секунд без реального диалога
   if (callDurationSeconds !== undefined && callDurationSeconds < 10) {
+    console.log('[Summary source: template]');
     const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
     const failedStruct = extractStructuredCallSummary('', 'Разговор не состоялся', undefined, salon, 'не применимо');
     return {
@@ -2127,6 +2212,7 @@ export function generateLocalFallbackAnalysis(
       operator_mistakes: [],
       operator_comment: `Оценка не выставляется: разговор не состоялся (длительность ${callDurationSeconds} сек менее 10 секунд).`,
       recommendations: `Повторить попытку дозвона клиенту в рабочее время салона «${salon}».`,
+      summary_source: 'template',
     };
   }
 
@@ -2137,6 +2223,7 @@ export function generateLocalFallbackAnalysis(
     rawLower.includes('запись разговора и стенограмма отсутствуют');
 
   if (isPlaceholderOrEmpty) {
+    console.log('[Summary source: template]');
     const durLabel = callDurationSeconds !== undefined ? ` (длительность ${callDurationSeconds} сек.)` : '';
     const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
     const failedStruct = extractStructuredCallSummary('', 'Разговор не состоялся', undefined, salon, 'не применимо');
@@ -2167,6 +2254,7 @@ export function generateLocalFallbackAnalysis(
       operator_mistakes: [],
       operator_comment: `Оценка не выставляется: аудиозапись${durLabel} не содержит разборчивого диалога оператора и клиента.`,
       recommendations: 'Проверить качество связи или повторить вызов.',
+      summary_source: 'template',
     };
   }
 
@@ -2176,6 +2264,7 @@ export function generateLocalFallbackAnalysis(
 
   // 4. Несостоявшийся разговор / чистый автоответчик (после удаления IVR живого диалога не осталось)
   if (ctx.category === 'not_happened') {
+    console.log('[Summary source: template]');
     const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
     const failedStruct = extractStructuredCallSummary('', 'Разговор не состоялся', undefined, salon, 'не применимо');
     return {
@@ -2205,6 +2294,7 @@ export function generateLocalFallbackAnalysis(
       operator_mistakes: [],
       operator_comment: 'Разговор не состоялся: зафиксирован автоответчик или обрыв до начала диалога (оценка не выставляется).',
       recommendations: `Повторить звонок клиенту в рабочие часы салона «${salon}».`,
+      summary_source: 'template',
     };
   }
 
@@ -2290,6 +2380,7 @@ export function generateLocalFallbackAnalysis(
     ? `Обращение по услуге: ${essence.service}`
     : 'Консультация / обращение в салон';
 
+  console.log('[Summary source: template]');
   return {
     transcript_summary: formattedSummary,
     booking_status: bookingStatus,
@@ -2325,6 +2416,7 @@ export function generateLocalFallbackAnalysis(
     operator_mistakes: finalMistakes,
     operator_comment: comment,
     recommendations: finalAdvice,
+    summary_source: 'template',
   };
 }
 

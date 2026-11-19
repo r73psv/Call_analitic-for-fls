@@ -308,40 +308,47 @@ export function classifyCallContext(
     !isLateWarning &&
     /(?:перенести запись|перенос|у меня\s+(?:вот\s+)?запись|уточнить запись|проверить запись|оставляем\s+все|на\s+\d+\s+(?:я\s+)?оставляю.*убираю|отменить запись)/iu.test(cleanTranscript);
 
-  // 7. Отказ (общий)
+  // 7. Отказ (общий) и явная отмена
   const rawBooking = (existingBookingStatus || existingKeyFacts?.booking_status || '').toLowerCase().trim();
   const outcome = (existingKeyFacts?.call_outcome || '').toLowerCase().trim();
+  const hasExplicitCancellation =
+    /(?:отмените\s+запись|отменить\s+запись|не\s+смогу\s+прийти|не\s+приду|не\s+получится\s+прийти|не\s+подойду)/iu.test(callerTextForRefusal);
   const clientConfirmedAtEnd =
-    /(?:да,?\s*(?:вс[её],?\s*)?(?:запись\s+подтвер[а-яё]*|подтвер[а-яё]*\s+запись|отлично|давайте|записывайте|подойд[её]т|хорошо)|на\s+\d{1,2}\s+(?:я\s+)?оставляю|оставьте тогда|подтверждаю запись|запись\s+подтвер[а-яё]*|давайте я продиктую|угу,?\s*хорошо(?:[.,\s]+до свидания)?)/iu.test(callerTextForRefusal) ||
+    /(?:да,?\s*(?:вс[её],?\s*)?(?:запись\s+подтвер[а-яё]*|подтвер[а-яё]*\s+запись|отлично|давайте|записывайте|подойд[её]т|подойду|хорошо)|на\s+\d{1,2}\s+(?:я\s+)?оставляю|оставьте тогда|подтверждаю запись|запись\s+подтвер[а-яё]*|давайте я продиктую|угу,?\s*хорошо(?:[.,\s]+до свидания)?|(?<!не\s)подойду\b|буду\s+через\s+(?:\d+|пару|несколько|пять|десять|пятнадцать|двадцать|тридцать|сорок|полчаса|час))/iu.test(callerTextForRefusal) ||
     /(?<!не\s)(?:записала|записываю|записал|записали|записываем)\s+вас/iu.test(managerLines || cleanTranscript);
 
   const isDeclined =
     !isNonClient &&
-    !isLateWarning &&
     (isUnavailableServiceRefusal ||
-      (hasExplicitRefusal && !clientConfirmedAtEnd) ||
-      (!clientConfirmedAtEnd && (rawBooking === 'отказ' || outcome === 'отказ')));
+      ((hasExplicitRefusal || hasExplicitCancellation) && !clientConfirmedAtEnd) ||
+      (!isLateWarning && !clientConfirmedAtEnd && (rawBooking === 'отказ' || outcome === 'отказ')));
 
   // 8. Подтверждённая запись (СТРОГО по живому диалогу, БЕЗ IVR и БЕЗ «предложить запись» при отказе!)
   const managerEffectiveForBooking = managerLines || cleanTranscript;
+  const hasExplicitBookingConfirmPhrase =
+    /(?<!не\s)(?:вы\s+записаны(?:\s+(?:на|к))?|запись\s+(?:успешно\s+)?(?:подтверждаем|подтверждена|подтвердили|оформлена)|подтвердил[аи]?\s+запись|будем\s+(?:вас\s+)?ожидать(?:\s+вас)?|ожидаем\s+вас|(?<!не\s)подойду\b|буду\s+через\s+(?:\d+|пару|несколько|пять|десять|пятнадцать|двадцать|тридцать|сорок|полчаса|час)(?:\s*(?:минут[а-яё]*|мин\b|час[а-яё]*))?)/iu.test(cleanTranscript);
+
   const hasRealBookingActionInTranscript =
-    /(?<!не\s)(?:записала(?:\s+вас)?|записываю(?:\s+вас)?|записал(?:\s+вас)?|записали(?:\s+вас)?|запишем(?:\s+вас)?|записываем(?:\s+вас)?|вы\s+записаны|запись\s+(?:успешно\s+)?(?:подтверждаем|подтверждена|оформлена)|на\s+\d{1,2}(?::\d{2})?\s+(?:я\s+)?оставляю|оставляем\s+все|договорились\s+(?:на|в)|жду\s+вас\s+(?:завтра|сегодня|в\s+\d))/iu.test(managerEffectiveForBooking) ||
+    hasExplicitBookingConfirmPhrase ||
+    /(?<!не\s)(?:записала(?:\s+вас)?|записываю(?:\s+вас)?|записал(?:\s+вас)?|записали(?:\s+вас)?|запишем(?:\s+вас)?|записываем(?:\s+вас)?|на\s+\d{1,2}(?::\d{2})?\s+(?:я\s+)?оставляю|оставляем\s+все|договорились\s+(?:на|в)|жду\s+вас\s+(?:завтра|сегодня|в\s+\d))/iu.test(managerEffectiveForBooking) ||
     (/(?:запишите|давайте\s+на\s+\d|подойд[её]т|подойду|согласна|согласен|давайте я продиктую|да,?\s*(?:вс[её],?\s*)?(?:запись\s+подтвер|подтвер[а-яё]*\s+запись))/iu.test(callerTextForRefusal) &&
       /(?:запис|жд[её]м|ожида|подтвержд|хорошо|подойд[её]те)/iu.test(managerEffectiveForBooking));
 
   const isConfirmedBooking =
     !isNonClient &&
-    !isLateWarning &&
     !isDeclined &&
     !isUnavailableServiceRefusal &&
-    hasRealBookingActionInTranscript;
+    !hasExplicitCancellation &&
+    (hasExplicitBookingConfirmPhrase || (!isLateWarning && hasRealBookingActionInTranscript));
 
+  // Категория consultation — только если записи не существует и нет попытки/подтверждения записи
   let category: CallIntentCategory = 'consultation';
   if (isNonClient) category = 'non_client';
-  else if (isLateWarning) category = 'late_or_visit_update';
   else if (isDispute) category = 'dispute';
   else if (isUnavailableServiceRefusal) category = 'refusal_unavailable_service';
   else if (isDeclined) category = 'declined';
+  else if (hasExplicitBookingConfirmPhrase && isConfirmedBooking) category = 'confirmed_booking';
+  else if (isLateWarning) category = 'late_or_visit_update';
   else if (isRescheduleOrCheck) category = 'reschedule_or_cancel';
   else if (isConfirmedBooking) category = 'confirmed_booking';
   else category = 'consultation';

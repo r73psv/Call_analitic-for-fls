@@ -331,26 +331,36 @@ export function CallDetails({
       advice.length > 0
     );
 
-    const computedStructured = extractStructuredCallSummary(
-      call.transcript || '',
-      summary,
-      call.key_facts,
-      undefined,
-      call.booking_status
-    );
     const savedStructured = call.structured_summary || call.key_facts?.structured_summary;
-    const savedStepsStr = Array.isArray(savedStructured?.manager_next_steps)
-      ? savedStructured.manager_next_steps.join(' ').toLowerCase()
-      : '';
-    const savedBookedLower = String(savedStructured?.booking_status_text || '').toLowerCase();
-    const computedBookedLower = String(computedStructured.booking_status_text || '').toLowerCase();
-    const isSavedStructuredStale =
-      !savedStructured ||
-      (computedBookedLower.includes('запись состоялась') && !savedBookedLower.includes('запись состоялась')) ||
-      ((savedStepsStr.includes('консультац') || savedStepsStr.includes('прайс-лист') || savedStepsStr.includes('онлайн-запись')) &&
-        !computedStructured.manager_next_steps.join(' ').toLowerCase().includes('прайс-лист'));
+    const isModelStructured = Boolean(
+      savedStructured &&
+        call.booking_status !== 'не применимо' &&
+        (call.summary_source === 'model' || call.verification_report)
+    );
 
-    const structured: StructuredCallSummary = isSavedStructuredStale ? computedStructured : savedStructured;
+    let structured: StructuredCallSummary;
+    if (isModelStructured && savedStructured) {
+      // Модельный путь: показываем summary.booking_done, reason_if_not и manager_next_steps как есть
+      structured = savedStructured;
+    } else if (savedStructured && call.booking_status !== 'не применимо') {
+      const savedBookedLower = String(savedStructured.booking_status_text || '').toLowerCase();
+      const hasNonEmptySavedFields = Boolean(
+        savedBookedLower.trim().length > 0 &&
+          (savedStructured.call_purpose || savedStructured.requested_service)
+      );
+      structured = hasNonEmptySavedFields
+        ? savedStructured
+        : extractStructuredCallSummary(call.transcript || '', summary, call.key_facts, undefined, call.booking_status);
+    } else {
+      // Fallback на шаблон: когда резюме модели отсутствует или статус «Не применимо»
+      structured = extractStructuredCallSummary(
+        call.transcript || '',
+        summary,
+        call.key_facts,
+        undefined,
+        call.booking_status
+      );
+    }
 
     return {
       essence,
@@ -1521,7 +1531,7 @@ export function CallDetails({
                 {/* 6. Состоялась ли запись */}
                 <div className="bg-white/90 border border-slate-200/80 rounded-lg p-2.5 flex items-start gap-2.5 shadow-3xs sm:col-span-1">
                   <div className={`p-1.5 rounded-md shrink-0 mt-0.5 ${
-                    summaryParts.structured.booking_status_text.toLowerCase().includes('состоялась') && !summaryParts.structured.booking_status_text.toLowerCase().includes('не состоялась')
+                    (summaryParts.structured.booking_status_text.toLowerCase().includes('состоялась') || summaryParts.structured.booking_status_text.toLowerCase().includes('подтвержд')) && !summaryParts.structured.booking_status_text.toLowerCase().includes('не состоялась') && !summaryParts.structured.booking_status_text.toLowerCase().includes('не подтвержд')
                       ? 'bg-emerald-100 text-emerald-700'
                       : summaryParts.structured.booking_status_text.toLowerCase().includes('сохранена прежняя')
                       ? 'bg-blue-100 text-blue-700'
@@ -1529,7 +1539,7 @@ export function CallDetails({
                       ? 'bg-rose-100 text-rose-700'
                       : 'bg-slate-100 text-slate-700'
                   }`}>
-                    {summaryParts.structured.booking_status_text.toLowerCase().includes('состоялась') && !summaryParts.structured.booking_status_text.toLowerCase().includes('не состоялась') ? (
+                    {(summaryParts.structured.booking_status_text.toLowerCase().includes('состоялась') || summaryParts.structured.booking_status_text.toLowerCase().includes('подтвержд')) && !summaryParts.structured.booking_status_text.toLowerCase().includes('не состоялась') && !summaryParts.structured.booking_status_text.toLowerCase().includes('не подтвержд') ? (
                       <CheckCircle2 className="w-4 h-4" />
                     ) : summaryParts.structured.booking_status_text.toLowerCase().includes('не состоялась') ? (
                       <XCircle className="w-4 h-4" />
@@ -1545,7 +1555,7 @@ export function CallDetails({
                       {renderFieldVerificationBadge(['booking_status_text', 'booking_status'], summaryParts.structured.booking_status_text)}
                     </div>
                     <span className={`text-xs font-bold block leading-snug ${
-                      summaryParts.structured.booking_status_text.toLowerCase().includes('состоялась') && !summaryParts.structured.booking_status_text.toLowerCase().includes('не состоялась')
+                      (summaryParts.structured.booking_status_text.toLowerCase().includes('состоялась') || summaryParts.structured.booking_status_text.toLowerCase().includes('подтвержд')) && !summaryParts.structured.booking_status_text.toLowerCase().includes('не состоялась') && !summaryParts.structured.booking_status_text.toLowerCase().includes('не подтвержд')
                         ? 'text-emerald-700'
                         : summaryParts.structured.booking_status_text.toLowerCase().includes('сохранена')
                         ? 'text-blue-700'
