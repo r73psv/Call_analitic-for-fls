@@ -1798,7 +1798,7 @@ export function parseGigaChatJson(
   if (!isConversation) {
     const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
     const failedStruct = extractStructuredCallSummary('', 'Разговор не состоялся', undefined, salon, 'не применимо');
-    console.log('[Summary source: template]');
+    console.log('[Summary source: template] [Mistakes source: template] [Feedback source: template]');
     return {
       transcript_summary: 'Разговор не состоялся: диалог отсутствует (тишина, гудки, сброс, автоответчик или автоинформатор).',
       booking_status: 'не применимо',
@@ -2365,7 +2365,8 @@ export function parseGigaChatJson(
       rawMistakes,
       recommendations,
       comment,
-      evaluation
+      evaluation,
+      callTimestamp
     );
     formattedSummary = templateFormatted.formattedSummary;
     essence = templateFormatted.essence;
