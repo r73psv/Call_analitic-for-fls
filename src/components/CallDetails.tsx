@@ -19,7 +19,9 @@ import { ReanalyzeButton } from './ReanalyzeButton.js';
 import { getSttEngineDisplayName } from './TranscriptionModelSelector.js';
 import { refineTranscriptRoles } from '../services/transcriptUtils.js';
 import { extractStructuredCallSummary } from '../services/summaryUtils.js';
-import { extractCallEvaluation, EVALUATION_CRITERIA_DEFINITIONS, harmonizeMistakesAndEvaluation, filterOutdatedReminderMistakes } from '../services/evaluationUtils.js';
+import { extractCallEvaluation, EVALUATION_CRITERIA_DEFINITIONS, harmonizeMistakesAndEvaluation, filterOutdatedReminderMistakes, reconcileMistakesWithCriteria } from '../services/evaluationUtils.js';
+
+const DICTIONARY_STATUS_FIELD_SET = new Set(['booking_status', 'call_outcome']);
 
 const VERIFIER_FIELD_LABELS: Record<string, string> = {
   call_purpose: 'Цель обращения',
@@ -153,6 +155,20 @@ export function CallDetails({
 
   // Оценка звонка по 10 критериям (валидируется на противоречия и факты стенограммы)
   const callEvaluation = useMemo<CallEvaluation>(() => {
+    const isNotHappenedCall =
+      call.booking_status === 'не применимо' ||
+      call.key_facts?.call_outcome === 'не состоялся';
+    if (isNotHappenedCall) {
+      return {
+        overall_score: null,
+        max_score: 10,
+        applicable_count: 0,
+        total_criteria_count: 10,
+        criteria: Array.isArray(call.evaluation?.criteria) ? call.evaluation.criteria : [],
+        summary_verdict: 'Звонок не состоялся: оценка качества оператора не производится.',
+      };
+    }
+
     const existingEval =
       call.evaluation && Array.isArray(call.evaluation.criteria) && call.evaluation.criteria.length >= 10
         ? call.evaluation
@@ -226,10 +242,19 @@ export function CallDetails({
       criteriaNameMap.set(c.id, c.name);
     }
 
-    const flagSet = new Set<string>([
+    const rawFlags = [
       ...(call.verification_flags || []),
       ...(report?.flags || []),
-    ]);
+    ];
+    // Поля booking_status и call_outcome — метки словаря («согласие», «запись» и т. п.), а не дословные цитаты;
+    // убираем отображение ложных флагов «Не найдена цитата для: „согласие"».
+    const flagSet = new Set<string>(
+      rawFlags.filter((fieldKey) => {
+        if (!DICTIONARY_STATUS_FIELD_SET.has(fieldKey)) return true;
+        const f = fieldMap.get(fieldKey);
+        return f?.verdict === 'contradicts';
+      })
+    );
     const criteriaFlagSet = new Set<string>(report?.criteria_flags || []);
 
     type DisputedItem = {
@@ -253,7 +278,8 @@ export function CallDetails({
       const verdict = f?.verdict || 'unconfirmed';
       const verdictLabel = VERIFIER_VERDICT_LABELS[verdict] || verdict;
       const rejectedQuote = f?.rejected_quote || (f?.hallucinated_quote ? f.quote : null) || null;
-      const draftValue = f?.draft_value || null;
+      const isDictionaryStatus = DICTIONARY_STATUS_FIELD_SET.has(fieldKey);
+      const draftValue = isDictionaryStatus ? null : (f?.draft_value || null);
       const correctedValue = f?.corrected_value || null;
       const parts = [`${label} — ${verdictLabel}`];
       if (rejectedQuote) {
@@ -329,7 +355,8 @@ export function CallDetails({
     const verdict = fieldRecord?.verdict || 'unconfirmed';
     const verdictLabel = VERIFIER_VERDICT_LABELS[verdict] || verdict;
     const rejectedQuote = fieldRecord?.rejected_quote || (fieldRecord?.hallucinated_quote ? fieldRecord.quote : null) || null;
-    const draftValue = fieldRecord?.draft_value || (isUnconfirmedText ? null : currentValue || null);
+    const isDictionaryStatus = DICTIONARY_STATUS_FIELD_SET.has(primaryKey);
+    const draftValue = isDictionaryStatus ? null : (fieldRecord?.draft_value || (isUnconfirmedText ? null : currentValue || null));
     const correctedValue = fieldRecord?.corrected_value || null;
 
     const tooltipLines = [
@@ -339,7 +366,7 @@ export function CallDetails({
         ? `Цитата не найдена в стенограмме: «${rejectedQuote}»`
         : draftValue
         ? `Не найдена подтверждающая цитата для значения: «${draftValue}»`
-        : 'Не подтверждено прямой цитатой на втором проходе верификации',
+        : 'Не подтверждено на втором проходе верификации',
       ...(correctedValue ? [`Скорректированное значение: «${correctedValue}»`] : []),
     ];
 
@@ -574,8 +601,15 @@ export function CallDetails({
       }
     }
 
-    // Удаляем ошибку про напоминание накануне, если звонок был в день визита или позже
-    mistakes = filterOutdatedReminderMistakes(mistakes, call.timestamp, visitDateContext, call.transcript);
+    // Удаляем ошибку про напоминание накануне для звонков в день визита или позже
+    // и согласуем mistakes с критериями < 7 (приоритет критериев: при оценке < 7 не пишем «грубых ошибок не допущено»).
+    mistakes = reconcileMistakesWithCriteria(
+      filterOutdatedReminderMistakes(mistakes, call.timestamp, visitDateContext, call.transcript),
+      callEvaluation.criteria,
+      call.timestamp,
+      visitDateContext,
+      call.transcript
+    ).mistakes;
 
     const hasEvaluation = Boolean(
       managerMatch ||

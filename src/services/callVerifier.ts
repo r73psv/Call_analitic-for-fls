@@ -13,7 +13,7 @@ import {
   VerifierField,
   VerifierVerdict,
 } from '../types.js';
-import { calculateOverallScore } from './evaluationUtils.js';
+import { calculateOverallScore, reconcileMistakesWithCriteria } from './evaluationUtils.js';
 
 export const VERIFIER_PROMPT = `Ты — строгий проверяющий фактчекер. Тебе даны стенограмма телефонного звонка и черновик резюме звонка.
 
@@ -26,6 +26,7 @@ export const VERIFIER_PROMPT = `Ты — строгий проверяющий �
 4. Если подтверждения в стенограмме нет — пометь как "НЕ ПОДТВЕРЖДЕНО". Не угадывай и не восполняй пробелы.
 5. Имена мастеров, цены, даты и время проверяй особенно строго: сравнивай посимвольно.
 6. Метки ролей (Клиент/Менеджер) в стенограмме могут быть неточными — опирайся на смысл реплик, а не на метку.
+7. Поля booking_status и call_outcome — это служебные метки словаря («согласие», «запись», «отказ», «консультация», «перезвон», «отмена»), НЕ проверяй их на дословное вхождение слова «согласие»/«запись» в текст: подтверждай их цитатой из стенограммы о записи, дате/времени или закрытии на визит.
 
 Верни строго JSON без markdown:
 {
@@ -50,6 +51,7 @@ export const CRITERIA_VERIFIER_PROMPT = `Ты — строгий аудитор-
 2. Если оценка или обоснование противоречит стенограмме — verdict: "contradicts", quote: опровергающая цитата из стенограммы (или null).
 3. Если обоснование не подтверждается стенограммой и цитату привести нельзя — verdict: "unconfirmed", quote: null.
 4. Метки ролей (Клиент/Менеджер) могут быть неточными — опирайся на смысл реплик.
+5. Для критерия 10 (communication — качество коммуникации и завершение разговора): утверждение о качестве концовки обязательно должно подтверждаться цитатой последней реплики менеджера или клиента из стенограммы.
 
 Верни строго JSON без markdown:
 {
@@ -82,22 +84,193 @@ export function isAbsenceValue(val: unknown): boolean {
   return ABSENCE_VALUE_REGEX.test(s);
 }
 
+const DICTIONARY_STATUS_FIELDS = new Set(['booking_status', 'call_outcome']);
+
 function normalizeWhitespaceLower(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, ' ').trim();
+  return s
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[«»„“”"''`‚‘’]/g, '')
+    .replace(/[\u2010-\u2015\u2212\-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function normalizeForQuoteMatch(s: string): string {
   return s
-    .replace(/^(?:менеджер|клиент|оператор|администратор|автоинформатор)\s*:\s*/gim, '')
+    // Удаляем метки ролей как в начале строк, так и внутри склеенных реплик ASR
+    .replace(/(?:^|[\n\r.!?]\s*|\s+)(?:менеджер|клиент|оператор|администратор|автоинформатор|сотрудник|гость)\s*:\s*/gi, ' ')
     .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[«»„“”"''`‚‘’]/g, '')
+    .replace(/[\u2010-\u2015\u2212\-]/g, ' ')
     .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 /**
+ * Мягкий фолбэк (частичное совпадение >= 70% длины цитаты):
+ * находит цитату даже при склейке ролей ASR, лишних междометиях или искажении 1–2 слов.
+ */
+function hasSoftSubstringCoverage(normTranscript: string, normQuote: string, minRatio: number = 0.7): boolean {
+  if (!normTranscript || !normQuote || normQuote.length < 4) return false;
+
+  // 1. Проверка непрерывного подстрочного совпадения >= 70% длины цитаты (скользящее окно)
+  const targetLen = Math.max(4, Math.ceil(normQuote.length * minRatio));
+  if (targetLen <= normQuote.length) {
+    const maxStart = normQuote.length - targetLen;
+    // Для скорости шагаем по 1 символу при коротких цитатах и по 2 при очень длинных
+    const step = maxStart > 80 ? 2 : 1;
+    for (let start = 0; start <= maxStart; start += step) {
+      const slice = normQuote.slice(start, start + targetLen).trim();
+      if (slice.length >= Math.max(4, targetLen - 1) && normTranscript.includes(slice)) {
+        return true;
+      }
+    }
+    // Проверяем хвост (если шаг > 1 пропустил последний индекс)
+    if (step > 1) {
+      const tailSlice = normQuote.slice(maxStart, maxStart + targetLen).trim();
+      if (tailSlice.length >= Math.max(4, targetLen - 1) && normTranscript.includes(tailSlice)) {
+        return true;
+      }
+    }
+  }
+
+  // 2. Пословное упорядоченное совпадение в локальном окне стенограммы (>= 70% символьной длины слов цитаты)
+  // Устойчиво к вставке ASR-слов или склейке соседних реплик в середине цитаты
+  const qTokens = normQuote.split(' ').filter(Boolean);
+  const tTokens = normTranscript.split(' ').filter(Boolean);
+  if (qTokens.length < 2 || tTokens.length < 2) return false;
+
+  const totalQuoteChars = qTokens.reduce((acc, w) => acc + w.length, 0);
+  if (totalQuoteChars < 4) return false;
+
+  const tokensRoughMatch = (a: string, b: string): boolean => {
+    if (a === b) return true;
+    // Допуск на окончание слова/искажение 1–2 букв ASR для длинных слов (>= 5 букв)
+    if (a.length >= 5 && b.length >= 5) {
+      const prefixLen = Math.min(a.length, b.length) - 1;
+      if (prefixLen >= 4 && a.slice(0, prefixLen) === b.slice(0, prefixLen)) return true;
+    }
+    return false;
+  };
+
+  const maxWindowTokens = Math.min(tTokens.length, Math.max(qTokens.length * 2 + 4, qTokens.length + 6));
+
+  for (let startIdx = 0; startIdx < tTokens.length; startIdx++) {
+    // Начинаем окно только там, где совпадает один из первых токенов цитаты
+    const matchesInitial =
+      tokensRoughMatch(tTokens[startIdx], qTokens[0]) ||
+      (qTokens.length >= 3 && tokensRoughMatch(tTokens[startIdx], qTokens[1]));
+    if (!matchesInitial) continue;
+
+    let qIdx = tokensRoughMatch(tTokens[startIdx], qTokens[0]) ? 0 : 1;
+    let matchedChars = 0;
+    const windowEnd = Math.min(tTokens.length, startIdx + maxWindowTokens);
+
+    for (let tIdx = startIdx; tIdx < windowEnd && qIdx < qTokens.length; tIdx++) {
+      if (tokensRoughMatch(tTokens[tIdx], qTokens[qIdx])) {
+        matchedChars += qTokens[qIdx].length;
+        qIdx++;
+      } else {
+        // Проверяем, не выпало ли 1 слово из цитаты (lookahead на 1–2 токена цитаты)
+        for (let skip = 1; skip <= 2 && qIdx + skip < qTokens.length; skip++) {
+          if (tokensRoughMatch(tTokens[tIdx], qTokens[qIdx + skip])) {
+            matchedChars += qTokens[qIdx + skip].length;
+            qIdx = qIdx + skip + 1;
+            break;
+          }
+        }
+      }
+    }
+
+    if (matchedChars / totalQuoteChars >= minRatio) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Фолбэк токенизированного вхождения слов цитаты в стенограмму:
+ * разбивает цитату и стенограмму на слова и проверяет долю слов цитаты,
+ * входящих подряд (или в плотном локальном окне при склейке ролей ASR);
+ * если доля >= 70% и длина цитаты >= 4 слов — считает цитату найденной.
+ */
+function hasSequentialWordCoverage(
+  normTranscript: string,
+  normQuote: string,
+  minRatio: number = 0.7,
+  minWords: number = 4
+): boolean {
+  if (!normTranscript || !normQuote) return false;
+  const quoteWords = normQuote.split(' ').filter(Boolean);
+  const transcriptWords = normTranscript.split(' ').filter(Boolean);
+  if (quoteWords.length < minWords || transcriptWords.length < minWords) return false;
+
+  // 1. Максимальная непрерывная серия подряд идущих слов цитаты в стенограмме
+  let maxConsecutiveMatch = 0;
+  for (let tStart = 0; tStart < transcriptWords.length; tStart++) {
+    for (let qStart = 0; qStart < quoteWords.length; qStart++) {
+      if (transcriptWords[tStart] !== quoteWords[qStart]) continue;
+      let run = 0;
+      while (
+        tStart + run < transcriptWords.length &&
+        qStart + run < quoteWords.length &&
+        transcriptWords[tStart + run] === quoteWords[qStart + run]
+      ) {
+        run++;
+      }
+      if (run > maxConsecutiveMatch) {
+        maxConsecutiveMatch = run;
+      }
+    }
+  }
+  if (maxConsecutiveMatch / quoteWords.length >= minRatio) {
+    return true;
+  }
+
+  // 2. Упорядоченное вхождение слов цитаты в локальном окне (допуск 1-2 вставных слова при склейке ролей ASR)
+  const maxGap = 2;
+  for (let tStart = 0; tStart < transcriptWords.length; tStart++) {
+    for (let qStart = 0; qStart <= 1 && qStart < quoteWords.length; qStart++) {
+      if (transcriptWords[tStart] !== quoteWords[qStart]) continue;
+      let matchedWords = 1;
+      let lastTIdx = tStart;
+      let qIdx = qStart + 1;
+
+      while (qIdx < quoteWords.length) {
+        let foundIdx = -1;
+        const limit = Math.min(transcriptWords.length - 1, lastTIdx + 1 + maxGap);
+        for (let scan = lastTIdx + 1; scan <= limit; scan++) {
+          if (transcriptWords[scan] === quoteWords[qIdx]) {
+            foundIdx = scan;
+            break;
+          }
+        }
+        if (foundIdx !== -1) {
+          matchedWords++;
+          lastTIdx = foundIdx;
+        }
+        qIdx++;
+      }
+
+      if (matchedWords / quoteWords.length >= minRatio) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
  * Программная страховка от галлюцинированных цитат верификатора:
- * проверяет, что цитата действительно присутствует в стенограмме после нормализации пробелов/пунктуации.
+ * нормализует регистр, ё/е, виды кавычек, пунктуацию, дефисы и метки ролей ASR,
+ * а при неудаче строгого и relaxed сравнения применяет токенизированный фолбэк (>= 70%, >= 4 слов)
+ * и мягкий посимвольный фолбэк.
  */
 export function isQuotePresentInTranscript(transcript: string, quote: string | null | undefined): boolean {
   if (!quote || typeof quote !== 'string') return false;
@@ -105,7 +278,7 @@ export function isQuotePresentInTranscript(transcript: string, quote: string | n
   if (qRaw.length < 2) return false;
 
   // Убираем внешние кавычки («...» / "..." / '...') если модель обернула цитату
-  const unwrapped = qRaw.replace(/^[«"'„]+|[»"'“]+$/g, '').trim();
+  const unwrapped = qRaw.replace(/^[«"'„“”`‚‘’]+|[»"'„“”`‚‘’]+$/g, '').trim();
   if (unwrapped.length < 2) return false;
 
   // Если модель склеила несколько отрывков через "..." / "…" — проверяем каждую непустую часть
@@ -126,6 +299,14 @@ export function isQuotePresentInTranscript(transcript: string, quote: string | n
     }
     const relaxedPart = normalizeForQuoteMatch(part);
     if (relaxedPart.length >= 2 && normTranscriptRelaxed.includes(relaxedPart)) {
+      return true;
+    }
+    // Токенизированный фолбэк: доля слов цитаты подряд в стенограмме >= 70% при длине цитаты >= 4 слов
+    if (hasSequentialWordCoverage(normTranscriptRelaxed, relaxedPart, 0.7, 4)) {
+      return true;
+    }
+    // Мягкий фолбэк: частичное совпадение >= 70% длины цитаты (защита от склейки ролей и погрешностей ASR)
+    if (relaxedPart.length >= 4 && hasSoftSubstringCoverage(normTranscriptRelaxed, relaxedPart, 0.7)) {
       return true;
     }
     return false;
@@ -177,6 +358,18 @@ export function buildConciseDraftForVerifier(draft: AnalysisResult): Record<stri
     draft.structured_summary || draft.key_facts?.structured_summary || {};
   const kf = draft.key_facts || ({} as AnalysisResult['key_facts']);
 
+  const bookingDoneValue =
+    struct.booking_status_text ?? kf.is_booked_text ?? 'не озвучено';
+  const bookingMarkersValue = Array.isArray((draft as any).booking_markers)
+    ? (draft as any).booking_markers
+    : Array.isArray((kf as any).booking_markers)
+    ? (kf as any).booking_markers
+    : Array.isArray(kf.booking_markers_quotes) && kf.booking_markers_quotes.length > 0
+    ? kf.booking_markers_quotes
+    : [];
+
+  // Исключаем booking_status и call_outcome (метки словаря, не текст стенограммы):
+  // статус записи подтверждается через booking_done и booking_markers.
   return {
     call_purpose: struct.call_purpose ?? kf.call_purpose ?? kf.client_issue ?? 'не озвучено',
     requested_service: struct.requested_service ?? kf.requested_service ?? kf.service ?? 'не озвучено',
@@ -186,14 +379,14 @@ export function buildConciseDraftForVerifier(draft: AnalysisResult): Record<stri
       struct.offered_date_time ??
       kf.offered_date_time ??
       ([kf.date, kf.time].filter(Boolean).join(' ') || 'не озвучено'),
-    booking_status_text: struct.booking_status_text ?? kf.is_booked_text ?? draft.booking_status ?? 'не озвучено',
+    booking_done: bookingDoneValue,
+    booking_markers: bookingMarkersValue,
+    booking_status_text: bookingDoneValue,
     unbooked_reason: struct.unbooked_reason ?? kf.unbooked_reason ?? 'не озвучено',
     service: kf.service ?? 'не озвучено',
     date: kf.date ?? 'не озвучено',
     time: kf.time ?? 'не озвучено',
     master: kf.master ?? 'не озвучено',
-    booking_status: draft.booking_status ?? kf.booking_status ?? 'не озвучено',
-    call_outcome: kf.call_outcome ?? 'не озвучено',
   };
 }
 
@@ -240,10 +433,13 @@ function parseSummaryVerifierFields(rawContent: string): {
   const fields: VerifierField[] = rawFields
     .map((f: any) => {
       if (!f || !f.field) return null;
-      const verdict = normalizeVerdict(f.verdict);
+      const rawVerdict = normalizeVerdict(f.verdict);
       const quote = f.quote && String(f.quote).trim() && String(f.quote).toLowerCase() !== 'null'
         ? String(f.quote).trim()
         : null;
+      // Противоречие без опровергающей цитаты — не доказанное противоречие: понижаем до unconfirmed
+      const verdict: VerifierVerdict =
+        rawVerdict === 'contradicts' && !quote ? 'unconfirmed' : rawVerdict;
       const corrected =
         f.corrected_value && String(f.corrected_value).trim() && String(f.corrected_value).toLowerCase() !== 'null'
           ? String(f.corrected_value).trim()
@@ -288,7 +484,20 @@ export async function verifySummary(
   let hallucinatedQuotesCaught = 0;
 
   // Программная проверка цитат БЕЗ повторного запроса к LLM + детекция suspected false positive
-  const verifiedFields: VerifierField[] = parsed.fields.map((f) => {
+  // Поля booking_status и call_outcome (словарные метки) не проверяем дословной цитатой их значения
+  const preliminaryFields: VerifierField[] = parsed.fields.map((f) => {
+    const fieldName = f.field.trim();
+    if (DICTIONARY_STATUS_FIELDS.has(fieldName)) {
+      if (f.quote && isQuotePresentInTranscript(transcript, f.quote)) {
+        return { ...f, verdict: f.verdict === 'contradicts' ? 'contradicts' : 'confirmed' };
+      }
+      // Окончательный статус для booking_status / call_outcome определим ниже по цитатам booking_markers, date_time_offered и критерия 9
+      return {
+        ...f,
+        quote: f.quote && isQuotePresentInTranscript(transcript, f.quote) ? f.quote : null,
+      };
+    }
+
     if (f.quote && !isQuotePresentInTranscript(transcript, f.quote)) {
       hallucinatedQuotesCaught++;
       console.warn(
@@ -328,7 +537,50 @@ export async function verifySummary(
     return f;
   });
 
-  const anyNotOk = verifiedFields.some((f) => f.verdict !== 'confirmed' && !isAbsenceValue(f.draft_value));
+  // Подтверждение словарных полей booking_status / call_outcome через цитаты booking_markers, date_time_offered и смежных полей
+  const statusSupportQuote = (() => {
+    const candidateQuotes: string[] = [];
+    for (const pf of preliminaryFields) {
+      if (
+        pf.verdict === 'confirmed' &&
+        pf.quote &&
+        ['booking_done', 'booking_markers', 'booking_status_text', 'date_time_offered', 'offered_date_time', 'date', 'time'].includes(
+          pf.field.trim()
+        )
+      ) {
+        candidateQuotes.push(pf.quote);
+      }
+    }
+    if (Array.isArray(draftSummary?.booking_markers)) {
+      for (const bm of draftSummary.booking_markers) {
+        const q = typeof bm === 'string' ? bm : bm?.quote || bm?.value;
+        if (q) candidateQuotes.push(String(q));
+      }
+    }
+    if (draftSummary?.date_time_offered_quote) {
+      candidateQuotes.push(String(draftSummary.date_time_offered_quote));
+    }
+    return candidateQuotes.find((q) => isQuotePresentInTranscript(transcript, q)) || null;
+  })();
+
+  const verifiedFields: VerifierField[] = preliminaryFields.map((f) => {
+    if (DICTIONARY_STATUS_FIELDS.has(f.field.trim()) && f.verdict !== 'contradicts' && statusSupportQuote) {
+      return {
+        ...f,
+        verdict: 'confirmed',
+        quote: f.quote || statusSupportQuote,
+        hallucinated_quote: false,
+      };
+    }
+    return f;
+  });
+
+  const anyNotOk = verifiedFields.some(
+    (f) =>
+      f.verdict !== 'confirmed' &&
+      !isAbsenceValue(f.draft_value) &&
+      !(DICTIONARY_STATUS_FIELDS.has(f.field.trim()) && statusSupportQuote)
+  );
   return {
     summary: draftSummary,
     report: verifiedFields,
@@ -337,17 +589,20 @@ export async function verifySummary(
   };
 }
 
-function parseCriteriaVerification(rawContent: string): CriteriaVerificationItem[] {
+export function parseCriteriaVerification(rawContent: string): CriteriaVerificationItem[] {
   const clean = stripJsonMarkdown(rawContent);
   const parsed = JSON.parse(clean);
   const list: any[] = Array.isArray(parsed?.criteria) ? parsed.criteria : [];
   return list
     .map((c: any) => {
       if (!c || !c.id) return null;
-      const verdict = normalizeVerdict(c.verdict);
+      const rawVerdict = normalizeVerdict(c.verdict);
       const quote = c.quote && String(c.quote).trim() && String(c.quote).toLowerCase() !== 'null'
         ? String(c.quote).trim()
         : null;
+      // Противоречие без опровергающей цитаты — не доказанное противоречие: понижаем до unconfirmed
+      const verdict: VerifierVerdict =
+        rawVerdict === 'contradicts' && !quote ? 'unconfirmed' : rawVerdict;
       return {
         id: String(c.id).trim(),
         verdict,
@@ -443,7 +698,8 @@ export function applyVerdicts(
   draft: AnalysisResult,
   report: VerifierField[],
   criteriaReport: CriteriaVerificationItem[] = [],
-  hallucinatedQuotesCaught: number = 0
+  hallucinatedQuotesCaught: number = 0,
+  transcriptForCheck?: string
 ): AnalysisResult {
   const struct: StructuredCallSummary = {
     ...(draft.structured_summary || draft.key_facts?.structured_summary || {
@@ -459,12 +715,85 @@ export function applyVerdicts(
   };
 
   const keyFacts = { ...(draft.key_facts || {}) } as AnalysisResult['key_facts'];
+  const effectiveTranscript = transcriptForCheck || draft.formatted_transcript || '';
+
+  // Сбор подтверждающих цитат для словарных полей booking_status и call_outcome:
+  // цитаты booking_markers, date_time_offered (offered_date_time/date/time) и критерия 9 (closing).
+  const sourceCriteriaForStatus =
+    draft.criteria_scores ||
+    draft.evaluation?.criteria ||
+    draft.key_facts?.criteria_scores ||
+    [];
+  const statusSupportCandidates: string[] = [];
+  if (Array.isArray(keyFacts.booking_markers_quotes)) {
+    statusSupportCandidates.push(...keyFacts.booking_markers_quotes.filter(Boolean));
+  }
+  if (keyFacts.date_time_offered_quote) {
+    statusSupportCandidates.push(keyFacts.date_time_offered_quote);
+  }
+  for (const rf of report) {
+    const fn = rf.field.trim();
+    if (
+      rf.verdict === 'confirmed' &&
+      rf.quote &&
+      ['booking_done', 'booking_markers', 'booking_status_text', 'date_time_offered', 'offered_date_time', 'date', 'time'].includes(fn)
+    ) {
+      statusSupportCandidates.push(rf.quote);
+    }
+  }
+  const crit9Ver = criteriaReport.find((c) => c.id === 'closing');
+  if (crit9Ver?.quote) {
+    statusSupportCandidates.push(crit9Ver.quote);
+  }
+  const crit9Pass1 = sourceCriteriaForStatus.find((c) => c.id === 'closing');
+  if (crit9Pass1?.evidence_quote) {
+    statusSupportCandidates.push(crit9Pass1.evidence_quote);
+  }
+
+  const verifiedStatusQuote = statusSupportCandidates.find((q) =>
+    effectiveTranscript ? isQuotePresentInTranscript(effectiveTranscript, q) : Boolean(q && q.trim().length >= 2)
+  ) || null;
+
+  // Нормализуем отчёт:
+  // - contradicts без опровергающей цитаты понижаем до unconfirmed;
+  // - booking_status и call_outcome не требуют дословной цитаты слова «согласие»/«запись» —
+  //   если есть подтверждающая цитата из booking_markers, date_time_offered, booking_done или критерия 9, считаем confirmed.
+  const normalizedReport: VerifierField[] = report.map((item) => {
+    const hasFieldQuote = Boolean(item.quote && String(item.quote).trim());
+    const downgradedItem: VerifierField =
+      item.verdict === 'contradicts' && !hasFieldQuote
+        ? { ...item, verdict: 'unconfirmed', quote: null }
+        : item;
+
+    const fn = downgradedItem.field.trim();
+    if (DICTIONARY_STATUS_FIELDS.has(fn)) {
+      if (downgradedItem.verdict !== 'contradicts' && verifiedStatusQuote) {
+        return {
+          ...downgradedItem,
+          verdict: 'confirmed',
+          quote: downgradedItem.quote || verifiedStatusQuote,
+          rejected_quote: null,
+          hallucinated_quote: false,
+        };
+      }
+      // Если verdict был unconfirmed (не противоречит) — не привязываем к дословному значению словаря
+      if (downgradedItem.verdict === 'unconfirmed') {
+        return {
+          ...downgradedItem,
+          quote: null,
+        };
+      }
+    }
+    return downgradedItem;
+  });
+
   let bookingStatus = draft.booking_status;
   const fieldFlags: string[] = [];
+  let rejectedClaimsCount = 0;
   const verdictByField = new Map<string, VerifierField>();
-  report.forEach((item) => verdictByField.set(item.field.trim(), item));
+  normalizedReport.forEach((item) => verdictByField.set(item.field.trim(), item));
 
-  for (const f of report) {
+  for (const f of normalizedReport) {
     const fieldName = f.field.trim();
     const draftAlreadyNegative = isAbsenceValue(f.draft_value);
 
@@ -477,12 +806,27 @@ export function applyVerdicts(
       continue;
     }
 
+    // Словарные поля booking_status / call_outcome при наличии подтверждающих цитат уже стали confirmed выше;
+    // если подтверждающей цитаты нет и вердикт unconfirmed — не выставляем ложный флаг «не найдена цитата для "согласие"».
+    if (DICTIONARY_STATUS_FIELDS.has(fieldName) && f.verdict === 'unconfirmed') {
+      continue;
+    }
+
     const nextValue =
       f.verdict === 'contradicts' && f.corrected_value
         ? f.corrected_value
         : UNCONFIRMED_VALUE_PLACEHOLDER;
 
     fieldFlags.push(fieldName);
+    rejectedClaimsCount++;
+
+    // Помечаем отклонённую/неподтверждённую цитату, чтобы она явно отражалась в отчёте и счётчике
+    if (f.verdict === 'unconfirmed' || f.verdict === 'contradicts') {
+      if (f.quote && !f.rejected_quote && f.verdict === 'unconfirmed') {
+        f.rejected_quote = f.quote;
+        f.quote = null;
+      }
+    }
 
     switch (fieldName) {
       case 'call_purpose':
@@ -526,6 +870,7 @@ export function applyVerdicts(
       case 'time':
         keyFacts.time = nextValue === UNCONFIRMED_VALUE_PLACEHOLDER ? null : nextValue;
         break;
+      case 'booking_done':
       case 'booking_status_text':
         struct.booking_status_text = nextValue;
         keyFacts.is_booked_text = nextValue;
@@ -550,18 +895,27 @@ export function applyVerdicts(
     }
   }
 
-  // Обработка 10 критериев аудита: «для каждого критерия приведи цитату-обоснование; обоснования без цитаты — понизь до 0 и пометь»
+  // Обработка 10 критериев аудита: «для каждого критерия приведи цитату-обоснование; обоснования без цитаты — понизь до 0 и пометь».
+  // Вердикт contradicts без опровергающей цитаты понижаем до unconfirmed.
+  const normalizedCriteriaReport: CriteriaVerificationItem[] = criteriaReport.map((it) => {
+    const hasQuote = Boolean(it.quote && String(it.quote).trim());
+    if (it.verdict === 'contradicts' && !hasQuote) {
+      return {
+        ...it,
+        verdict: 'unconfirmed',
+        quote: null,
+      };
+    }
+    return it;
+  });
+
   const criteriaFlags: string[] = [];
-  const sourceCriteria =
-    draft.criteria_scores ||
-    draft.evaluation?.criteria ||
-    draft.key_facts?.criteria_scores ||
-    [];
+  const sourceCriteria = sourceCriteriaForStatus;
 
   let updatedCriteria = sourceCriteria.map((c) => ({ ...c }));
-  if (criteriaReport.length > 0 && updatedCriteria.length > 0) {
+  if (normalizedCriteriaReport.length > 0 && updatedCriteria.length > 0) {
     const byId = new Map<string, CriteriaVerificationItem>();
-    criteriaReport.forEach((it) => byId.set(it.id, it));
+    normalizedCriteriaReport.forEach((it) => byId.set(it.id, it));
 
     updatedCriteria = updatedCriteria.map((crit) => {
       if (crit.is_applicable === false || typeof crit.score !== 'number') {
@@ -579,6 +933,11 @@ export function applyVerdicts(
       }
 
       criteriaFlags.push(crit.id);
+      rejectedClaimsCount++;
+      // Если у критерия на Pass 1 была цитата, а Pass 2 отклонил её (unconfirmed/contradicts), сохраняем в rejected_quote
+      if (!ver.rejected_quote && crit.evidence_quote) {
+        ver.rejected_quote = crit.evidence_quote;
+      }
       const tag = '[Требует проверки: обоснование не подтверждено цитатой из стенограммы]';
       const baseExp = (crit.explanation || '').trim();
       return {
@@ -608,6 +967,18 @@ export function applyVerdicts(
     }
   }
 
+  // Согласованность аудита после Pass 2: если критерии (в т. ч. после понижения) содержат оценки < 7,
+  // блок mistakes не должен быть пустым или содержать «грубых ошибок не допущено».
+  const visitDateCtx = struct.offered_date_time || keyFacts.offered_date_time || keyFacts.date || null;
+  const reconciled = reconcileMistakesWithCriteria(
+    draft.operator_mistakes || [],
+    updatedCriteria,
+    keyFacts.call_datetime || null,
+    visitDateCtx,
+    effectiveTranscript
+  );
+  const updatedMistakes = reconciled.mistakes;
+
   // Синхронизируем строку «Суть обращения: ...» и число оценки в «Разбор работы менеджера (оценка X/10)»
   let updatedTranscriptSummary = draft.transcript_summary;
   if (fieldFlags.length > 0 && updatedTranscriptSummary) {
@@ -626,22 +997,36 @@ export function applyVerdicts(
       `$1${updatedOperatorScore}$2`
     );
   }
+  if (updatedTranscriptSummary && reconciled.fixedFromCriteria && updatedMistakes.length > 0) {
+    updatedTranscriptSummary = updatedTranscriptSummary.replace(
+      /(-\s*Ошибки и недочеты:\s*)[^\n]*/i,
+      `$1${updatedMistakes.join('; ')}`
+    );
+  }
 
   const uniqueFlags = Array.from(new Set(fieldFlags));
   const uniqueCriteriaFlags = Array.from(new Set(criteriaFlags));
   const suspectedFalsePositives = [
-    ...report.filter((f) => f.suspected_false_positive).map((f) => f.field),
-    ...criteriaReport.filter((c) => c.suspected_false_positive).map((c) => c.id),
+    ...normalizedReport.filter((f) => f.suspected_false_positive).map((f) => f.field),
+    ...normalizedCriteriaReport.filter((c) => c.suspected_false_positive).map((c) => c.id),
   ];
+
+  // Счётчик отсечённых/неподтверждённых цитат и утверждений отражает все unconfirmed/contradicts флаги,
+  // а не только цитаты, отсечённые программно на шаге verifySummary.
+  const totalCaughtQuotes = Math.max(
+    hallucinatedQuotesCaught,
+    rejectedClaimsCount,
+    uniqueFlags.length + uniqueCriteriaFlags.length
+  );
 
   const verificationReport: CallVerificationReport = {
     summary_verdict:
       uniqueFlags.length > 0 || uniqueCriteriaFlags.length > 0 ? 'есть противоречия' : 'ок',
-    fields: report,
+    fields: normalizedReport,
     flags: uniqueFlags,
     criteria_flags: uniqueCriteriaFlags,
-    criteria_items: criteriaReport,
-    hallucinated_quotes_caught: hallucinatedQuotesCaught,
+    criteria_items: normalizedCriteriaReport,
+    hallucinated_quotes_caught: totalCaughtQuotes,
     ...(suspectedFalsePositives.length > 0 ? { suspected_false_positives: suspectedFalsePositives } : {}),
     verified_at: new Date().toISOString(),
   };
@@ -662,6 +1047,7 @@ export function applyVerdicts(
     evaluation: updatedEvaluation,
     criteria_scores: updatedCriteria.length > 0 ? updatedCriteria : draft.criteria_scores,
     operator_score: updatedOperatorScore,
+    operator_mistakes: updatedMistakes,
     key_facts: keyFacts,
     verification_report: verificationReport,
     verification_flags: uniqueFlags,
@@ -701,6 +1087,7 @@ export async function runTwoPassVerification(
     draft,
     summaryRes.report,
     criteriaItems,
-    summaryRes.hallucinatedQuotesCaught + criteriaHallucinations
+    summaryRes.hallucinatedQuotesCaught + criteriaHallucinations,
+    transcript
   );
 }

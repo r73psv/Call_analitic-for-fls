@@ -17,7 +17,7 @@ import { transcribeWithRetry, fixDuplicatedTranscript, refineTranscriptRoles } f
 import { transcribeAudio, resolveActiveSttProvider, getSttProviderLabel, normalizeSttProvider } from './src/services/transcriptionService.js';
 import { isTbankVoiceKitConfigured } from './src/services/tbank-voicekit.js';
 import { getGigaAmConfig, isGigaAmConfigured } from './src/services/gigaam-asr.js';
-import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation, harmonizeMistakesAndEvaluation, filterOutdatedReminderMistakes, generateLocalFallbackAnalysis } from './src/services/gigachat.js';
+import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation, harmonizeMistakesAndEvaluation, filterOutdatedReminderMistakes, reconcileMistakesWithCriteria, generateLocalFallbackAnalysis } from './src/services/gigachat.js';
 import { classifyCallContext } from './src/services/summaryUtils.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
 import { readStoreSync, writeStore } from './src/store/store.js';
@@ -3621,6 +3621,8 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
   if (
     !callCopy.transcript ||
     callCopy.status !== 'completed' ||
+    callCopy.booking_status === 'не применимо' ||
+    callCopy.key_facts?.call_outcome === 'не состоялся' ||
     /^анализ звонка заблокирован|^звонок не состоялся|^разговор не состоялся|^аудиозапись звонка доступна/i.test(rawSummary.trim())
   ) {
     return changed;
@@ -3654,15 +3656,40 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
         changed = true;
       }
     }
-    if (Array.isArray(callCopy.operator_mistakes) && callCopy.operator_mistakes.length > 0) {
-      const filteredMistakes = filterOutdatedReminderMistakes(
-        callCopy.operator_mistakes,
-        callCopy.timestamp,
-        visitDateContext,
-        callCopy.transcript
-      );
-      if (JSON.stringify(callCopy.operator_mistakes) !== JSON.stringify(filteredMistakes)) {
-        callCopy.operator_mistakes = filteredMistakes;
+    const trustedCriteria = Array.isArray(trustedEval?.criteria)
+      ? trustedEval.criteria
+      : Array.isArray(callCopy.criteria_scores)
+      ? callCopy.criteria_scores
+      : [];
+    const curMistakes = Array.isArray(callCopy.operator_mistakes) ? callCopy.operator_mistakes : [];
+    const reconciledTrusted = reconcileMistakesWithCriteria(
+      curMistakes,
+      trustedCriteria,
+      callCopy.timestamp,
+      visitDateContext,
+      callCopy.transcript
+    );
+    if (JSON.stringify(curMistakes) !== JSON.stringify(reconciledTrusted.mistakes)) {
+      callCopy.operator_mistakes = reconciledTrusted.mistakes;
+      changed = true;
+    }
+    // Убираем устаревшие флаги «не найдена цитата для "согласие"/"запись"» на словарных полях booking_status / call_outcome
+    if (callCopy.verification_report && Array.isArray(callCopy.verification_report.flags)) {
+      const fieldByKey = new Map<string, any>();
+      (callCopy.verification_report.fields || []).forEach((f: any) => {
+        if (f?.field) fieldByKey.set(String(f.field).trim(), f);
+      });
+      const isSpuriousStatusFlag = (flag: string) => {
+        if (flag !== 'booking_status' && flag !== 'call_outcome') return false;
+        const rec = fieldByKey.get(flag);
+        return !rec || rec.verdict !== 'contradicts';
+      };
+      const cleanedReportFlags = callCopy.verification_report.flags.filter((fl: string) => !isSpuriousStatusFlag(fl));
+      if (cleanedReportFlags.length !== callCopy.verification_report.flags.length) {
+        callCopy.verification_report.flags = cleanedReportFlags;
+        if (Array.isArray(callCopy.verification_flags)) {
+          callCopy.verification_flags = callCopy.verification_flags.filter((fl: string) => !isSpuriousStatusFlag(fl));
+        }
         changed = true;
       }
     }
@@ -3753,15 +3780,16 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
       callCopy.recommendations = harmonized.advice;
       changed = true;
     }
-  } else if (rawMistakes.length > 0) {
-    const filteredMistakes = filterOutdatedReminderMistakes(
+  } else {
+    const reconciled = reconcileMistakesWithCriteria(
       rawMistakes,
+      evalObj.criteria,
       callCopy.timestamp,
       visitDateContext,
       callCopy.transcript
     );
-    if (JSON.stringify(rawMistakes) !== JSON.stringify(filteredMistakes)) {
-      callCopy.operator_mistakes = filteredMistakes;
+    if (JSON.stringify(rawMistakes) !== JSON.stringify(reconciled.mistakes)) {
+      callCopy.operator_mistakes = reconciled.mistakes;
       changed = true;
     }
   }

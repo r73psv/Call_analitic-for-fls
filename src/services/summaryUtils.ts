@@ -27,6 +27,7 @@ export interface CallContextClassification {
   isDispute: boolean;
   isDeclined: boolean;
   isConfirmedBooking: boolean;
+  isArrivalStatus?: boolean;
   lateMinutes: string | null;
   nonClientTopic: string | null;
 }
@@ -245,10 +246,34 @@ export function classifyCallContext(
   const hasExplicitRoles = clientLines.length > 0 && managerLines.length > 0;
 
   // 1. Состоялся ли разговор
-  const hasDialogueWords = cleanTranscript.replace(/^(?:Менеджер|Клиент|Администратор|Оператор)\s*:\s*/gim, '').trim().length >= 8;
+  const strippedDialogueText = cleanTranscript
+    .replace(/^(?:Менеджер|Клиент|Администратор|Оператор|Неизвестный)\s*:\s*/gim, '')
+    .replace(/\[(?:тишина|гудки|сброс|шум|музыка|нет\s+речи|автоответчик|нрзб)\]/giu, '')
+    .replace(/[\s.,!?;:\-–—]+/g, ' ')
+    .trim();
+  const hasDialogueWords = strippedDialogueText.length >= 8;
+  const wordTokens = strippedDialogueText ? strippedDialogueText.split(/\s+/).filter(Boolean) : [];
+  const hasAutoresponderOrUnavailable =
+    /разговор не состоялся|звонок не состоялся|диалог отсутствует|автоответчик|автоинформатор|голосовая почта|оставьте\s+(?:голосовое\s+)?сообщение|после\s+сигнала|абонент\s+(?:временно\s+)?недоступен|абонент\s+не\s+отвечает|абонент\s+занят|все\s+операторы\s+заняты|номер\s+не\s+обслуживается|не\s+отвечает\s+на\s+звонок/iu.test(
+      tLower
+    );
+  const onlyGreetingOrPing =
+    !hasExplicitRoles &&
+    wordTokens.length <= 8 &&
+    /^(?:(?:алло|ало|да|ау|при[её]м|слышно|вы\s+меня\s+слышите|меня\s+слышно|девушка|здравствуйте)(?:\s+|$))+$/iu.test(strippedDialogueText);
+  const clientOnlyWithoutManager =
+    clientLines.length > 0 &&
+    managerLines.length === 0 &&
+    !/менеджер\s*:/i.test(cleanTranscript);
   const isNotHappened =
+    existingBookingStatus === 'не применимо' ||
+    existingKeyFacts?.call_outcome === 'не состоялся' ||
     !hasDialogueWords ||
-    (!hasExplicitRoles && /разговор не состоялся|звонок не состоялся|диалог отсутствует|автоответчик|голосовая почта|оставьте сообщение после сигнала/i.test(tLower)) ||
+    onlyGreetingOrPing ||
+    (clientOnlyWithoutManager &&
+      (!/(?:записат|маникюр|педикюр|стрижк|окраш|стоим|цена|свободн|опозда|перенес)/iu.test(clientLines) ||
+        wordTokens.length <= 10)) ||
+    (!hasExplicitRoles && hasAutoresponderOrUnavailable) ||
     (!hasDialogueWords && /разговор не состоялся|диалог отсутствует/i.test(sLower));
 
   if (isNotHappened) {
@@ -262,6 +287,7 @@ export function classifyCallContext(
       isDispute: false,
       isDeclined: false,
       isConfirmedBooking: false,
+      isArrivalStatus: false,
       lateMinutes: null,
       nonClientTopic: null,
     };
@@ -334,12 +360,27 @@ export function classifyCallContext(
     (/(?:запишите|давайте\s+на\s+\d|подойд[её]т|подойду|согласна|согласен|давайте я продиктую|да,?\s*(?:вс[её],?\s*)?(?:запись\s+подтвер|подтвер[а-яё]*\s+запись))/iu.test(callerTextForRefusal) &&
       /(?:запис|жд[её]м|ожида|подтвержд|хорошо|подойд[её]те)/iu.test(managerEffectiveForBooking));
 
+  const hasArrivalStatusCue =
+    /(?:уже\s+(?:подош[её]л[аи]?|приш[её]л[аи]?|приехал[аи]?|на\s+месте)|(?:девушка|клиент|клиентка|гость|гостья)\s+(?:уже\s+)?(?:подош[её]л[аи]?|приш[её]л[аи]?|ожидает|жд[её]т)|сейчас\s+(?:буду|выйду|подойду))/iu.test(
+      cleanTranscript
+    ) &&
+    !/(?:сколько\s+стоит|прайс|хочу\s+записаться|хотела\s+записаться|запишите|подскажите\s+цен)/iu.test(cleanTranscript);
+
+  const isArrivalStatus =
+    hasArrivalStatusCue &&
+    !isNonClient &&
+    !isDispute &&
+    !isLateWarning &&
+    !isUnavailableServiceRefusal &&
+    !hasExplicitCancellation &&
+    !isDeclined;
+
   const isConfirmedBooking =
     !isNonClient &&
     !isDeclined &&
     !isUnavailableServiceRefusal &&
     !hasExplicitCancellation &&
-    (hasExplicitBookingConfirmPhrase || (!isLateWarning && hasRealBookingActionInTranscript));
+    (isArrivalStatus || hasExplicitBookingConfirmPhrase || (!isLateWarning && hasRealBookingActionInTranscript));
 
   // Категория consultation — только если записи не существует и нет попытки/подтверждения записи
   let category: CallIntentCategory = 'consultation';
@@ -347,6 +388,7 @@ export function classifyCallContext(
   else if (isDispute) category = 'dispute';
   else if (isUnavailableServiceRefusal) category = 'refusal_unavailable_service';
   else if (isDeclined) category = 'declined';
+  else if (isArrivalStatus) category = 'confirmed_booking';
   else if (hasExplicitBookingConfirmPhrase && isConfirmedBooking) category = 'confirmed_booking';
   else if (isLateWarning) category = 'late_or_visit_update';
   else if (isRescheduleOrCheck) category = 'reschedule_or_cancel';
@@ -363,6 +405,7 @@ export function classifyCallContext(
     isDispute,
     isDeclined,
     isConfirmedBooking,
+    isArrivalStatus,
     lateMinutes,
     nonClientTopic,
   };
@@ -758,6 +801,20 @@ export function extractStructuredCallSummary(
         `Предупредить мастера${master ? ` (${master})` : ''} о смещении начала визита`,
         'При смещении графика более чем на 15–20 минут проверить и предупредить следующих гостей при необходимости'
       ]
+    };
+  }
+
+  // Ветка B2: Короткий статусный звонок (уведомление о прибытии по существующему визиту)
+  if (ctx.isArrivalStatus) {
+    return {
+      call_purpose: 'Уведомление о прибытии/статусе визита',
+      requested_service: service || 'не озвучено',
+      offered_master: master || 'не озвучено',
+      offered_price: 'не озвучено',
+      offered_date_time: time ? `${date || 'сегодня'} ${time}` : 'не озвучено',
+      booking_status_text: 'Запись состоялась (уведомление о статусе существующего визита)',
+      unbooked_reason: 'не применимо',
+      manager_next_steps: ['Подойти и встретить гостя по существующей записи.']
     };
   }
 

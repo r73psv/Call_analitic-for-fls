@@ -211,7 +211,8 @@ ${metadataBlock}
 - "Отсрочка" — клиент просит подумать / перезвонит / проверить расписание.
 - "Отказ" — клиент отказался от услуги, цены или времени.
 - "Консультация" — только если записи не существует и клиент не собирается приходить.
-- "Не применимо" — разговор не состоялся (тишина, гудки, сброс, автоответчик без живого диалога).
+- "Не применимо" — ТОЛЬКО при отсутствии живых реплик сторон (тишина, гудки, сброс, автоответчик без живого диалога). Если обе стороны что-то сказали — звонок состоялся, каким бы коротким он ни был.
+- Короткие и несостоявшиеся звонки: Если диалог отсутствует или короче ~10 секунд без содержательной реплики — строго следуй ПРИМЕРУ 1: is_conversation = false, все аудио-поля null (audit.criteria = [], audit.overall_score = null, audit.mistakes = []), ошибок менеджеру не выставлять.
 
 ВАЖНЫЕ ПРАВИЛА РАЗБОРА РОЛЕЙ И СТАТУСА:
 - Метки ролей (Менеджер/Клиент) в стенограмме могут быть неточными — ориентируйся на смысл реплик!
@@ -250,6 +251,7 @@ ${metadataBlock}
 Правило по возражениям и альтернативам: если не было отказа или несогласия по времени/цене, критерии 5 и 8 имеют applicable: false, score: null.
 Критерий 8 (альтернативы) применим ТОЛЬКО если в диалоге был отказ или несогласие клиента по времени/цене/услуге. Если клиент подтвердил или согласился — критерий 8 не применим.
 Критерий 9 (закрытие на запись): если запись подтверждена — оценка 9–10, а не 5; формулировка "визит не согласован" при подтверждённой записи запрещена.
+Критерий 10 (качество коммуникации и завершение разговора): утверждение о качестве концовки обязательно подкрепляй дословной цитатой последней реплики менеджера или клиента из стенограммы.
 Контекст опоздания: если клиент предупреждает об опоздании на уже существующую запись — менеджер действует корректно (уточняет время прибытия, подтверждает ожидание). Не снижать оценки за «отсутствие альтернатив» или «незакрытую запись»: цель звонка — уведомление, и она достигнута.
 
 ЗАПРЕЩЕНО:
@@ -260,6 +262,8 @@ ${metadataBlock}
 - Признавать критерий 8 (альтернативы) применимым, если клиент подтвердил или согласился и не было отказа/несогласия по времени/цене/услуге.
 - Придумывать ошибки и советы про SMS/автоподтверждения или допродажи, если диалог короткий/подтверждающий или для этого не было основания в стенограмме.
 - Не выставлять ошибку "не оговорён регламент предварительного напоминания о визите" и не советовать про напоминание накануне, если звонок произошёл в день визита или после наступления времени визита — окно напоминаний в этом случае прошло.
+- Если диалог отсутствует или короче ~10 секунд без содержательной реплики — строго следуй ПРИМЕРУ 1: is_conversation = false, все аудио-поля null, ошибок менеджеру не выставлять.
+- Цитаты бери ТОЛЬКО из стенограммы текущего звонка. Переносить цитаты и формулировки из примеров (например, „Будем ожидать вас.“, „Спасибо за обратный звонок.“) в цитаты текущего звонка ЗАПРЕЩЕНО — примеры показывают структуру, а не текст.
 - Копировать шаблонные фразы из примеров.
 - Выводить любой текст вне JSON.
 
@@ -582,6 +586,57 @@ export const FEW_SHOT_EDGE_CASES = `
   "recommendations": ["Оперативно предупредить мастера Екатерину о задержке клиента на 5 минут."],
   "missed_opportunities": []
 }
+
+ПРИМЕР 7 (короткий статусный звонок, живой диалог ~14 сек)
+Транскрипт: "Автоинформатор: Обращаем ваше внимание, разговор может быть записан. Менеджер: Алло. Клиент: Ага, доброе утро. К тебе уже девушка подошла. Менеджер: Ага. Сейчас буду. Клиент: Угу." (длительность 14 сек)
+Ответ:
+{
+  "is_conversation": true,
+  "formatted_transcript": "Автоинформатор: Обращаем ваше внимание, разговор может быть записан.\\nМенеджер: Алло.\\nКлиент: Ага, доброе утро. К тебе уже девушка подошла.\\nМенеджер: Ага. Сейчас буду.\\nКлиент: Угу.",
+  "facts": {
+    "client_name": {"value": "не озвучено", "quote": null},
+    "desired_service": {"value": "не озвучено", "quote": null},
+    "master": {"value": "не озвучено", "quote": null, "note": ""},
+    "prices_mentioned": [],
+    "date_time_offered": {"value": "не озвучено", "quote": null},
+    "booking_markers": [
+      {"value": "К тебе уже девушка подошла.", "quote": "К тебе уже девушка подошла."},
+      {"value": "Ага. Сейчас буду.", "quote": "Ага. Сейчас буду."}
+    ],
+    "greeting_check": {"greeted": true, "addressed_client_by_name": false, "named_salon": false, "named_self": false, "quote": "Алло."}
+  },
+  "booking_status": "Запись состоялась",
+  "summary": {
+    "goal": "Уведомление о прибытии/статусе визита",
+    "service": "не озвучено",
+    "master": "не озвучено",
+    "price": "не озвучено",
+    "date_time": "не озвучено",
+    "booking_done": "Запись состоялась (уведомление о статусе существующего визита)",
+    "reason_if_not": "не применимо",
+    "manager_next_steps": ["Подойти и встретить гостя по существующей записи."],
+    "short_summary": "Суть обращения: услуга — не озвучено, дата — не озвучено, время — не озвучено, мастер — не озвучено. Пересказ диалога: Собеседник сообщил, что девушка уже подошла. Менеджер подтвердил, что сейчас подойдёт. Вывод: Уведомление о прибытии/статусе существующего визита.",
+    "quotes_support": ["К тебе уже девушка подошла.", "Ага. Сейчас буду."]
+  },
+  "audit": {
+    "criteria": [
+      {"name": "Приветствие и представление", "score": 7, "applicable": true, "reasoning": "Короткое приветствие «Алло.» без названия салона и имени.", "quote": "Алло."},
+      {"name": "Выявление потребности гостя", "score": null, "applicable": false, "reasoning": "Короткий статусный звонок о прибытии по существующему визиту — звонок не про запись услуг.", "quote": "не применимо"},
+      {"name": "Презентация услуги и мастера", "score": null, "applicable": false, "reasoning": "Звонок не про запись услуг, презентация не требовалась.", "quote": "не применимо"},
+      {"name": "Корректная презентация стоимости", "score": null, "applicable": false, "reasoning": "Стоимость не озвучивалась и не обсуждалась.", "quote": "не применимо"},
+      {"name": "Работа с возражениями", "score": null, "applicable": false, "reasoning": "Возражений не было.", "quote": "не применимо"},
+      {"name": "Предложение дополнительных услуг", "score": null, "applicable": false, "reasoning": "Короткий статусный звонок о прибытии.", "quote": "не применимо"},
+      {"name": "Предложение параллельной записи", "score": null, "applicable": false, "reasoning": "Не применимо к уведомлению о статусе визита.", "quote": "не применимо"},
+      {"name": "Предложение альтернативных вариантов", "score": null, "applicable": false, "reasoning": "Отказа или переноса не было.", "quote": "не применимо"},
+      {"name": "Закрытие на запись", "score": null, "applicable": false, "reasoning": "Уведомление о прибытии по уже существующей записи.", "quote": "не применимо"},
+      {"name": "Качество коммуникации и завершение разговора", "score": 9, "applicable": true, "reasoning": "Оперативный ответ и подтверждение готовности сразу подойти.", "quote": "Ага. Сейчас буду."}
+    ],
+    "overall_score": 8,
+    "mistakes": []
+  },
+  "recommendations": ["При ответе на звонок желательно сразу называть салон и имя администратора даже при коротких статусных вызовах."],
+  "missed_opportunities": []
+}
 `;
 
 
@@ -610,21 +665,202 @@ ${durationLine}${transcript}`;
  * «фантомные» ошибки допродаж при пустом missed_opportunities,
  * санитарная проверка мастера, синхронизация критерия цены с offered_price.
  */
-export function validateResult(result: AnalysisResult): { valid: boolean; errors: string[] } {
-  const errors: string[] = [];
-  const notHappened =
-    result.key_facts.call_outcome === 'не состоялся' || result.booking_status === 'не применимо';
+/**
+ * Проверяет, содержит ли стенограмма живой диалог:
+ * минимум 2 содержательные реплики сторон (не считая меток АТС/IVR, шумовых заглушек
+ * и односложных междометий вроде «угу», «ага», «алло»).
+ */
+export function hasSubstantiveLiveDialogue(transcript?: string | null): boolean {
+  if (!transcript || typeof transcript !== 'string') return false;
+  const trimmed = transcript.trim();
+  if (!trimmed || trimmed === 'Разговор не состоялся (диалог отсутствует)') return false;
 
+  // Убираем фразы АТС / IVR до проверки
+  const rawWithoutIvr = stripIvrFromTranscript(trimmed);
+  if (!rawWithoutIvr) return false;
+
+  // Явные односторонние звонки (в исходном тексте есть только Клиент: и ни одной реплики Менеджера:)
+  const rawHasClient = /^(?:клиент|гость)\s*:/im.test(rawWithoutIvr);
+  const rawHasManager = /^(?:менеджер|администратор|оператор)\s*:/im.test(rawWithoutIvr);
+  if (rawHasClient && !rawHasManager) {
+    return false;
+  }
+
+  const normalized = stripIvrFromTranscript(refineTranscriptRoles(trimmed));
+  if (!normalized) return false;
+
+  const lines = normalized
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const AUTO_RESPONDER_ONLY_RE =
+    /^(?:разговор не состоялся|звонок не состоялся|диалог отсутствует|автоответчик|автоинформатор|голосовая почта|оставьте\s+(?:голосовое\s+)?сообщение|после\s+сигнала|абонент\s+(?:временно\s+)?недоступен|абонент\s+не\s+отвечает|абонент\s+занят|все\s+операторы\s+заняты|номер\s+не\s+обслуживается)$/i;
+
+  const FILLER_WORDS = new Set([
+    'угу',
+    'ага',
+    'мгм',
+    'хм',
+    'эм',
+    'ээ',
+    'мм',
+    'ну',
+    'алло',
+    'ало',
+    'ау',
+    'ок',
+    'окей',
+    'да',
+    'нет',
+    'а',
+  ]);
+
+  let substantiveCount = 0;
+  let managerSubstantive = 0;
+  let clientSubstantive = 0;
+
+  for (const line of lines) {
+    if (/^автоинформатор\s*:/i.test(line)) continue;
+    const isManager = /^(?:менеджер|администратор|оператор)\s*:/i.test(line);
+    const isClient = /^(?:клиент|гость)\s*:/i.test(line);
+
+    const body = line
+      .replace(/^(?:менеджер|клиент|администратор|оператор|гость|собеседник|неизвестный)\s*:\s*/i, '')
+      .replace(/\[(?:тишина|гудки|сброс|шум|музыка|нет\s+речи|автоответчик|нрзб)\]/giu, ' ')
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+
+    if (!body || AUTO_RESPONDER_ONLY_RE.test(body)) continue;
+
+    const allWords = body.split(' ').filter(Boolean);
+    const meaningfulWords = allWords.filter((w) => !FILLER_WORDS.has(w));
+
+    // Содержательной считается реплика, где есть >= 2 значимых слова (или 1 информативное слово при длине >= 4 и наличии контекста, не равного междометию)
+    const isSubstantive =
+      meaningfulWords.length >= 2 ||
+      (meaningfulWords.length === 1 && allWords.length >= 2 && meaningfulWords[0].length >= 4);
+
+    if (isSubstantive) {
+      substantiveCount++;
+      if (isManager) managerSubstantive++;
+      else if (isClient) clientSubstantive++;
+    }
+  }
+
+  if (substantiveCount < 2) return false;
+
+  // Защита от автоответчика без реплик обеих сторон
+  const hasAutoresponderText =
+    /автоответчик|голосовая почта|оставьте\s+(?:голосовое\s+)?сообщение|после\s+сигнала|абонент\s+(?:временно\s+)?недоступен|абонент\s+занят|все\s+операторы\s+заняты/iu.test(
+      rawWithoutIvr
+    );
+  if (hasAutoresponderText && (managerSubstantive === 0 || clientSubstantive === 0)) {
+    return false;
+  }
+
+  return true;
+}
+
+export function validateResult(result: AnalysisResult, transcript?: string): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  const outcomeLower = String(result.key_facts?.call_outcome || '').toLowerCase().trim();
+  const modelSaidNotHappened =
+    result.is_conversation === false ||
+    outcomeLower === 'не состоялся' ||
+    outcomeLower === 'автоответчик' ||
+    outcomeLower.includes('не состоялся') ||
+    result.booking_status === 'не применимо';
+
+  const effectiveTranscript = transcript || result.formatted_transcript || '';
+  const hasLiveDialogue = effectiveTranscript ? hasSubstantiveLiveDialogue(effectiveTranscript) : false;
+
+  let notHappened = modelSaidNotHappened;
+  if (modelSaidNotHappened && hasLiveDialogue) {
+    console.warn('[GigaChat Repair] Стенограмма содержит живой диалог — вердикт модели «не состоялся» переопределён.');
+    result.is_conversation = true;
+    notHappened = false;
+    const repairCtx = classifyCallContext(effectiveTranscript);
+    if (result.booking_status === 'не применимо' || !result.booking_status) {
+      result.booking_status = repairCtx.isConfirmedBooking
+        ? 'согласие'
+        : repairCtx.isDeclined
+        ? 'отказ'
+        : 'консультация';
+    }
+    if (result.key_facts) {
+      if (
+        !result.key_facts.call_outcome ||
+        /не\s*состоял|автоответчик/i.test(String(result.key_facts.call_outcome))
+      ) {
+        result.key_facts.call_outcome =
+          result.booking_status === 'согласие'
+            ? 'запись'
+            : result.booking_status === 'отказ'
+            ? 'отказ'
+            : 'консультация';
+      }
+      if (result.key_facts.booking_status === 'не применимо' || !result.key_facts.booking_status) {
+        result.key_facts.booking_status = result.booking_status;
+      }
+    }
+  }
+
+  // A.1: Обнулять аудит по признаку «не состоялся» можно ТОЛЬКО если стенограмма
+  // действительно пуста или состоит из тишины / автоинформатора (нет живого диалога).
   if (notHappened) {
-    if (result.operator_score !== null) {
-      errors.push('Звонок не состоялся, но operator_score не null');
+    const prevScore =
+      result.operator_score ??
+      result.evaluation?.overall_score ??
+      result.key_facts?.evaluation?.overall_score ??
+      null;
+    const hadAuditArtifacts =
+      result.operator_score !== null ||
+      (result.evaluation &&
+        result.evaluation.overall_score !== null &&
+        result.evaluation.overall_score !== undefined) ||
+      (Array.isArray(result.criteria_scores) && result.criteria_scores.length > 0) ||
+      (Array.isArray(result.evaluation?.criteria) && result.evaluation!.criteria.length > 0) ||
+      (Array.isArray(result.operator_mistakes) && result.operator_mistakes.length > 0);
+
+    if (hadAuditArtifacts) {
+      console.warn(
+        `[GigaChat Repair] Аудит обнулён: звонок не состоялся (была модельная ошибка operator_score${
+          prevScore !== null ? `: ${prevScore}` : ''
+        }).`
+      );
     }
-    if (result.booking_status !== 'не применимо') {
-      errors.push('Звонок не состоялся, но booking_status не "не применимо"');
+
+    result.criteria_scores = [];
+    result.operator_score = null;
+    result.operator_mistakes = [];
+    result.booking_status = 'не применимо';
+    if (result.evaluation) {
+      result.evaluation = {
+        ...result.evaluation,
+        overall_score: null,
+        applicable_count: 0,
+        criteria: [],
+        summary_verdict: 'Звонок не состоялся: оценка качества оператора не производится.',
+      };
     }
-    if (result.key_facts.call_outcome !== 'не состоялся') {
-      errors.push('Звонок не состоялся, но call_outcome не "не состоялся"');
+    if (result.key_facts) {
+      result.key_facts.call_outcome = 'не состоялся';
+      result.key_facts.booking_status = 'не применимо';
+      result.key_facts.criteria_scores = [];
+      if (result.key_facts.evaluation) {
+        result.key_facts.evaluation = {
+          ...result.key_facts.evaluation,
+          overall_score: null,
+          applicable_count: 0,
+          criteria: [],
+          summary_verdict: 'Звонок не состоялся: оценка качества оператора не производится.',
+        };
+      }
     }
+    result.recommendations = ['Повторить попытку дозвона клиенту в рабочее время салона.'];
   } else {
     if (typeof result.operator_score !== 'number') {
       errors.push('Разговор состоялся, но operator_score не число');
@@ -634,7 +870,7 @@ export function validateResult(result: AnalysisResult): { valid: boolean; errors
     }
   }
 
-  if (result.booking_status !== result.key_facts.booking_status) {
+  if (!notHappened && result.booking_status !== result.key_facts.booking_status) {
     errors.push('booking_status не совпадает с key_facts.booking_status');
   }
 
@@ -648,7 +884,7 @@ export function validateResult(result: AnalysisResult): { valid: boolean; errors
   };
   if (!notHappened) {
     const allowed = outcomeBookingMap[result.key_facts.call_outcome];
-    if (allowed && !allowed.includes(result.booking_status)) {
+    if (allowed && result.booking_status && !allowed.includes(result.booking_status)) {
       errors.push(`call_outcome «${result.key_facts.call_outcome}» не согласован с booking_status «${result.booking_status}»`);
     }
   }
@@ -682,30 +918,60 @@ export function validateResult(result: AnalysisResult): { valid: boolean; errors
     }
   }
 
-  // 4. Фантомные ошибки допродаж: missed_opportunities пуст — формулировок о несостоявшихся допродажах быть не должно
+  // A.2. Фантомные ошибки допродаж: missed_opportunities пуст — чиним, удаляя формулировки про допродажи/дополнительные услуги
   const missed = (result as any).missed_opportunities;
+  const PHANTOM_UPSELL_RE =
+    /(?:не\s+предлож[а-яё]*\s+(?:сопутств|доп(?:олнительн)?|альтернатив|параллель|другого\s+специалиста|мастера\s+другой)|допродаж|дополнительн(?:ые|ых|ую)\s+услуг)/i;
   if (Array.isArray(missed) && missed.length === 0 && Array.isArray(result.operator_mistakes)) {
-    const phantom = result.operator_mistakes.filter((mm: string) =>
-      /не предложил\s+(?:сопутств|доп|альтернатив|параллель|другого специалиста|мастера другой)/i.test(String(mm))
+    const beforeLen = result.operator_mistakes.length;
+    const cleanedMistakes = result.operator_mistakes.filter(
+      (mm: string) => !PHANTOM_UPSELL_RE.test(String(mm || ''))
     );
-    if (phantom.length > 0) {
-      errors.push('missed_opportunities пуст, но в operator_mistakes есть формулировки о несостоявшихся допродажах');
+    if (cleanedMistakes.length < beforeLen) {
+      result.operator_mistakes = cleanedMistakes;
+      if (result.transcript_summary) {
+        const nextMistakesText = cleanedMistakes.length > 0 ? cleanedMistakes.join('; ') : 'не выявлены';
+        result.transcript_summary = result.transcript_summary.replace(
+          /(-\s*Ошибки и недочеты:\s*)[^\n]*/i,
+          `$1${nextMistakesText}`
+        );
+      }
+      console.warn(
+        `[GigaChat Repair] Удалены формулировки о допродажах/дополнительных услугах (${beforeLen - cleanedMistakes.length}) при пустом missed_opportunities.`
+      );
     }
   }
 
   // 5. Санитарная проверка мастера: поле не может быть не-именем
-  const mVal = String(result.key_facts.master || '').trim();
+  const mVal = String(result.key_facts?.master || '').trim();
   if (mVal && /окошечк|окошк|слот|время|секунд|расписан|студио/i.test(mVal)) {
     errors.push(`в key_facts.master записано «${mVal}» — это не ФИО мастера`);
   }
 
   // 6. Цена: критерий применим, но суммы в offered_price нет
   const priceCrit = criteria.find((c: any) => c?.id === 'price_presentation');
-  if (priceCrit?.is_applicable === true) {
-    const priceText = String(result.key_facts.offered_price || '');
+  if (!notHappened && priceCrit?.is_applicable === true) {
+    const priceText = String(result.key_facts?.offered_price || '');
     const hasPrice = /\d/.test(priceText) && !/не озвуч|не применимо/i.test(priceText);
     if (!hasPrice) {
       errors.push('price_presentation применим, но offered_price без суммы — стоимость в диалоге не озвучивалась');
+    }
+  }
+
+  // 7. Согласованность аудита: пустой/безошибочный mistakes при критериях ниже 7 баллов — противоречие
+  if (!notHappened) {
+    const lowCriteria = criteria.filter(
+      (c: any) => c && c.is_applicable !== false && typeof c.score === 'number' && !isNaN(c.score) && c.score < 7
+    );
+    if (lowCriteria.length > 0) {
+      const mistakesArr = Array.isArray(result.operator_mistakes) ? result.operator_mistakes : [];
+      const hasSubstantiveMistake = mistakesArr.some((m) => !isErrorFreeMistakeStatement(String(m || '')));
+      if (!hasSubstantiveMistake) {
+        const listStr = lowCriteria.map((c: any) => `${c.name || c.id}: ${c.score}/10`).join(', ');
+        errors.push(
+          `противоречие аудита: есть сниженные критерии ниже 7 баллов (${listStr}), но operator_mistakes пуст или утверждает отсутствие ошибок`
+        );
+      }
     }
   }
 
@@ -968,9 +1234,9 @@ export async function analyzeWithGigaChat(
 ): Promise<AnalysisResult> {
   const model: GigaChatModel = modelOverride || (process.env.GIGACHAT_DEFAULT_MODEL as GigaChatModel) || 'GigaChat:Lite';
 
-  // Жёсткий предохранитель: при длительности менее 10 секунд LLM не вызываем —
+  // Жёсткий предохранитель: при длительности менее 10 секунд без живого диалога LLM не вызываем —
   // возвращаем результат «разговор не состоялся», чтобы исключить фантазии модели.
-  if (callDurationSeconds !== undefined && callDurationSeconds < 10) {
+  if (callDurationSeconds !== undefined && callDurationSeconds < 10 && !hasSubstantiveLiveDialogue(transcript)) {
     return generateLocalFallbackAnalysis(
       transcript,
       model,
@@ -1142,6 +1408,8 @@ export {
   isReminderEveMistake,
   isCallOnOrAfterVisitDay,
   filterOutdatedReminderMistakes,
+  isErrorFreeMistakeStatement,
+  reconcileMistakesWithCriteria,
   splitSpeakerLines
 } from './evaluationUtils.js';
 
@@ -1169,6 +1437,8 @@ import {
   extractCallEvaluation,
   harmonizeMistakesAndEvaluation,
   filterOutdatedReminderMistakes,
+  isErrorFreeMistakeStatement,
+  reconcileMistakesWithCriteria,
   splitSpeakerLines
 } from './evaluationUtils.js';
 
@@ -1751,8 +2021,9 @@ export function parseGigaChatJson(
       : undefined;
 
   const baseTranscriptForRoles = originalTranscript || rawFormattedTranscript || '';
+  const origHasLiveDialogue = hasSubstantiveLiveDialogue(originalTranscript);
   const formattedTranscript =
-    rawFormattedTranscript === 'Разговор не состоялся (диалог отсутствует)'
+    rawFormattedTranscript === 'Разговор не состоялся (диалог отсутствует)' && !origHasLiveDialogue
       ? rawFormattedTranscript
       : refineTranscriptRoles(baseTranscriptForRoles || rawFormattedTranscript || '');
 
@@ -1762,15 +2033,16 @@ export function parseGigaChatJson(
   // Классификация контекста по очищенной от IVR стенограмме (защита от галлюцинаций модели)
   const dialogueCtx = classifyCallContext(formattedTranscript || originalTranscript || '');
 
-  // Признак реального диалога: в стенограмме присутствуют обе роли.
+  // Признак реального диалога: в стенограмме присутствуют обе роли ИЛИ 2+ содержательные реплики сторон.
   const transcriptHasBothRoles =
     !!formattedTranscript &&
     /менеджер\s*:/i.test(formattedTranscript) &&
     /клиент\s*:/i.test(formattedTranscript);
+  const liveDialoguePresent = hasSubstantiveLiveDialogue(formattedTranscript || originalTranscript || '');
 
   // --- Определяем, состоялся ли разговор (главный переключатель) ---
   let isConversation: boolean;
-  if (dialogueCtx.category !== 'not_happened' && transcriptHasBothRoles) {
+  if (liveDialoguePresent || (dialogueCtx.category !== 'not_happened' && transcriptHasBothRoles)) {
     isConversation = true;
   } else if (typeof parsed.is_conversation === 'boolean') {
     isConversation = parsed.is_conversation;
@@ -1782,7 +2054,7 @@ export function parseGigaChatJson(
     isConversation = transcriptHasBothRoles;
   }
 
-  // Явные маркеры провала перекрывают вердикт, но ТОЛЬКО если в стенограмме нет обеих ролей.
+  // Явные маркеры провала перекрывают вердикт, но ТОЛЬКО если в стенограмме нет живого диалога.
   const summaryTextForCheck =
     typeof parsed.summary === 'string'
       ? parsed.summary
@@ -1790,22 +2062,99 @@ export function parseGigaChatJson(
   const combinedText = `${stripIvrFromTranscript(formattedTranscript || '')} ${parsed.transcript_summary || ''} ${summaryTextForCheck}`.toLowerCase();
   const explicitFailure =
     /разговор не состоялся|звонок не состоялся|автоответчик|автоинформатор|голосовая почта|оставьте сообщение|после сигнала|абонент временно недоступен|абонент занят|все операторы заняты/.test(combinedText);
-  if (explicitFailure && !transcriptHasBothRoles) {
+  if (explicitFailure && !transcriptHasBothRoles && !liveDialoguePresent) {
     isConversation = false;
   }
 
-  // --- Ветка «разговор не состоялся» (шаблонный fallback) ---
+  const modelClaimedNotHappened =
+    parsed.is_conversation === false ||
+    /не\s*состоял|автоответчик/i.test(rawOutcome) ||
+    rawBooking === 'не применимо';
+
+  if (liveDialoguePresent && modelClaimedNotHappened) {
+    console.warn('[GigaChat Repair] Стенограмма содержит живой диалог — вердикт модели «не состоялся» переопределён.');
+    isConversation = true;
+  }
+
+  // --- Ветка «разговор не состоялся» (обнуляем аудит ТОЛЬКО если нет живого диалога в стенограмме) ---
   if (!isConversation) {
-    const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
-    const failedStruct = extractStructuredCallSummary('', 'Разговор не состоялся', undefined, salon, 'не применимо');
-    console.log('[Summary source: template] [Mistakes source: template] [Feedback source: template]');
+    const rawAuditScore =
+      parsed.audit?.overall_score !== undefined
+        ? parsed.audit.overall_score
+        : parsed.operator_score !== undefined
+        ? parsed.operator_score
+        : null;
+    const rawAuditCriteria = Array.isArray(parsed.audit?.criteria)
+      ? parsed.audit.criteria
+      : Array.isArray(parsed.criteria_scores)
+      ? parsed.criteria_scores
+      : [];
+    const rawAuditMistakes = Array.isArray(parsed.audit?.mistakes)
+      ? parsed.audit.mistakes
+      : Array.isArray(parsed.operator_mistakes)
+      ? parsed.operator_mistakes
+      : [];
+
+    if (
+      (rawAuditScore !== null && rawAuditScore !== undefined) ||
+      rawAuditCriteria.length > 0 ||
+      rawAuditMistakes.length > 0
+    ) {
+      console.warn(
+        `[GigaChat Repair] Аудит обнулён: звонок не состоялся (была модельная ошибка operator_score${
+          rawAuditScore !== null && rawAuditScore !== undefined ? `: ${rawAuditScore}` : ''
+        }).`
+      );
+    }
+
+    const modelSummaryObj = parsed.summary && typeof parsed.summary === 'object' ? parsed.summary : null;
+    const modelShortSummary =
+      (typeof modelSummaryObj?.short_summary === 'string' && modelSummaryObj.short_summary.trim()) ||
+      (typeof parsed.summary === 'string' && parsed.summary.trim()) ||
+      (typeof parsed.transcript_summary === 'string' && parsed.transcript_summary.trim()) ||
+      '';
+    const modelGoal =
+      (typeof modelSummaryObj?.goal === 'string' && modelSummaryObj.goal.trim()) ||
+      'Разговор не состоялся';
+    const modelBookingDone =
+      (typeof modelSummaryObj?.booking_done === 'string' && modelSummaryObj.booking_done.trim()) ||
+      'Разговор не состоялся (диалог отсутствует)';
+    const modelReason =
+      (typeof modelSummaryObj?.reason_if_not === 'string' && modelSummaryObj.reason_if_not.trim()) ||
+      'Диалог отсутствует';
+
+    const emptyEval: CallEvaluation = {
+      overall_score: null,
+      max_score: 10,
+      applicable_count: 0,
+      total_criteria_count: 10,
+      criteria: [],
+      summary_verdict: 'Звонок не состоялся: оценка качества оператора не производится.',
+    };
+    const nextStepText = `Повторить попытку дозвона клиенту в рабочее время салона «${salon}».`;
+    const notHappenedStruct: StructuredCallSummary = {
+      call_purpose: modelGoal,
+      requested_service: 'не озвучено',
+      offered_master: 'не озвучено',
+      offered_price: 'не озвучено',
+      offered_date_time: 'не озвучено',
+      booking_status_text: modelBookingDone,
+      unbooked_reason: modelReason,
+      manager_next_steps: [nextStepText],
+    };
+
+    const summarySrc: 'model' | 'template' = modelShortSummary ? 'model' : 'template';
+    console.log(`[Summary source: ${summarySrc}] [Mistakes source: template] [Feedback source: template]`);
     return {
-      transcript_summary: 'Разговор не состоялся: диалог отсутствует (тишина, гудки, сброс, автоответчик или автоинформатор).',
+      is_conversation: false,
+      transcript_summary:
+        modelShortSummary ||
+        'Разговор не состоялся: живой диалог между сторонами отсутствует.',
       booking_status: 'не применимо',
       formatted_transcript: formattedTranscript || 'Разговор не состоялся (диалог отсутствует)',
-      structured_summary: failedStruct,
-      evaluation: failedEval,
-      criteria_scores: failedEval.criteria,
+      structured_summary: notHappenedStruct,
+      evaluation: emptyEval,
+      criteria_scores: [],
       key_facts: {
         is_dispute: false,
         dispute_reason: null,
@@ -1813,29 +2162,29 @@ export function parseGigaChatJson(
         tone_manager: 'нейтральный',
         call_outcome: 'не состоялся',
         booking_status: 'не применимо',
-        client_issue: null,
+        client_issue: modelGoal,
         service: null,
         date: null,
         time: null,
         master: null,
-        call_purpose: failedStruct.call_purpose,
-        requested_service: failedStruct.requested_service,
-        offered_master: failedStruct.offered_master,
-        offered_price: failedStruct.offered_price,
-        offered_date_time: failedStruct.offered_date_time,
-        is_booked_text: failedStruct.booking_status_text,
-        unbooked_reason: failedStruct.unbooked_reason,
-        manager_next_steps: failedStruct.manager_next_steps,
-        structured_summary: failedStruct,
-        evaluation: failedEval,
-        criteria_scores: failedEval.criteria,
+        call_purpose: notHappenedStruct.call_purpose,
+        requested_service: notHappenedStruct.requested_service,
+        offered_master: notHappenedStruct.offered_master,
+        offered_price: notHappenedStruct.offered_price,
+        offered_date_time: notHappenedStruct.offered_date_time,
+        is_booked_text: notHappenedStruct.booking_status_text,
+        unbooked_reason: notHappenedStruct.unbooked_reason,
+        manager_next_steps: notHappenedStruct.manager_next_steps,
+        structured_summary: notHappenedStruct,
+        evaluation: emptyEval,
+        criteria_scores: [],
       },
       operator_score: null,
       operator_mistakes: [],
       operator_comment: 'Разговор не состоялся (диалог отсутствует).',
-      recommendations: `Повторить попытку дозвона клиенту в рабочее время салона «${salon}».`,
+      recommendations: [nextStepText],
       missed_opportunities: [],
-      summary_source: 'template',
+      summary_source: summarySrc,
       mistakes_source: 'template',
       feedback_source: 'template',
     };
@@ -1873,8 +2222,21 @@ export function parseGigaChatJson(
     bookingStatus = BOOKING_STATUS_DICT['отказ'].booking_status;
     outcomeFromStage2 = BOOKING_STATUS_DICT['отказ'].call_outcome;
   } else if (rawBooking.includes('не применим')) {
-    bookingStatus = BOOKING_STATUS_DICT['не применимо'].booking_status;
-    outcomeFromStage2 = BOOKING_STATUS_DICT['не применимо'].call_outcome;
+    if (liveDialoguePresent) {
+      bookingStatus = dialogueCtx.isConfirmedBooking
+        ? BOOKING_STATUS_DICT['запись состоялась'].booking_status
+        : dialogueCtx.isDeclined
+        ? BOOKING_STATUS_DICT['отказ'].booking_status
+        : BOOKING_STATUS_DICT['консультация'].booking_status;
+      outcomeFromStage2 = dialogueCtx.isConfirmedBooking
+        ? BOOKING_STATUS_DICT['запись состоялась'].call_outcome
+        : dialogueCtx.isDeclined
+        ? BOOKING_STATUS_DICT['отказ'].call_outcome
+        : BOOKING_STATUS_DICT['консультация'].call_outcome;
+    } else {
+      bookingStatus = BOOKING_STATUS_DICT['не применимо'].booking_status;
+      outcomeFromStage2 = BOOKING_STATUS_DICT['не применимо'].call_outcome;
+    }
   } else if (rawBooking.includes('консультац')) {
     bookingStatus = BOOKING_STATUS_DICT['консультация'].booking_status;
     outcomeFromStage2 = BOOKING_STATUS_DICT['консультация'].call_outcome;
@@ -1946,12 +2308,26 @@ export function parseGigaChatJson(
   }
 
   const rawFacts = parsed.facts && typeof parsed.facts === 'object' ? parsed.facts : null;
+  const validBookingMarkersQuotes: string[] = [];
+  let validDateTimeOfferedQuote: string | null = null;
   if (rawFacts) {
     for (const key of ['client_name', 'desired_service', 'master', 'date_time_offered'] as const) {
       const entry = rawFacts[key];
-      if (entry && typeof entry === 'object' && entry.quote && !isQuotePresentInTranscript(fullTranscript, entry.quote)) {
-        console.warn(`[GigaChat Facts] Цитата для facts.${key} не найдена в стенограмме — очищена без ретрая.`);
-        entry.quote = null;
+      if (entry && typeof entry === 'object' && entry.quote) {
+        if (!isQuotePresentInTranscript(fullTranscript, entry.quote)) {
+          console.warn(`[GigaChat Facts] Цитата для facts.${key} не найдена в стенограмме — очищена без ретрая.`);
+          entry.quote = null;
+        } else if (key === 'date_time_offered') {
+          validDateTimeOfferedQuote = String(entry.quote).trim();
+        }
+      }
+    }
+    if (Array.isArray(rawFacts.booking_markers)) {
+      for (const bm of rawFacts.booking_markers) {
+        const q = typeof bm === 'string' ? bm.trim() : String(bm?.quote || bm?.value || '').trim();
+        if (q && isQuotePresentInTranscript(fullTranscript, q)) {
+          validBookingMarkersQuotes.push(q);
+        }
       }
     }
   }
@@ -2245,6 +2621,17 @@ export function parseGigaChatJson(
       );
     }
 
+    // Согласованность аудита (приоритет критериев): если среди применимых критериев есть оценки < 7,
+    // блок mistakes не должен быть пустым или содержать «грубых ошибок не допущено».
+    const reconciledModelMistakes = reconcileMistakesWithCriteria(
+      finalMistakes,
+      evaluation.criteria,
+      callTimestamp,
+      visitDateContext,
+      fullTranscript
+    );
+    finalMistakes = reconciledModelMistakes.mistakes;
+
     if (usedModelRecommendations) {
       finalAdvice = rawModelRecommendations;
     } else {
@@ -2371,12 +2758,13 @@ export function parseGigaChatJson(
     formattedSummary = templateFormatted.formattedSummary;
     essence = templateFormatted.essence;
     finalStructuredSummary = templateFormatted.structuredSummary;
-    finalMistakes = filterOutdatedReminderMistakes(
+    finalMistakes = reconcileMistakesWithCriteria(
       templateFormatted.mistakes && templateFormatted.mistakes.length > 0 ? templateFormatted.mistakes : [],
+      evaluation.criteria,
       callTimestamp,
       visitDateContext,
       fullTranscript
-    );
+    ).mistakes;
     finalAdvice =
       templateFormatted.advice && templateFormatted.advice.length > 0
         ? templateFormatted.advice
@@ -2386,6 +2774,7 @@ export function parseGigaChatJson(
   console.log(`[Summary source: ${summarySource}] [Mistakes source: ${mistakesSource}] [Feedback source: ${feedbackSource}]`);
 
   const result: AnalysisResult = {
+    is_conversation: true,
     transcript_summary: formattedSummary,
     booking_status: bookingStatus,
     formatted_transcript: formattedTranscript,
@@ -2423,6 +2812,8 @@ export function parseGigaChatJson(
       structured_summary: finalStructuredSummary,
       evaluation,
       criteria_scores: evaluation.criteria,
+      ...(validBookingMarkersQuotes.length > 0 ? { booking_markers_quotes: validBookingMarkersQuotes } : {}),
+      ...(validDateTimeOfferedQuote ? { date_time_offered_quote: validDateTimeOfferedQuote } : {}),
     },
     operator_score: score,
     operator_mistakes: finalMistakes,
@@ -2457,10 +2848,26 @@ export function parseGigaChatJson(
   }
   result.missed_opportunities = missedOpportunities;
 
-  // Программная проверка согласованности — только логируем расхождения.
-  const check = validateResult(result);
+  // Программная проверка согласованности + авто-исправление противоречия mistakes <-> критерии < 7 (приоритет критериев)
+  const check = validateResult(result, fullTranscript);
   if (!check.valid) {
     console.warn(`[GigaChat] Обнаружены несоответствия в ответе модели: ${check.errors.join('; ')}`);
+    if (check.errors.some((e) => e.includes('противоречие аудита'))) {
+      const fixed = reconcileMistakesWithCriteria(
+        result.operator_mistakes || [],
+        result.evaluation?.criteria || [],
+        callTimestamp,
+        visitDateContext,
+        fullTranscript
+      );
+      if (fixed.fixedFromCriteria && fixed.mistakes.length > 0) {
+        result.operator_mistakes = fixed.mistakes;
+        result.transcript_summary = result.transcript_summary.replace(
+          /(-\s*Ошибки и недочеты:\s*)[^\n]*/i,
+          `$1${fixed.mistakes.join('; ')}`
+        );
+      }
+    }
   }
 
   return result;
@@ -2480,20 +2887,44 @@ export function generateLocalFallbackAnalysis(
   const rawLower = rawClean.toLowerCase();
   const explicitReason = (fallbackReason || '').trim();
 
-  // 1. Жёсткий предохранитель: звонки менее 10 секунд без реального диалога
-  if (callDurationSeconds !== undefined && callDurationSeconds < 10) {
-    const reason = explicitReason || `длительность звонка < 10 сек (${callDurationSeconds} сек)`;
+  // Вспомогательный конструктор строго по формату ПРИМЕРа 1 для всех несостоявшихся звонков (is_conversation = false):
+  // без оценки качества (null), без списка ошибок ([]), только рекомендация перезвонить.
+  const buildExample1NotHappenedFallback = (
+    reason: string,
+    summaryText: string,
+    formattedTr: string,
+    clientIssue: string,
+    commentText: string
+  ): AnalysisResult => {
     console.warn(`[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${reason}`);
     console.log('[Summary source: template] [Mistakes source: template] [Feedback source: template]');
-    const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
-    const failedStruct = extractStructuredCallSummary('', 'Разговор не состоялся', undefined, salon, 'не применимо');
+    const nextStepText = `Повторить попытку дозвона клиенту в рабочее время салона «${salon}».`;
+    const emptyEval: CallEvaluation = {
+      overall_score: null,
+      max_score: 10,
+      applicable_count: 0,
+      total_criteria_count: 10,
+      criteria: [],
+      summary_verdict: 'Звонок не состоялся: оценка качества оператора не производится.',
+    };
+    const failedStruct: StructuredCallSummary = {
+      call_purpose: 'Разговор не состоялся',
+      requested_service: 'не озвучено',
+      offered_master: 'не озвучено',
+      offered_price: 'не озвучено',
+      offered_date_time: 'не озвучено',
+      booking_status_text: 'Разговор не состоялся (диалог отсутствует)',
+      unbooked_reason: 'Диалог отсутствует',
+      manager_next_steps: [nextStepText],
+    };
     return {
-      transcript_summary: `Разговор не состоялся: длительность вызова ${callDurationSeconds} сек (менее 10 секунд), диалог между оператором и клиентом отсутствует.`,
+      is_conversation: false,
+      transcript_summary: summaryText,
       booking_status: 'не применимо',
-      formatted_transcript: rawClean || 'Разговор не состоялся (диалог отсутствует)',
+      formatted_transcript: formattedTr,
       structured_summary: failedStruct,
-      evaluation: failedEval,
-      criteria_scores: failedEval.criteria,
+      evaluation: emptyEval,
+      criteria_scores: [],
       key_facts: {
         is_dispute: false,
         dispute_reason: null,
@@ -2501,116 +2932,101 @@ export function generateLocalFallbackAnalysis(
         tone_manager: 'нейтральный',
         call_outcome: 'не состоялся',
         booking_status: 'не применимо',
-        client_issue: 'Звонок менее 10 секунд / диалог отсутствует',
+        client_issue: clientIssue,
         service: null,
         date: null,
         time: null,
         master: null,
+        call_purpose: failedStruct.call_purpose,
+        requested_service: failedStruct.requested_service,
+        offered_master: failedStruct.offered_master,
+        offered_price: failedStruct.offered_price,
+        offered_date_time: failedStruct.offered_date_time,
+        is_booked_text: failedStruct.booking_status_text,
+        unbooked_reason: failedStruct.unbooked_reason,
+        manager_next_steps: failedStruct.manager_next_steps,
         structured_summary: failedStruct,
-        evaluation: failedEval,
-        criteria_scores: failedEval.criteria,
+        evaluation: emptyEval,
+        criteria_scores: [],
       },
       operator_score: null,
       operator_mistakes: [],
-      operator_comment: `Оценка не выставляется: разговор не состоялся (длительность ${callDurationSeconds} сек менее 10 секунд).`,
-      recommendations: `Повторить попытку дозвона клиенту в рабочее время салона «${salon}».`,
+      operator_comment: commentText,
+      recommendations: [nextStepText],
+      missed_opportunities: [],
       summary_source: 'template',
       mistakes_source: 'template',
       feedback_source: 'template',
       fallback_reason: reason,
     };
+  };
+
+  // 1. Жёсткий предохранитель: звонки менее 10 секунд без реального диалога
+  if (callDurationSeconds !== undefined && callDurationSeconds < 10 && !hasSubstantiveLiveDialogue(rawClean)) {
+    return buildExample1NotHappenedFallback(
+      explicitReason || `длительность звонка < 10 сек (${callDurationSeconds} сек)`,
+      `Разговор не состоялся: длительность вызова ${callDurationSeconds} сек (менее 10 секунд), живой диалог между сторонами отсутствует.`,
+      rawClean || 'Разговор не состоялся (диалог отсутствует)',
+      'Звонок менее 10 секунд / диалог отсутствует',
+      `Оценка не выставляется: разговор не состоялся (длительность ${callDurationSeconds} сек менее 10 секунд).`
+    );
   }
 
-  // 2. Пустой транскрипт или заглушка (ожидание STT)
+  // 2. Пустой транскрипт, тишина/гудки/сброс или заглушка (ожидание STT)
+  const strippedNoiseOnly = rawClean
+    .replace(/\[(?:тишина|гудки|сброс|шум|музыка|нет\s+речи|автоответчик|нрзб)\]/giu, '')
+    .replace(/[\s.,!?;:\-–—]+/g, ' ')
+    .trim();
   const isPlaceholderOrEmpty =
     !rawClean ||
+    strippedNoiseOnly.length < 4 ||
     rawLower.includes('стенограмма ожидает') ||
     rawLower.includes('запись разговора и стенограмма отсутствуют');
 
   if (isPlaceholderOrEmpty) {
-    const reason = explicitReason || 'пустая стенограмма / отсутствует разборчивая речь';
-    console.warn(`[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${reason}`);
-    console.log('[Summary source: template] [Mistakes source: template] [Feedback source: template]');
     const durLabel = callDurationSeconds !== undefined ? ` (длительность ${callDurationSeconds} сек.)` : '';
-    const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
-    const failedStruct = extractStructuredCallSummary('', 'Разговор не состоялся', undefined, salon, 'не применимо');
-    return {
-      transcript_summary: `Разговор не состоялся: аудиозапись${durLabel} не содержит разборчивой речи (зафиксированы только гудки/тишина или сброс линии).`,
-      booking_status: 'не применимо',
-      formatted_transcript: rawClean || `Аудиозапись${durLabel} не содержит разборчивой речи.`,
-      structured_summary: failedStruct,
-      evaluation: failedEval,
-      criteria_scores: failedEval.criteria,
-      key_facts: {
-        is_dispute: false,
-        dispute_reason: null,
-        tone_client: 'нейтральный',
-        tone_manager: 'нейтральный',
-        call_outcome: 'не состоялся',
-        booking_status: 'не применимо',
-        client_issue: 'Отсутствует разборчивая речь в аудиозаписи',
-        service: null,
-        date: null,
-        time: null,
-        master: null,
-        structured_summary: failedStruct,
-        evaluation: failedEval,
-        criteria_scores: failedEval.criteria,
-      },
-      operator_score: null,
-      operator_mistakes: [],
-      operator_comment: `Оценка не выставляется: аудиозапись${durLabel} не содержит разборчивого диалога оператора и клиента.`,
-      recommendations: 'Проверить качество связи или повторить вызов.',
-      summary_source: 'template',
-      mistakes_source: 'template',
-      feedback_source: 'template',
-      fallback_reason: reason,
-    };
+    return buildExample1NotHappenedFallback(
+      explicitReason || 'пустая стенограмма / отсутствует разборчивая речь',
+      `Разговор не состоялся: аудиозапись${durLabel} не содержит разборчивой речи (зафиксированы только гудки/тишина или сброс линии).`,
+      rawClean || 'Разговор не состоялся (диалог отсутствует)',
+      'Отсутствует разборчивая речь в аудиозаписи',
+      `Оценка не выставляется: аудиозапись${durLabel} не содержит разборчивого диалога оператора и клиента.`
+    );
   }
 
   // 3. Очистка от эха, выделение IVR («Автоинформатор») и точное определение ролей («Менеджер» / «Клиент»)
   const formattedTranscript = refineTranscriptRoles(fixDuplicatedTranscript(rawClean));
   const ctx = classifyCallContext(formattedTranscript);
 
-  // 4. Несостоявшийся разговор / чистый автоответчик (после удаления IVR живого диалога не осталось)
-  if (ctx.category === 'not_happened') {
-    const reason = explicitReason || 'разговор не состоялся (автоответчик или обрыв)';
-    console.warn(`[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${reason}`);
-    console.log('[Summary source: template] [Mistakes source: template] [Feedback source: template]');
-    const failedEval = extractCallEvaluation('', '', null, null, [], [], salon);
-    const failedStruct = extractStructuredCallSummary('', 'Разговор не состоялся', undefined, salon, 'не применимо');
-    return {
-      transcript_summary: 'Разговор не состоялся: сработал автоответчик или диалог между сотрудником и собеседником отсутствует. Запись не оформлена.',
-      booking_status: 'не применимо',
-      formatted_transcript: formattedTranscript || rawClean,
-      structured_summary: failedStruct,
-      evaluation: failedEval,
-      criteria_scores: failedEval.criteria,
-      key_facts: {
-        is_dispute: false,
-        dispute_reason: null,
-        tone_client: 'нейтральный',
-        tone_manager: 'нейтральный',
-        call_outcome: 'не состоялся',
-        booking_status: 'не применимо',
-        client_issue: 'Звонок не состоялся / автоответчик',
-        service: null,
-        date: null,
-        time: null,
-        master: null,
-        structured_summary: failedStruct,
-        evaluation: failedEval,
-        criteria_scores: failedEval.criteria,
-      },
-      operator_score: null,
-      operator_mistakes: [],
-      operator_comment: 'Разговор не состоялся: зафиксирован автоответчик или обрыв до начала диалога (оценка не выставляется).',
-      recommendations: `Повторить звонок клиенту в рабочие часы салона «${salon}».`,
-      summary_source: 'template',
-      mistakes_source: 'template',
-      feedback_source: 'template',
-      fallback_reason: reason,
-    };
+  // Проверка наличия речи менеджера / живого двустороннего диалога
+  const managerUtteranceText = formattedTranscript
+    .split('\n')
+    .filter((l) => /^(?:менеджер|администратор|оператор)\s*:/i.test(l.trim()))
+    .map((l) => l.replace(/^(?:менеджер|администратор|оператор)\s*:\s*/i, '').trim())
+    .join(' ')
+    .trim();
+  const rawAfterIvr = stripIvrFromTranscript(rawClean);
+  const rawHasClientLabel = /^(?:клиент|гость)\s*:/im.test(rawAfterIvr);
+  const rawHasManagerLabel = /^(?:менеджер|администратор|оператор)\s*:/im.test(rawAfterIvr);
+  const cleanAfterIvr = stripIvrFromTranscript(formattedTranscript);
+  const managerDidNotSpeak =
+    (rawHasClientLabel && !rawHasManagerLabel) ||
+    (cleanAfterIvr.length > 0 &&
+      /^(?:клиент|гость)\s*:/i.test(cleanAfterIvr) &&
+      managerUtteranceText.length === 0);
+
+  // 4. Несостоявшийся разговор / автоответчик / менеджер не разговаривал -> строгий формат ПРИМЕРа 1
+  if (ctx.category === 'not_happened' || managerDidNotSpeak) {
+    return buildExample1NotHappenedFallback(
+      explicitReason ||
+        (managerDidNotSpeak
+          ? 'разговор не состоялся (менеджер не вступил в диалог)'
+          : 'разговор не состоялся (автоответчик или обрыв)'),
+      'Разговор не состоялся: живой диалог между сторонами отсутствует (автоответчик, тишина или односторонняя связь).',
+      formattedTranscript || rawClean || 'Разговор не состоялся (диалог отсутствует)',
+      'Звонок не состоялся / диалог отсутствует',
+      'Разговор не состоялся: зафиксирован автоответчик или отсутствие диалога (оценка не выставляется).'
+    );
   }
 
   const finalFallbackReason = explicitReason || 'локальный резервный генератор (причина не передана)';
@@ -2707,6 +3123,7 @@ export function generateLocalFallbackAnalysis(
 
   console.log('[Summary source: template] [Mistakes source: template] [Feedback source: template]');
   return {
+    is_conversation: true,
     transcript_summary: formattedSummary,
     booking_status: bookingStatus,
     formatted_transcript: formattedTranscript,

@@ -281,6 +281,7 @@ export function extractCallEvaluation(
       critClosing.is_applicable !== false &&
       (critClosing.score ?? 0) >= 8;
     const hasMissedConfirmedClosing =
+      !ctx.isArrivalStatus &&
       ctx.isConfirmedBooking &&
       critClosing &&
       (critClosing.is_applicable === false || (critClosing.score ?? 0) < 8);
@@ -295,7 +296,7 @@ export function extractCallEvaluation(
       (critAlt.score ?? 0) < 8 &&
       /предложил альтернативн/i.test(critAlt.explanation || '');
     const hasSalesOnNonSalesCall =
-      (ctx.isNonClient || (ctx.isLateWarning && !isExistingBookingConfirm)) &&
+      (ctx.isNonClient || ctx.isArrivalStatus || (ctx.isLateWarning && !isExistingBookingConfirm)) &&
       (critClosing?.is_applicable !== false || critPrice?.is_applicable !== false || critMaster?.is_applicable !== false);
     const hasFakePriceExplanation =
       critPrice &&
@@ -392,6 +393,22 @@ export function extractCallEvaluation(
       : 'Приветствие скомкано или не соответствует корпоративному стандарту.'
   };
 
+  // Последняя реплика менеджера или клиента для критерия 10 (Качество коммуникации и завершение)
+  const speakerLinesForClosing = ctx.cleanTranscript
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /^(?:менеджер|клиент|оператор|администратор)\s*:/i.test(l));
+  const lastSpeakerLineRaw =
+    speakerLinesForClosing.length > 0
+      ? speakerLinesForClosing[speakerLinesForClosing.length - 1]
+      : '';
+  const lastUtteranceQuote = lastSpeakerLineRaw
+    ? lastSpeakerLineRaw.replace(/^(?:менеджер|клиент|оператор|администратор)\s*:\s*/i, '').trim()
+    : '';
+  const closingQuoteSuffix = lastUtteranceQuote
+    ? ` (финальная реплика: «${lastUtteranceQuote.slice(0, 120)}»)`
+    : '';
+
   // Спец-ветка 1: Нецелевой / партнёрский / организационный звонок (например, билеты в WhatsApp)
   if (ctx.isNonClient) {
     const hasPoliteClosing = /(?:до свидания|всего доброго|хорошего дня|спасибо|пожалуйста|обязательно|прочитаем)/iu.test(managerEffective);
@@ -413,8 +430,9 @@ export function extractCallEvaluation(
         is_applicable: true,
         score: hasPoliteClosing && acknowledgedAction ? 9 : (hasPoliteClosing ? 8 : 6),
         explanation: acknowledgedAction
-          ? 'Администратор вежливо принял информацию и подтвердил готовность ознакомиться с ней и завершил разговор корректно.'
-          : 'Вежливое завершение организационного звонка.'
+          ? `Администратор вежливо принял информацию, подтвердил готовность ознакомиться с ней и завершил разговор корректно${closingQuoteSuffix}.`
+          : `Вежливое завершение организационного звонка${closingQuoteSuffix}.`,
+        ...(lastUtteranceQuote ? { evidence_quote: lastUtteranceQuote.slice(0, 180) } : {}),
       }
     ]);
   }
@@ -440,10 +458,38 @@ export function extractCallEvaluation(
         is_applicable: true,
         score: confirmedWaiting && clarifiedClientOrTime ? 10 : (confirmedWaiting ? 8 : 6),
         explanation: confirmedWaiting && clarifiedClientOrTime
-          ? 'Администратор вежливо подтвердил ожидание гостя и уточнил детали существующей записи.'
+          ? `Администратор вежливо подтвердил ожидание гостя и уточнил детали существующей записи${closingQuoteSuffix}.`
           : confirmedWaiting
-          ? 'Администратор доброжелательно подтвердил ожидание опаздывающего клиента, однако не уточнил имя или точное время действующей записи для отметки в расписании.'
-          : 'Ответ на предупреждение об опоздании прозвучал скомканно.'
+          ? `Администратор доброжелательно подтвердил ожидание опаздывающего клиента, однако не уточнил имя или точное время действующей записи для отметки в расписании${closingQuoteSuffix}.`
+          : `Ответ на предупреждение об опоздании прозвучал скомканно${closingQuoteSuffix}.`,
+        ...(lastUtteranceQuote ? { evidence_quote: lastUtteranceQuote.slice(0, 180) } : {}),
+      }
+    ]);
+  }
+
+  // Спец-ветка 3: Короткий статусный звонок (уведомление о прибытии по существующему визиту)
+  if (ctx.isArrivalStatus) {
+    const respondedPromptly = /(?:сейчас\s+(?:буду|выйду|подойду)|хорошо|угу|ага|жду|ждем|ждём|иду)/iu.test(managerEffective);
+    const notAppStatus = 'Короткий статусный звонок о прибытии по существующему визиту — звонок не про запись услуг, критерий не применим (не снижает оценку).';
+
+    return buildCallEvaluation([
+      greetingCriterion,
+      { id: 'needs_identification', is_applicable: false, score: null, explanation: notAppStatus },
+      { id: 'service_presentation', is_applicable: false, score: null, explanation: notAppStatus },
+      { id: 'price_presentation', is_applicable: false, score: null, explanation: notAppStatus },
+      { id: 'objections', is_applicable: false, score: null, explanation: notAppStatus },
+      { id: 'upsell', is_applicable: false, score: null, explanation: notAppStatus },
+      { id: 'parallel_booking', is_applicable: false, score: null, explanation: notAppStatus },
+      { id: 'alternatives', is_applicable: false, score: null, explanation: notAppStatus },
+      { id: 'closing', is_applicable: false, score: null, explanation: notAppStatus },
+      {
+        id: 'communication',
+        is_applicable: true,
+        score: respondedPromptly ? 9 : 7,
+        explanation: respondedPromptly
+          ? `Администратор оперативно и вежливо отреагировал на уведомление о прибытии гостя${closingQuoteSuffix}.`
+          : `Корректная коммуникация в коротком статусном звонке${closingQuoteSuffix}.`,
+        ...(lastUtteranceQuote ? { evidence_quote: lastUtteranceQuote.slice(0, 180) } : {}),
       }
     ]);
   }
@@ -658,7 +704,7 @@ export function extractCallEvaluation(
         : 'Попытка закрытия диалога на запись отсутствовала, бронь не оформлена.'
     },
 
-    // 10. Качество коммуникации и завершение разговора
+    // 10. Качество коммуникации и завершение разговора (утверждение о качестве концовки — с цитатой последней реплики)
     {
       id: 'communication',
       name: 'Качество коммуникации и завершение разговора',
@@ -668,11 +714,12 @@ export function extractCallEvaluation(
         : (hasPoliteClosing ? 8 : 7),
       explanation: isBookingAgreed
         ? hasPoliteClosing && hasReminderMention
-          ? 'Вежливый, доброжелательный тон, упомянуто напоминание о визите, разговор завершен на позитивной ноте.'
+          ? `Вежливый, доброжелательный тон, упомянуто напоминание о визите, разговор завершен на позитивной ноте${closingQuoteSuffix}.`
           : hasPoliteClosing
-          ? 'Диалог завершен вежливо, однако регламент напоминания о визите накануне не озвучен.'
-          : 'Концовка диалога скомкана, регламент вежливого прощания не соблюден.'
-        : 'Коммуникация вежливая и корректная в рамках характера обращения.'
+          ? `Диалог завершен вежливо, однако регламент напоминания о визите накануне не озвучен${closingQuoteSuffix}.`
+          : `Концовка диалога скомкана, регламент вежливого прощания не соблюден${closingQuoteSuffix}.`
+        : `Коммуникация вежливая и корректная в рамках характера обращения${closingQuoteSuffix}.`,
+      ...(lastUtteranceQuote ? { evidence_quote: lastUtteranceQuote.slice(0, 180) } : {}),
     }
   ];
 
@@ -807,6 +854,81 @@ export function filterOutdatedReminderMistakes(
   return mistakes.filter((m) => !isReminderEveMistake(m));
 }
 
+const ERROR_FREE_MISTAKE_REGEX =
+  /(?:грубых\s+ошибок\s+не\s+допущено|регламент(?:\s+общения)?\s+соблюд[её]н\s+в\s+полном\s+объ[её]ме|существенных\s+нарушений.*не\s+выявлено|ошибок\s+не\s+(?:выявлено|обнаружено|допущено)|ошибки\s+не\s+(?:выявлены|обнаружены)|^(?:не\s+выявлены|отсутствуют|нет|без\s+ошибок|—|-)$)/i;
+
+export function isErrorFreeMistakeStatement(text: string): boolean {
+  const clean = String(text || '').trim();
+  if (!clean) return true;
+  return ERROR_FREE_MISTAKE_REGEX.test(clean);
+}
+
+/**
+ * Согласованность аудита: если среди применимых критериев есть оценки ниже 7 баллов,
+ * блок mistakes НЕ может быть пустым или содержать фразу «грубых ошибок не допущено / регламент соблюден в полном объеме».
+ * Приоритет — у критериев оценки: при противоречии список ошибок формируется из сниженных критериев (< 7).
+ */
+export function reconcileMistakesWithCriteria(
+  mistakes: string[] = [],
+  criteria: CallEvaluationCriterion[] = [],
+  callTimestamp?: string | null,
+  visitDateText?: string | null,
+  transcript?: string | null
+): { mistakes: string[]; fixedFromCriteria: boolean } {
+  const lowCriteria = (Array.isArray(criteria) ? criteria : []).filter(
+    (c) => c && c.is_applicable !== false && typeof c.score === 'number' && !isNaN(c.score) && c.score < 7
+  );
+
+  const normalized = (Array.isArray(mistakes) ? mistakes : [])
+    .map((m) => String(m || '').trim())
+    .filter(Boolean);
+
+  if (lowCriteria.length === 0) {
+    return {
+      mistakes: filterOutdatedReminderMistakes(normalized, callTimestamp, visitDateText, transcript),
+      fixedFromCriteria: false,
+    };
+  }
+
+  // При наличии критериев < 7 удаляем противоречивые «безошибочные» формулировки
+  const withoutFalseClean = filterOutdatedReminderMistakes(
+    normalized.filter((m) => !isErrorFreeMistakeStatement(m)),
+    callTimestamp,
+    visitDateText,
+    transcript
+  );
+
+  if (withoutFalseClean.length > 0) {
+    return {
+      mistakes: withoutFalseClean,
+      fixedFromCriteria: withoutFalseClean.length !== normalized.length,
+    };
+  }
+
+  const reminderWindowPassed = isCallOnOrAfterVisitDay(callTimestamp, visitDateText, transcript);
+  const derived: string[] = [];
+
+  for (const crit of lowCriteria) {
+    const cleanExp = String(crit.explanation || '')
+      .replace(/\[Требует проверки:[^\]]*\]/gi, '')
+      .trim();
+    if (reminderWindowPassed && isReminderEveMistake(cleanExp)) {
+      derived.push(`${crit.name} (${crit.score}/10): снижение оценки по критерию.`);
+      continue;
+    }
+    if (cleanExp) {
+      derived.push(`${crit.name} (${crit.score}/10): ${cleanExp}`);
+    } else {
+      derived.push(`${crit.name} (${crit.score}/10): выявлен недочёт по критерию.`);
+    }
+  }
+
+  return {
+    mistakes: filterOutdatedReminderMistakes(derived, callTimestamp, visitDateText, transcript),
+    fixedFromCriteria: true,
+  };
+}
+
 /**
  * Синхронизирует список ошибок (mistakes) и советов (advice) с критериями оценки.
  * Гарантирует отсутствие противоречий и навязанных шаблонов, не относящихся к диалогу.
@@ -861,7 +983,7 @@ export function harmonizeMistakesAndEvaluation(
   const isBookingNotApplicable =
     !critClosing ||
     critClosing.is_applicable === false ||
-    Boolean(ctx?.isNonClient || ctx?.isLateWarning);
+    Boolean(ctx?.isNonClient || ctx?.isLateWarning || ctx?.isArrivalStatus);
 
   // Очищаем входной список ошибок от противоречий с критериями и типом звонка
   let filteredMistakes = inputMistakes

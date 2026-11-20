@@ -197,6 +197,10 @@ export interface KeyFacts {
   // Оценка звонка по 10 критериям
   evaluation?: CallEvaluation;
   criteria_scores?: CallEvaluationCriterion[];
+
+  // Цитаты из ЭТАПА 1 для подтверждения статуса записи (booking_status / call_outcome) на Pass 2
+  booking_markers_quotes?: string[];
+  date_time_offered_quote?: string | null;
 }
 
 export interface TokenUsage {
@@ -508,6 +512,7 @@ export interface DashboardStats {
 }
 
 export interface AnalysisResult {
+  is_conversation?: boolean;
   transcript_summary: string;
   booking_status?: 'согласие' | 'отказ' | 'консультация' | 'не применимо' | string;
   formatted_transcript?: string;
@@ -537,6 +542,8 @@ export interface AnalysisResult {
     structured_summary?: StructuredCallSummary;
     evaluation?: CallEvaluation;
     criteria_scores?: CallEvaluationCriterion[];
+    booking_markers_quotes?: string[];
+    date_time_offered_quote?: string | null;
   };
   operator_score: number | null;
   operator_comment: string;

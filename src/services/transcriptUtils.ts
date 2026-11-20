@@ -121,12 +121,29 @@ export function extractIvrPrefix(line: string): { ivr: string | null; rest: stri
 }
 
 /**
+ * Разбивает склеенные в одну строку реплики с явными метками спикеров
+ * (например, «Автоинформатор: ... Менеджер: Алло. Клиент: ...») на отдельные строки.
+ */
+export function splitInlineSpeakerLabels(raw: string): string {
+  if (!raw || typeof raw !== 'string') return raw;
+  return raw
+    .replace(
+      /(?<=[.!?\]\n]|^)\s+(?=(?:Менеджер|Клиент|Администратор|Оператор|Автоинформатор|Гость|Неизвестный)\s*:)/giu,
+      '\n'
+    )
+    .replace(
+      /\s+(?=(?:Менеджер|Клиент|Администратор|Оператор|Автоинформатор|Гость|Неизвестный)\s*:)/gu,
+      '\n'
+    );
+}
+
+/**
  * Удаляет все фразы/строки автоинформатора АТС из стенограммы перед анализом смысла
  * (чтобы фраза «разговор может быть записан» не вызывала ложного срабатывания «запись подтверждена»).
  */
 export function stripIvrFromTranscript(raw: string): string {
   if (!raw || typeof raw !== 'string') return '';
-  const lines = raw.split('\n');
+  const lines = splitInlineSpeakerLabels(raw).split('\n');
   const cleanLines: string[] = [];
 
   for (const rawLine of lines) {
@@ -469,7 +486,7 @@ export function refineTranscriptRoles(
 ): string {
   if (!raw || typeof raw !== 'string') return raw;
 
-  const rawLines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  const rawLines = splitInlineSpeakerLabels(raw).split('\n').map(l => l.trim()).filter(Boolean);
   if (rawLines.length === 0) return '';
 
   const splitItems = splitConjoinedLines(rawLines);
@@ -562,7 +579,7 @@ export function fixDuplicatedTranscript(
   markers: RoleMarkersConfig = DEFAULT_ROLE_MARKERS
 ): string {
   if (!raw || typeof raw !== 'string') return raw;
-  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  const lines = splitInlineSpeakerLabels(raw).split('\n').map(l => l.trim()).filter(Boolean);
   if (lines.length === 0) return raw;
 
   // Извлекаем чистые фразы и удаляем подряд идущие дубликаты
