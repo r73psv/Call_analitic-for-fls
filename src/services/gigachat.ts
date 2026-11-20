@@ -219,6 +219,7 @@ ${metadataBlock}
 - Приветствие салона («Добрый день, салон ...», «Fashion Look», «Лук Студия») и озвучивание расписания/цен — всегда реплики Менеджера.
 - Вопросы об услуге, стоимости, окошках и фразы подтверждения/отказа клиента — реплики Клиента.
 - Фразы автоинформатора АТС («разговор может быть записан», «вы позвонили в салон») выноси как «Автоинформатор: ...» и не принимай за согласие клиента на запись.
+- Фразы очереди и автоответчика ("оставайтесь на линии", "оставьте сообщение после гудка") — это Автоинформатор, даже если в стенограмме они с меткой "Менеджер". Если живой менеджер не произнёс ни одной реплики — статус "Не применимо", аудит не проводится.
 
 === ЭТАП 3. РЕЗЮМЕ ===
 Составляется ИСКЛЮЧИТЕЛЬНО из фактов ЭТАПА 1.
@@ -674,6 +675,7 @@ export function hasSubstantiveLiveDialogue(transcript?: string | null): boolean 
   if (!transcript || typeof transcript !== 'string') return false;
   const trimmed = transcript.trim();
   if (!trimmed || trimmed === 'Разговор не состоялся (диалог отсутствует)') return false;
+  if (isCallWithoutLiveManager(trimmed)) return false;
 
   // Убираем фразы АТС / IVR до проверки
   const rawWithoutIvr = stripIvrFromTranscript(trimmed);
@@ -1138,6 +1140,7 @@ async function executeWithExponentialBackoff(
   options?: AnalyzeWithRetryOptions
 ): Promise<AnalysisResult> {
   let lastError: any = null;
+  const attemptJsonErrorPositions: Array<number | null> = [];
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
@@ -1152,6 +1155,11 @@ async function executeWithExponentialBackoff(
       );
     } catch (error: any) {
       lastError = error;
+      attemptJsonErrorPositions.push(
+        typeof error?.jsonErrorPos === 'number' && !Number.isNaN(error.jsonErrorPos)
+          ? error.jsonErrorPos
+          : null
+      );
 
       // Если ключ GigaChat вообще не задан — не тратим время на 4 ретрая, сразу пробрасываем причину наверх
       if (error?.isGigaChatUnavailable) {
@@ -1213,12 +1221,31 @@ async function executeWithExponentialBackoff(
     }
   }
 
-  const fallbackReason = `ошибка после ${MAX_RETRIES} попыток: ${lastError?.message || lastError}`;
+  const nonNullJsonPositions = attemptJsonErrorPositions.filter((p): p is number => p !== null);
+  if (
+    attemptJsonErrorPositions.length === MAX_RETRIES &&
+    nonNullJsonPositions.length === MAX_RETRIES &&
+    nonNullJsonPositions.every((p) => p === nonNullJsonPositions[0])
+  ) {
+    const systematicPos = nonNullJsonPositions[0];
+    const systematicWarn = `[GigaChat] Систематический дефект JSON в позиции ${systematicPos}`;
+    console.warn(systematicWarn);
+    if (onLog) onLog('warning', systematicWarn);
+  }
+
+  const rawErrMsg = lastError?.jsonErrorMessage || lastError?.message || String(lastError);
+  const fallbackReason = lastError?.isJsonFormatError
+    ? `ошибка формата после ${MAX_RETRIES} попыток: ${rawErrMsg}`
+    : `ошибка после ${MAX_RETRIES} попыток: ${rawErrMsg}`;
   const failMsg = `GigaChat недоступен (${fallbackReason})`;
   console.error(`[GigaChat] ${failMsg}`);
   if (onLog) onLog('error', failMsg);
   const err: any = new Error(failMsg);
   err.fallbackReason = fallbackReason;
+  if (lastError?.isJsonFormatError) {
+    err.isJsonFormatError = true;
+    err.jsonErrorPos = lastError.jsonErrorPos;
+  }
   throw err;
 }
 
@@ -1315,12 +1342,28 @@ export async function analyzeWithGigaChat(
     throw new Error('GigaChat вернул пустой ответ');
   }
 
-  // Пытаемся распарсить JSON, при неудаче — просим модель исправить формат.
+  // Пытаемся распарсить JSON, при неудаче — просим модель исправить конкретное проблемное место.
   let draft: AnalysisResult;
   try {
     draft = parseGigaChatJson(rawContent, customSalonName, transcript, callTimestamp);
-  } catch (parseErr) {
-    console.warn('[GigaChat] Первый парсинг JSON не удался, отправка запроса на исправление формата...');
+  } catch (parseErr: any) {
+    const errMsg = parseErr?.jsonErrorMessage || parseErr?.message || String(parseErr);
+    const errPos = parseErr?.jsonErrorPos;
+    const errSnippet = parseErr?.jsonErrorSnippet || '';
+    console.warn(
+      `[GigaChat] Первый парсинг JSON не удался (${errMsg}${
+        typeof errPos === 'number' ? `, позиция ${errPos}` : ''
+      }), отправка запроса на исправление формата...`
+    );
+    const repairPrompt = [
+      'Твой предыдущий ответ содержит ошибку синтаксиса JSON и не может быть распарсен.',
+      `Текст ошибки JSON.parse: ${errMsg}${typeof errPos === 'number' ? ` (позиция ${errPos})` : ''}.`,
+      errSnippet ? `Фрагмент сырого ответа вокруг ошибки (±200 символов):\n${errSnippet}` : '',
+      'Исправь это конкретное место (убери десятичные запятые в числах, экранируй кавычки внутри строковых значений, убери хвостовые запятые) и верни ТОЛЬКО полный валидный JSON без пояснений и markdown-обёрток.',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
     const retryRes = await axios.post(
       gigachatApiUrl,
       {
@@ -1328,7 +1371,7 @@ export async function analyzeWithGigaChat(
         messages: [
           ...messages,
           { role: 'assistant', content: rawContent },
-          { role: 'user', content: 'Верни только валидный JSON без пояснений и markdown-обёрток.' },
+          { role: 'user', content: repairPrompt },
         ],
         temperature: 0,
         max_tokens: 4000,
@@ -1426,7 +1469,8 @@ import {
 import {
   stripIvrFromTranscript,
   refineTranscriptRoles,
-  fixDuplicatedTranscript
+  fixDuplicatedTranscript,
+  isCallWithoutLiveManager
 } from './transcriptUtils.js';
 
 import {
@@ -1992,17 +2036,257 @@ function cleanFactValue(val: unknown): string | null {
 }
 
 /**
- * Разбирает ответ модели (поддерживает как новую 4-этапную схему { facts, booking_status, summary, audit },
- * так и совместимую плоскую схему), программно проверяет цитаты и возвращает согласованный AnalysisResult.
+ * Программный препроцессинг типичных дефектов JSON, возвращаемого GigaChat:
+ * 1) десятичные запятые в числах после «:» («8,3», «5,9») -> точки («8.3», «5.9»);
+ * 2) экранирование неэкранированных двойных кавычек внутри строковых значений;
+ * 3) удаление хвостовых запятых перед «}» и «]»;
+ * 4) экранирование сырых переводов строк внутри строковых значений.
  */
-export function parseGigaChatJson(
-  text: string,
-  customSalonName?: string,
-  originalTranscript?: string,
-  callTimestamp?: string
-): AnalysisResult {
-  const salon = customSalonName || process.env.SALON_NAME || 'Fashion Look Studio';
-  // Явно вырезаем markdown-обёртки ```json / ``` перед JSON.parse
+export function preprocessMalformedJson(rawJson: string): { fixed: string; appliedFixes: string[] } {
+  const input = rawJson || '';
+  const fixes = new Set<string>();
+
+  type ContainerFrame = { type: '{' | '['; expectKey: boolean };
+  const stack: ContainerFrame[] = [];
+  const out: string[] = [];
+
+  const isWs = (ch: string) => ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r';
+  const skipWs = (idx: number): number => {
+    let k = idx;
+    while (k < input.length && isWs(input[k])) k++;
+    return k;
+  };
+  const topContainer = (): ContainerFrame | undefined =>
+    stack.length > 0 ? stack[stack.length - 1] : undefined;
+
+  // Проверяем, начинается ли после запятой внутри объекта похожее на следующий ключ "key":
+  const looksLikeObjectKeyAfterComma = (startIdx: number): boolean => {
+    if (input[startIdx] !== '"') return false;
+    let j = startIdx + 1;
+    let len = 0;
+    while (j < input.length && len < 160) {
+      const ch = input[j];
+      if (ch === '\\') {
+        j += 2;
+        len += 2;
+        continue;
+      }
+      if (ch === '\n' || ch === '\r') return false;
+      if (ch === '"') {
+        const afterQuote = skipWs(j + 1);
+        return input[afterQuote] === ':';
+      }
+      j++;
+      len++;
+    }
+    return false;
+  };
+
+  const looksLikeArrayValueStart = (startIdx: number): boolean => {
+    const ch = input[startIdx];
+    if (!ch) return false;
+    if (ch === '"' || ch === '{' || ch === '[' || ch === ']' || ch === '-' || (ch >= '0' && ch <= '9')) {
+      return true;
+    }
+    const rest = input.slice(startIdx);
+    return /^(?:true|false|null)(?=[\s,\]]|$)/.test(rest);
+  };
+
+  let inString = false;
+  let isCurrentStringKey = false;
+  let lastSignificantOutsideChar = '';
+
+  let i = 0;
+  while (i < input.length) {
+    const ch = input[i];
+
+    if (inString) {
+      if (ch === '\\') {
+        out.push(ch);
+        if (i + 1 < input.length) {
+          out.push(input[i + 1]);
+          i += 2;
+        } else {
+          i += 1;
+        }
+        continue;
+      }
+      if (ch === '\r') {
+        if (input[i + 1] !== '\n') {
+          out.push('\\n');
+          fixes.add('переводы строк в строках → \\n');
+        }
+        i++;
+        continue;
+      }
+      if (ch === '\n') {
+        out.push('\\n');
+        fixes.add('переводы строк в строках → \\n');
+        i++;
+        continue;
+      }
+      if (ch === '"') {
+        const nextIdx = skipWs(i + 1);
+        const nextCh = nextIdx < input.length ? input[nextIdx] : '';
+        const top = topContainer();
+        let isValidClosing = false;
+
+        if (nextIdx >= input.length) {
+          isValidClosing = true;
+        } else if (isCurrentStringKey) {
+          isValidClosing = nextCh === ':';
+        } else if (top?.type === '{') {
+          if (nextCh === '}') {
+            isValidClosing = true;
+          } else if (nextCh === ',') {
+            const afterComma = skipWs(nextIdx + 1);
+            const afterCh = input[afterComma];
+            if (afterCh === '}' || looksLikeObjectKeyAfterComma(afterComma)) {
+              isValidClosing = true;
+            }
+          }
+        } else if (top?.type === '[') {
+          if (nextCh === ']') {
+            isValidClosing = true;
+          } else if (nextCh === ',') {
+            const afterComma = skipWs(nextIdx + 1);
+            if (looksLikeArrayValueStart(afterComma)) {
+              isValidClosing = true;
+            }
+          }
+        } else {
+          isValidClosing = true;
+        }
+
+        if (isValidClosing) {
+          inString = false;
+          isCurrentStringKey = false;
+          out.push('"');
+          lastSignificantOutsideChar = '"';
+        } else {
+          out.push('\\"');
+          fixes.add('экранирование незаэкранированных кавычек внутри строк');
+        }
+        i++;
+        continue;
+      }
+
+      out.push(ch);
+      i++;
+      continue;
+    }
+
+    // Вне строки
+    if (ch === '"') {
+      const top = topContainer();
+      inString = true;
+      isCurrentStringKey = Boolean(top?.type === '{' && top.expectKey);
+      out.push('"');
+      i++;
+      continue;
+    }
+
+    if (ch === '{') {
+      stack.push({ type: '{', expectKey: true });
+      out.push('{');
+      lastSignificantOutsideChar = '{';
+      i++;
+      continue;
+    }
+
+    if (ch === '}') {
+      if (stack.length > 0) stack.pop();
+      out.push('}');
+      lastSignificantOutsideChar = '}';
+      i++;
+      continue;
+    }
+
+    if (ch === '[') {
+      stack.push({ type: '[', expectKey: false });
+      out.push('[');
+      lastSignificantOutsideChar = '[';
+      i++;
+      continue;
+    }
+
+    if (ch === ']') {
+      if (stack.length > 0) stack.pop();
+      out.push(']');
+      lastSignificantOutsideChar = ']';
+      i++;
+      continue;
+    }
+
+    if (ch === ':') {
+      const top = topContainer();
+      if (top && top.type === '{') top.expectKey = false;
+      out.push(':');
+      lastSignificantOutsideChar = ':';
+      i++;
+      continue;
+    }
+
+    if (ch === ',') {
+      const nextIdx = skipWs(i + 1);
+      const nextCh = input[nextIdx];
+      if (nextCh === '}' || nextCh === ']') {
+        fixes.add('удаление хвостовых запятых');
+        i++;
+        continue;
+      }
+      const top = topContainer();
+      if (top && top.type === '{') top.expectKey = true;
+      out.push(',');
+      lastSignificantOutsideChar = ',';
+      i++;
+      continue;
+    }
+
+    // Десятичная запятая в числовом значении после ':' (например, "overall_score": 8,3 или "score": 5,9)
+    if (lastSignificantOutsideChar === ':' && (ch === '-' || (ch >= '0' && ch <= '9'))) {
+      const numSlice = input.slice(i);
+      const decMatch = numSlice.match(/^(-?\d+),(\d+)(?=\s*[,}\]])/);
+      if (decMatch) {
+        out.push(`${decMatch[1]}.${decMatch[2]}`);
+        fixes.add(`десятичная запятая → точка (${decMatch[1]},${decMatch[2]} → ${decMatch[1]}.${decMatch[2]})`);
+        lastSignificantOutsideChar = decMatch[2].slice(-1);
+        i += decMatch[0].length;
+        continue;
+      }
+    }
+
+    if (!isWs(ch)) {
+      lastSignificantOutsideChar = ch;
+    }
+    out.push(ch);
+    i++;
+  }
+
+  return { fixed: out.join(''), appliedFixes: Array.from(fixes) };
+}
+
+function extractJsonErrorPosition(errorMessage: string, text: string): number {
+  const posMatch = errorMessage.match(/at position (\d+)/i);
+  if (posMatch) {
+    const pos = parseInt(posMatch[1], 10);
+    if (!Number.isNaN(pos)) return Math.max(0, Math.min(text.length, pos));
+  }
+  const lineColMatch = errorMessage.match(/line\s+(\d+)\s+column\s+(\d+)/i);
+  if (lineColMatch) {
+    const targetLine = parseInt(lineColMatch[1], 10);
+    const targetCol = parseInt(lineColMatch[2], 10);
+    const lines = text.split('\n');
+    let offset = 0;
+    for (let l = 0; l < Math.min(targetLine - 1, lines.length); l++) {
+      offset += lines[l].length + 1;
+    }
+    return Math.max(0, Math.min(text.length, offset + Math.max(0, targetCol - 1)));
+  }
+  return 0;
+}
+
+export function parseJsonWithDiagnostics(text: string): any {
   let clean = (text || '')
     .replace(/```json\s*/gi, '')
     .replace(/```\s*/g, '')
@@ -2013,7 +2297,45 @@ export function parseGigaChatJson(
     clean = jsonMatch[0];
   }
 
-  const parsed = JSON.parse(clean);
+  const { fixed, appliedFixes } = preprocessMalformedJson(clean);
+  if (appliedFixes.length > 0) {
+    console.warn(`[GigaChat JSON-FIX] Применены правки перед JSON.parse: ${appliedFixes.join('; ')}`);
+  }
+
+  try {
+    return JSON.parse(fixed);
+  } catch (err: any) {
+    const errMsg = err?.message || String(err);
+    const pos = extractJsonErrorPosition(errMsg, fixed);
+    const first100 = fixed.slice(0, 100).replace(/\r?\n/g, '\\n');
+    const start = Math.max(0, pos - 200);
+    const end = Math.min(fixed.length, pos + 200);
+    const snippet = `${fixed.slice(start, pos)}<<<ERROR_POS_${pos}>>>${fixed.slice(pos, end)}`;
+    console.error(
+      `[GigaChat JSON-ERR] ${errMsg} | позиция=${pos} | first100="${first100}" | фрагмент(±200)="${snippet}"`
+    );
+    const enriched: any = err instanceof Error ? err : new Error(errMsg);
+    enriched.isJsonFormatError = true;
+    enriched.jsonErrorPos = pos;
+    enriched.jsonErrorSnippet = snippet;
+    enriched.jsonErrorMessage = errMsg;
+    enriched.jsonFirst100 = first100;
+    throw enriched;
+  }
+}
+
+/**
+ * Разбирает ответ модели (поддерживает как новую 4-этапную схему { facts, booking_status, summary, audit },
+ * так и совместимую плоскую схему), программно проверяет цитаты и возвращает согласованный AnalysisResult.
+ */
+export function parseGigaChatJson(
+  text: string,
+  customSalonName?: string,
+  originalTranscript?: string,
+  callTimestamp?: string
+): AnalysisResult {
+  const salon = customSalonName || process.env.SALON_NAME || 'Fashion Look Studio';
+  const parsed = parseJsonWithDiagnostics(text);
 
   const rawFormattedTranscript =
     typeof parsed.formatted_transcript === 'string' && parsed.formatted_transcript.trim().length > 0
@@ -2062,7 +2384,7 @@ export function parseGigaChatJson(
   const combinedText = `${stripIvrFromTranscript(formattedTranscript || '')} ${parsed.transcript_summary || ''} ${summaryTextForCheck}`.toLowerCase();
   const explicitFailure =
     /разговор не состоялся|звонок не состоялся|автоответчик|автоинформатор|голосовая почта|оставьте сообщение|после сигнала|абонент временно недоступен|абонент занят|все операторы заняты/.test(combinedText);
-  if (explicitFailure && !transcriptHasBothRoles && !liveDialoguePresent) {
+  if ((explicitFailure && !transcriptHasBothRoles && !liveDialoguePresent) || isCallWithoutLiveManager(originalTranscript || formattedTranscript)) {
     isConversation = false;
   }
 
@@ -3015,17 +3337,26 @@ export function generateLocalFallbackAnalysis(
       /^(?:клиент|гость)\s*:/i.test(cleanAfterIvr) &&
       managerUtteranceText.length === 0);
 
-  // 4. Несостоявшийся разговор / автоответчик / менеджер не разговаривал -> строгий формат ПРИМЕРа 1
-  if (ctx.category === 'not_happened' || managerDidNotSpeak) {
+  // 4. Несостоявшийся разговор / автоответчик / очередь без менеджера -> строгий формат ПРИМЕРа 1
+  const callWithoutLiveManager = isCallWithoutLiveManager(rawClean);
+  if (callWithoutLiveManager || ctx.category === 'not_happened' || managerDidNotSpeak) {
     return buildExample1NotHappenedFallback(
       explicitReason ||
-        (managerDidNotSpeak
+        (callWithoutLiveManager
+          ? 'звонок не дошёл до менеджера (очередь/автоответчик без реплик менеджера)'
+          : managerDidNotSpeak
           ? 'разговор не состоялся (менеджер не вступил в диалог)'
           : 'разговор не состоялся (автоответчик или обрыв)'),
-      'Разговор не состоялся: живой диалог между сторонами отсутствует (автоответчик, тишина или односторонняя связь).',
+      callWithoutLiveManager
+        ? 'Разговор не состоялся: звонок не дошёл до менеджера (зафиксированы только фразы очереди или автоответчика без живого диалога с администратором).'
+        : 'Разговор не состоялся: живой диалог между сторонами отсутствует (автоответчик, тишина или односторонняя связь).',
       formattedTranscript || rawClean || 'Разговор не состоялся (диалог отсутствует)',
-      'Звонок не состоялся / диалог отсутствует',
-      'Разговор не состоялся: зафиксирован автоответчик или отсутствие диалога (оценка не выставляется).'
+      callWithoutLiveManager
+        ? 'Звонок не дошёл до менеджера (очередь / автоответчик)'
+        : 'Звонок не состоялся / диалог отсутствует',
+      callWithoutLiveManager
+        ? 'Оценка не выставляется: звонок не дошёл до менеджера (живых реплик администратора не зафиксировано).'
+        : 'Разговор не состоялся: зафиксирован автоответчик или отсутствие диалога (оценка не выставляется).'
     );
   }
 

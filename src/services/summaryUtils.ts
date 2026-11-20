@@ -4,7 +4,7 @@
  */
 
 import { StructuredCallSummary, KeyFacts } from '../types.js';
-import { stripIvrFromTranscript } from './transcriptUtils.js';
+import { stripIvrFromTranscript, isCallWithoutLiveManager } from './transcriptUtils.js';
 
 export type CallIntentCategory =
   | 'not_happened'
@@ -265,9 +265,11 @@ export function classifyCallContext(
     clientLines.length > 0 &&
     managerLines.length === 0 &&
     !/менеджер\s*:/i.test(cleanTranscript);
+  const callDidNotReachManager = isCallWithoutLiveManager(transcript);
   const isNotHappened =
     existingBookingStatus === 'не применимо' ||
     existingKeyFacts?.call_outcome === 'не состоялся' ||
+    callDidNotReachManager ||
     !hasDialogueWords ||
     onlyGreetingOrPing ||
     (clientOnlyWithoutManager &&

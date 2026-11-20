@@ -110,11 +110,21 @@ function normalizeForQuoteMatch(s: string): string {
 }
 
 /**
- * Мягкий фолбэк (частичное совпадение >= 70% длины цитаты):
- * находит цитату даже при склейке ролей ASR, лишних междометиях или искажении 1–2 слов.
+ * Мягкий фолбэк (частичное совпадение >= 70% длины цитаты, длина цитаты >= 6 слов):
+ * находит длинную цитату даже при склейке ролей ASR, лишних междометиях или искажении 1–2 слов,
+ * но не пропускает короткие шаблонные фразы из few-shot примеров.
  */
-function hasSoftSubstringCoverage(normTranscript: string, normQuote: string, minRatio: number = 0.7): boolean {
+export function hasSoftSubstringCoverage(
+  normTranscript: string,
+  normQuote: string,
+  minRatio: number = 0.7,
+  minWords: number = 6
+): boolean {
   if (!normTranscript || !normQuote || normQuote.length < 4) return false;
+
+  const qTokens = normQuote.split(' ').filter(Boolean);
+  const tTokens = normTranscript.split(' ').filter(Boolean);
+  if (qTokens.length < minWords || tTokens.length < 2) return false;
 
   // 1. Проверка непрерывного подстрочного совпадения >= 70% длины цитаты (скользящее окно)
   const targetLen = Math.max(4, Math.ceil(normQuote.length * minRatio));
@@ -139,10 +149,6 @@ function hasSoftSubstringCoverage(normTranscript: string, normQuote: string, min
 
   // 2. Пословное упорядоченное совпадение в локальном окне стенограммы (>= 70% символьной длины слов цитаты)
   // Устойчиво к вставке ASR-слов или склейке соседних реплик в середине цитаты
-  const qTokens = normQuote.split(' ').filter(Boolean);
-  const tTokens = normTranscript.split(' ').filter(Boolean);
-  if (qTokens.length < 2 || tTokens.length < 2) return false;
-
   const totalQuoteChars = qTokens.reduce((acc, w) => acc + w.length, 0);
   if (totalQuoteChars < 4) return false;
 
@@ -199,7 +205,7 @@ function hasSoftSubstringCoverage(normTranscript: string, normQuote: string, min
  * входящих подряд (или в плотном локальном окне при склейке ролей ASR);
  * если доля >= 70% и длина цитаты >= 4 слов — считает цитату найденной.
  */
-function hasSequentialWordCoverage(
+export function hasSequentialWordCoverage(
   normTranscript: string,
   normQuote: string,
   minRatio: number = 0.7,
@@ -305,8 +311,8 @@ export function isQuotePresentInTranscript(transcript: string, quote: string | n
     if (hasSequentialWordCoverage(normTranscriptRelaxed, relaxedPart, 0.7, 4)) {
       return true;
     }
-    // Мягкий фолбэк: частичное совпадение >= 70% длины цитаты (защита от склейки ролей и погрешностей ASR)
-    if (relaxedPart.length >= 4 && hasSoftSubstringCoverage(normTranscriptRelaxed, relaxedPart, 0.7)) {
+    // Мягкий фолбэк: частичное совпадение >= 70% длины цитаты при длине >= 6 слов (защита от склейки ролей и погрешностей ASR)
+    if (relaxedPart.length >= 4 && hasSoftSubstringCoverage(normTranscriptRelaxed, relaxedPart, 0.7, 6)) {
       return true;
     }
     return false;
@@ -520,10 +526,14 @@ export async function verifySummary(
           : null;
       if (candidateMatch) {
         console.warn(
-          `[GigaChat Verifier] suspected false positive: поле="${f.field}", вердикт="unconfirmed", цитата найдена дословно в стенограмме: "${candidateMatch.slice(0, 120)}"`
+          `[GigaChat Verifier] suspected false positive: поле="${f.field}", вердикт="unconfirmed" → повышен до confirmed, цитата найдена дословно в стенограмме: "${candidateMatch.slice(0, 120)}"`
         );
         return {
           ...f,
+          verdict: 'confirmed',
+          quote: candidateMatch,
+          hallucinated_quote: false,
+          rejected_quote: null,
           suspected_false_positive: true,
         };
       }
@@ -667,10 +677,14 @@ export async function verifyCriteriaWithTranscript(
           : null;
       if (candidateMatch) {
         console.warn(
-          `[GigaChat Verifier] suspected false positive: критерий="${it.id}", вердикт="unconfirmed", цитата найдена дословно в стенограмме: "${candidateMatch.slice(0, 120)}"`
+          `[GigaChat Verifier] suspected false positive: критерий="${it.id}", вердикт="unconfirmed" → повышен до confirmed, цитата найдена дословно в стенограмме: "${candidateMatch.slice(0, 120)}"`
         );
         return {
           ...it,
+          verdict: 'confirmed' as VerifierVerdict,
+          quote: candidateMatch,
+          hallucinated_quote: false,
+          rejected_quote: null,
           suspected_false_positive: true,
         };
       }
@@ -760,31 +774,55 @@ export function applyVerdicts(
   //   если есть подтверждающая цитата из booking_markers, date_time_offered, booking_done или критерия 9, считаем confirmed.
   const normalizedReport: VerifierField[] = report.map((item) => {
     const hasFieldQuote = Boolean(item.quote && String(item.quote).trim());
-    const downgradedItem: VerifierField =
+    let normalizedItem: VerifierField =
       item.verdict === 'contradicts' && !hasFieldQuote
         ? { ...item, verdict: 'unconfirmed', quote: null }
         : item;
 
-    const fn = downgradedItem.field.trim();
-    if (DICTIONARY_STATUS_FIELDS.has(fn)) {
-      if (downgradedItem.verdict !== 'contradicts' && verifiedStatusQuote) {
-        return {
-          ...downgradedItem,
+    const fn = normalizedItem.field.trim();
+    if (
+      normalizedItem.verdict === 'unconfirmed' &&
+      !DICTIONARY_STATUS_FIELDS.has(fn) &&
+      !isAbsenceValue(normalizedItem.draft_value) &&
+      effectiveTranscript
+    ) {
+      const fpQuote =
+        normalizedItem.quote && isQuotePresentInTranscript(effectiveTranscript, normalizedItem.quote)
+          ? normalizedItem.quote
+          : isQuotePresentInTranscript(effectiveTranscript, normalizedItem.draft_value)
+          ? normalizedItem.draft_value
+          : null;
+      if (fpQuote) {
+        normalizedItem = {
+          ...normalizedItem,
           verdict: 'confirmed',
-          quote: downgradedItem.quote || verifiedStatusQuote,
+          quote: fpQuote,
+          rejected_quote: null,
+          hallucinated_quote: false,
+          suspected_false_positive: true,
+        };
+      }
+    }
+
+    if (DICTIONARY_STATUS_FIELDS.has(fn)) {
+      if (normalizedItem.verdict !== 'contradicts' && verifiedStatusQuote) {
+        return {
+          ...normalizedItem,
+          verdict: 'confirmed',
+          quote: normalizedItem.quote || verifiedStatusQuote,
           rejected_quote: null,
           hallucinated_quote: false,
         };
       }
       // Если verdict был unconfirmed (не противоречит) — не привязываем к дословному значению словаря
-      if (downgradedItem.verdict === 'unconfirmed') {
+      if (normalizedItem.verdict === 'unconfirmed') {
         return {
-          ...downgradedItem,
+          ...normalizedItem,
           quote: null,
         };
       }
     }
-    return downgradedItem;
+    return normalizedItem;
   });
 
   let bookingStatus = draft.booking_status;
@@ -897,16 +935,36 @@ export function applyVerdicts(
 
   // Обработка 10 критериев аудита: «для каждого критерия приведи цитату-обоснование; обоснования без цитаты — понизь до 0 и пометь».
   // Вердикт contradicts без опровергающей цитаты понижаем до unconfirmed.
+  const sourceCriteriaById = new Map<string, CallEvaluationCriterion>();
+  sourceCriteriaForStatus.forEach((c) => sourceCriteriaById.set(c.id, c));
+
   const normalizedCriteriaReport: CriteriaVerificationItem[] = criteriaReport.map((it) => {
     const hasQuote = Boolean(it.quote && String(it.quote).trim());
-    if (it.verdict === 'contradicts' && !hasQuote) {
-      return {
-        ...it,
-        verdict: 'unconfirmed',
-        quote: null,
-      };
+    let nextItem: CriteriaVerificationItem =
+      it.verdict === 'contradicts' && !hasQuote
+        ? { ...it, verdict: 'unconfirmed', quote: null }
+        : { ...it };
+
+    if (nextItem.verdict === 'unconfirmed' && effectiveTranscript) {
+      const pass1Quote = sourceCriteriaById.get(nextItem.id)?.evidence_quote || null;
+      const fpMatch =
+        nextItem.quote && isQuotePresentInTranscript(effectiveTranscript, nextItem.quote)
+          ? nextItem.quote
+          : pass1Quote && isQuotePresentInTranscript(effectiveTranscript, pass1Quote)
+          ? pass1Quote
+          : null;
+      if (fpMatch) {
+        nextItem = {
+          ...nextItem,
+          verdict: 'confirmed',
+          quote: fpMatch,
+          rejected_quote: null,
+          hallucinated_quote: false,
+          suspected_false_positive: true,
+        };
+      }
     }
-    return it;
+    return nextItem;
   });
 
   const criteriaFlags: string[] = [];

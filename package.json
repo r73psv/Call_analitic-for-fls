@@ -9,7 +9,8 @@
     "start": "node dist/server.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx --test src/services/__tests__/callVerifier.test.ts src/services/__tests__/gigachat.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1098.0",

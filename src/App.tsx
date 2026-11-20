@@ -525,7 +525,7 @@ export default function App() {
       });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok) {
-        if (payload?.call) {
+        if (payload?.call && !payload?.preserved_previous_result) {
           setCalls(prev => prev.map(c => c.call_id === id ? payload.call : c));
           await loadData(true);
         }

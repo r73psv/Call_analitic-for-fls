@@ -1080,7 +1080,22 @@ async function analyzeCallTextOrAudio(
       llmErr?.fallbackReason ||
       (llmErr?.isGigaChatUnavailable
         ? 'GigaChat не настроен (ключ отсутствует)'
+        : llmErr?.isJsonFormatError
+        ? `ошибка формата после 4 попыток: ${llmErr?.jsonErrorMessage || llmErr?.message || String(llmErr)}`
         : `ошибка после 4 попыток: ${llmErr?.message || String(llmErr)}`);
+    if (options?.isManual) {
+      appendLog(
+        'error',
+        'gigachat',
+        `[GigaChat REANALYZE-ERR] Ручной пересчёт прерван (${fallbackReason}). Предыдущий результат сохранён.`
+      );
+      const propagated: any = new Error(fallbackReason);
+      propagated.fallbackReason = fallbackReason;
+      propagated.isGigaChatUnavailable = Boolean(llmErr?.isGigaChatUnavailable);
+      propagated.isJsonFormatError = Boolean(llmErr?.isJsonFormatError);
+      propagated.statusCode = 503;
+      throw propagated;
+    }
     appendLog('error', 'gigachat', `[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${fallbackReason}`);
     const fallbackRes = generateLocalFallbackAnalysis(
       cleanTranscript,
@@ -4592,7 +4607,25 @@ app.post('/api/calls/:id/reanalyze', async (req, res) => {
     }
     res.json(updatedCall);
   } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Внутренняя ошибка переанализа звонка' });
+    const reason = err?.fallbackReason || err?.message || 'Внутренняя ошибка переанализа звонка';
+    const isMissingKey = Boolean(
+      err?.isGigaChatUnavailable ||
+      /ключ\s+отсутств|не\s+настроен|unauthorized|401|403/i.test(reason)
+    );
+    const isJsonFormat = Boolean(
+      !isMissingKey &&
+      (err?.isJsonFormatError ||
+        /ошибка\s+формата|некорректн\w*\s+json|json\.parse|unexpected\s+token|unterminated\s+string|в\s+позиции/i.test(reason))
+    );
+    const statusCode =
+      err?.statusCode || (isMissingKey || isJsonFormat || err?.preservedPreviousResult ? 503 : 500);
+    const errorType = isMissingKey ? 'missing_key' : isJsonFormat ? 'json_format' : 'model_error';
+    res.status(statusCode).json({
+      error: reason,
+      fallback_reason: reason,
+      error_type: errorType,
+      preserved_previous_result: Boolean(err?.preservedPreviousResult),
+    });
   }
 });
 
@@ -4953,15 +4986,26 @@ async function performCallReanalysis(
   const existingTranscript = (!isErroneousTranscript && call.transcript && call.transcript.length > 20) ? call.transcript : '';
 
   const selectedModel = (modelOverride as GigaChatModel) || db.config.default_gigachat_model || db.config.activeModel || 'GigaChat:Lite';
+  const previousCompletedSnapshot: CallRecord | null =
+    call.status === 'completed' ? JSON.parse(JSON.stringify(call)) : null;
 
-  // Mark status as processing and record attempt metadata
-  call.status = 'processing';
-  call.transcript = existingTranscript || 'Загрузка аудиозаписи...';
-  call.error_message = undefined;
-  call.retry_count = (call.retry_count || 0) + 1;
-  call.last_retry_at = new Date().toISOString();
-  db.calls[callIdx] = call;
-  writeDb(db);
+  // При ручном пересчёте уже завершённой карточки не переводим её заранее в 'processing' и не затираем стенограмму,
+  // чтобы при сбое модели прежний успешный анализ гарантированно оставался нетронутым в БД и UI.
+  if (options?.isManual && previousCompletedSnapshot) {
+    call.retry_count = (call.retry_count || 0) + 1;
+    call.last_retry_at = new Date().toISOString();
+    db.calls[callIdx] = call;
+    writeDb(db);
+  } else {
+    // Mark status as processing and record attempt metadata
+    call.status = 'processing';
+    call.transcript = existingTranscript || 'Загрузка аудиозаписи...';
+    call.error_message = undefined;
+    call.retry_count = (call.retry_count || 0) + 1;
+    call.last_retry_at = new Date().toISOString();
+    db.calls[callIdx] = call;
+    writeDb(db);
+  }
 
   try {
     let audioUrl = call.audio_url;
@@ -5056,6 +5100,24 @@ async function performCallReanalysis(
     const finalDb = readDb();
     const finalCallIdx = finalDb.calls.findIndex((c: any) => c.call_id === callId);
     if (finalCallIdx !== -1) {
+      // Дополнительная страховка: если при ручном пересчёте ранее был успешный модельный анализ,
+      // а сейчас модель вернула заглушку из-за ошибки — не перезаписываем карточку шаблоном.
+      const isModelErrorTemplate =
+        options?.isManual &&
+        previousCompletedSnapshot?.summary_source === 'model' &&
+        analysisResult.summary_source === 'template' &&
+        Boolean(analysisResult.fallback_reason) &&
+        !/<\s*10\s*сек|0\s*сек|очередь|автоответчик|не дошёл до менеджера|пустая стенограмма/i.test(
+          analysisResult.fallback_reason || ''
+        );
+      if (isModelErrorTemplate) {
+        const protectErr: any = new Error(analysisResult.fallback_reason || 'Модель недоступна');
+        protectErr.fallbackReason = analysisResult.fallback_reason;
+        protectErr.statusCode = 503;
+        protectErr.preservedPreviousResult = true;
+        throw protectErr;
+      }
+
       const isFailed =
         (audioDownloadFailed && !existingTranscript) ||
         Boolean(analysisResult.error_message) ||
@@ -5100,9 +5162,20 @@ async function performCallReanalysis(
     const errorDb = readDb();
     const finalCallIdx = errorDb.calls.findIndex((c: any) => c.call_id === callId);
     if (finalCallIdx !== -1) {
-      errorDb.calls[finalCallIdx].status = 'failed';
-      errorDb.calls[finalCallIdx].error_message = err.message || String(err);
-      writeDb(errorDb);
+      if (options?.isManual && previousCompletedSnapshot) {
+        // Сохраняем прежний завершённый результат анализа без перезаписи статусом failed или шаблоном
+        errorDb.calls[finalCallIdx] = {
+          ...previousCompletedSnapshot,
+          retry_count: (previousCompletedSnapshot.retry_count || 0) + 1,
+          last_retry_at: new Date().toISOString(),
+        };
+        writeDb(errorDb);
+        err.preservedPreviousResult = true;
+      } else {
+        errorDb.calls[finalCallIdx].status = 'failed';
+        errorDb.calls[finalCallIdx].error_message = err.message || String(err);
+        writeDb(errorDb);
+      }
     }
     appendLog('error', 'system', `Ошибка во время анализа звонка ${callId}: ${err.message}`);
     throw err;

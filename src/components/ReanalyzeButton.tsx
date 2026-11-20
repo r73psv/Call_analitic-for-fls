@@ -71,10 +71,10 @@ export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        if (data?.call) {
+        if (data?.call && !data?.preserved_previous_result) {
           onReanalyzed(data.call as CallRecord);
         }
-        const errMsg = data?.error || `Ошибка сервера: HTTP ${res.status}`;
+        const errMsg = data?.fallback_reason || data?.error || `Ошибка сервера: HTTP ${res.status}`;
         setError(errMsg);
         onError?.(errMsg);
         return;
@@ -88,9 +88,9 @@ export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
       } else if (
         updated.summary_source === 'template' &&
         updated.fallback_reason &&
-        !/<\s*10\s*сек|0\s*сек/i.test(updated.fallback_reason)
+        !/<\s*10\s*сек|0\s*сек|очередь|автоответчик|не дошёл до менеджера/i.test(updated.fallback_reason)
       ) {
-        const fbMsg = `Анализ выполнен резервным генератором, модель недоступна: ${updated.fallback_reason}`;
+        const fbMsg = updated.fallback_reason;
         setError(fbMsg);
         onError?.(fbMsg);
       } else if (sttProvider && updated.transcription_engine === 'none') {
@@ -98,6 +98,7 @@ export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
         setError(sttMsg);
         onError?.(sttMsg);
       } else {
+        setError(null);
         onError?.(null);
       }
     } catch (err: any) {

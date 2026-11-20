@@ -131,14 +131,59 @@ export function CallDetails({
   const [audioError, setAudioError] = useState<string | null>(null);
   const [audioReloadKey, setAudioReloadKey] = useState(0);
   const [reanalyzeError, setReanalyzeError] = useState<string | null>(null);
+  const [retryingFromBanner, setRetryingFromBanner] = useState(false);
   const [openVerifierKey, setOpenVerifierKey] = useState<string | null>(null);
 
   useEffect(() => {
     setAudioError(null);
     setAudioReloadKey(0);
     setReanalyzeError(null);
+    setRetryingFromBanner(false);
     setOpenVerifierKey(null);
   }, [call.call_id, call.audio_url]);
+
+  const handleBannerRetry = async () => {
+    if (retryingFromBanner) return;
+    setRetryingFromBanner(true);
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('callqa_auth_token') : null;
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'x-user-role': userRole,
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      const modelToUse =
+        call.model_used && call.model_used.startsWith('GigaChat:')
+          ? call.model_used
+          : 'GigaChat:Lite';
+      const res = await fetch(`/api/calls/${call.call_id}/reanalyze`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ model: modelToUse }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (data?.call && !data?.preserved_previous_result && onCallUpdated) {
+          onCallUpdated(data.call as CallRecord);
+        }
+        setReanalyzeError(data?.fallback_reason || data?.error || `Ошибка сервера: HTTP ${res.status}`);
+        return;
+      }
+      const updated = data as CallRecord;
+      if (updated.summary_source === 'model' && !updated.error_message) {
+        setReanalyzeError(null);
+      } else if (updated.fallback_reason) {
+        setReanalyzeError(updated.fallback_reason);
+      }
+      if (onCallUpdated) onCallUpdated(updated);
+    } catch (err: any) {
+      setReanalyzeError(err?.message || 'Ошибка повторного анализа');
+    } finally {
+      setRetryingFromBanner(false);
+    }
+  };
 
   const proxiedAudioSrc = useMemo(() => {
     if (!call.audio_url) return '';
@@ -1516,38 +1561,93 @@ export function CallDetails({
 
       <div className="flex-1 overflow-y-auto p-5 grid grid-cols-1 lg:grid-cols-12 gap-6">
         {(reanalyzeError || call.summary_source === 'template' || call.fallback_reason) && (() => {
-          const reason = call.fallback_reason || '';
+          const effectiveReason = (reanalyzeError || call.fallback_reason || '').trim();
+          const isPreservedModelOnRetryError = Boolean(reanalyzeError && call.summary_source === 'model');
           const isShortOrEmptyFallback =
             !reanalyzeError &&
-            Boolean(reason) &&
-            /<\s*10\s*сек|0\s*сек|автоответчик|пустая стенограмма/i.test(reason);
-          const bannerText =
-            reanalyzeError ||
-            (isShortOrEmptyFallback
-              ? `Анализ выполнен резервным шаблоном (${reason}).`
-              : `Анализ выполнен резервным генератором, модель недоступна: ${reason || 'модель GigaChat не вернула валидный ответ'}`);
+            Boolean(call.fallback_reason) &&
+            /<\s*10\s*сек|0\s*сек|автоответчик|очередь|не дошёл до менеджера|пустая стенограмма/i.test(
+              call.fallback_reason || ''
+            );
+
+          const isMissingKeyError =
+            /ключ\s+отсутств|не\s+настроен|невалид\w*\s+ключ|unauthorized|401|403|invalid.*key|auth.*key|missing_key/i.test(
+              effectiveReason
+            );
+          const isJsonFormatError =
+            !isMissingKeyError &&
+            /ошибка\s+формата|некорректн\w*\s+json|json\.parse|unexpected\s+token|unterminated\s+string|syntaxerror|систематический\s+дефект\s+json|в\s+позиции/i.test(
+              effectiveReason
+            );
+
+          let headlineText = '';
+          let detailText = '';
+
+          if (isShortOrEmptyFallback) {
+            headlineText = `Анализ выполнен резервным шаблоном (${call.fallback_reason}).`;
+          } else if (isPreservedModelOnRetryError) {
+            headlineText = isJsonFormatError
+              ? 'Модель вернула некорректный JSON, повторите пересчёт'
+              : isMissingKeyError
+              ? 'Пересчёт не выполнен: ключ авторизации GigaChat отсутствует или недействителен'
+              : 'Пересчёт не выполнен — сохранён предыдущий анализ модели';
+            const savedAtSource = call.last_retry_at || call.timestamp;
+            const savedAtLabel = savedAtSource
+              ? new Date(savedAtSource).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
+              : null;
+            const baseDetail = `Причина: ${effectiveReason}. Предыдущий успешный результат модели сохранён без изменений${
+              savedAtLabel ? ` (отметка времени: ${savedAtLabel})` : ''
+            }.`;
+            detailText = isMissingKeyError
+              ? `${baseDetail} Проверьте ключ авторизации GigaChat в настройках и нажмите «Повторить пересчёт».`
+              : baseDetail;
+          } else {
+            headlineText = isJsonFormatError
+              ? 'Модель вернула некорректный JSON, повторите пересчёт'
+              : `Анализ выполнен резервным генератором, модель недоступна: ${
+                  effectiveReason || 'модель GigaChat не вернула валидный ответ'
+                }`;
+            detailText = isJsonFormatError
+              ? `Реальная ошибка: ${effectiveReason}. Текущие резюме, ошибки и рекомендации сформированы локальным шаблонным резервом.`
+              : isMissingKeyError
+              ? 'Текущие резюме, ошибки и рекомендации сформированы локальным шаблонным резервом, а не языковой моделью. Проверьте ключ авторизации GigaChat в настройках и нажмите «Повторить пересчёт».'
+              : `Причина: ${effectiveReason || 'сбой обращения к модели GigaChat'}. Текущие резюме, ошибки и рекомендации сформированы локальным шаблонным резервом — повторите пересчёт.`;
+          }
+
+          const canRetryFromBanner = userRole !== 'viewer' && userRole !== 'operator';
+
           return (
             <div
               id="fallback-analysis-banner"
-              className={`lg:col-span-12 rounded-xl p-4 text-xs flex items-start gap-3 border ${
+              className={`lg:col-span-12 rounded-xl p-4 text-xs flex items-start justify-between gap-3 border ${
                 isShortOrEmptyFallback
                   ? 'bg-amber-50 border-amber-200 text-amber-900'
                   : 'bg-rose-50 border-rose-300 text-rose-900'
               }`}
             >
-              <AlertTriangle
-                className={`w-5 h-5 shrink-0 mt-0.5 ${
-                  isShortOrEmptyFallback ? 'text-amber-600' : 'text-rose-600'
-                }`}
-              />
-              <div className="space-y-0.5">
-                <p className="font-bold">{bannerText}</p>
-                {!isShortOrEmptyFallback && (
-                  <p className="text-[11px] opacity-90">
-                    Текущие резюме, ошибки и рекомендации сформированы локальным шаблонным резервом, а не языковой моделью. Проверьте ключ авторизации GigaChat в настройках и нажмите «Пересчитать».
-                  </p>
-                )}
+              <div className="flex items-start gap-3">
+                <AlertTriangle
+                  className={`w-5 h-5 shrink-0 mt-0.5 ${
+                    isShortOrEmptyFallback ? 'text-amber-600' : 'text-rose-600'
+                  }`}
+                />
+                <div className="space-y-1">
+                  <p className="font-bold">{headlineText}</p>
+                  {detailText && <p className="text-[11px] opacity-90">{detailText}</p>}
+                </div>
               </div>
+              {!isShortOrEmptyFallback && canRetryFromBanner && (
+                <button
+                  type="button"
+                  id="banner-retry-reanalyze-btn"
+                  onClick={handleBannerRetry}
+                  disabled={retryingFromBanner}
+                  className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-700 hover:bg-rose-800 text-white text-xs font-semibold transition-colors disabled:opacity-50 cursor-pointer"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${retryingFromBanner ? 'animate-spin' : ''}`} />
+                  <span>{retryingFromBanner ? 'Пересчёт...' : 'Повторить пересчёт'}</span>
+                </button>
+              )}
             </div>
           );
         })()}
