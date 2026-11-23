@@ -15,17 +15,19 @@ export type TranscriptionEngine = SttProvider | 'speechkit' | 'none';
 export interface TranscriptionResult {
   text: string;
   engine: TranscriptionEngine;
+  attemptedProvider: SttProvider;
   error?: string;
 }
 
 export function normalizeSttProvider(raw?: string | null): SttProvider {
-  if (raw === 'tbank_voicekit' || raw === 'tbank') return 'tbank_voicekit';
-  if (raw === 'gigaam_v3' || raw === 'gigaam') return 'gigaam_v3';
+  const val = (raw || '').trim().toLowerCase();
+  if (val === 'tbank_voicekit' || val === 'tbank') return 'tbank_voicekit';
+  if (val === 'gigaam_v3' || val === 'gigaam' || val === 'gigaasr') return 'gigaam_v3';
   return 'yandex_speechkit';
 }
 
 export function resolveActiveSttProvider(override?: SttProvider | string): SttProvider {
-  if (override) return normalizeSttProvider(override);
+  if (override && String(override).trim()) return normalizeSttProvider(String(override));
   try {
     const store = readStoreSync();
     const configured = store.config?.transcriptionModel || store.config?.credentials?.transcriptionModel;
@@ -81,7 +83,7 @@ export async function transcribeAudio(
       const errorMsg =
         'T-Bank VoiceKit не настроен (отсутствуют API Key или Secret Key). Укажите ключи в панели администратора.';
       log('warning', `[STT] ${errorMsg}`);
-      return { text: '', engine: 'none', error: errorMsg };
+      return { text: '', engine: 'none', attemptedProvider: provider, error: errorMsg };
     }
 
     try {
@@ -90,15 +92,15 @@ export async function transcribeAudio(
       if (rawText && rawText.trim().length > 0) {
         const cleaned = fixDuplicatedTranscript(refineTranscriptRoles(rawText.trim()));
         log('success', `[STT] Речь успешно расшифрована ${providerLabel} (${cleaned.length} симв.)`);
-        return { text: cleaned, engine: 'tbank_voicekit' };
+        return { text: cleaned, engine: 'tbank_voicekit', attemptedProvider: provider };
       }
       const emptyMsg = 'Аудиозапись не содержит разборчивой речи (тишина или звуковой сигнал).';
       log('info', `[STT] ${providerLabel}: ${emptyMsg}`);
-      return { text: '', engine: 'tbank_voicekit', error: emptyMsg };
+      return { text: '', engine: 'tbank_voicekit', attemptedProvider: provider, error: emptyMsg };
     } catch (err: any) {
       const errMsg = err.message || String(err);
       log('error', `[STT] Ошибка распознавания речи ${providerLabel}: ${errMsg}`);
-      return { text: '', engine: 'none', error: `Ошибка ${providerLabel}: ${errMsg}` };
+      return { text: '', engine: 'none', attemptedProvider: provider, error: errMsg };
     }
   }
 
@@ -107,7 +109,7 @@ export async function transcribeAudio(
       const errorMsg =
         'GigaASR / GigaAM v3 не настроен (отсутствует URL эндпоинта или API-ключ Cloud.ru Evolution). Настройте параметры в панели администратора.';
       log('warning', `[STT] ${errorMsg}`);
-      return { text: '', engine: 'none', error: errorMsg };
+      return { text: '', engine: 'none', attemptedProvider: provider, error: errorMsg };
     }
 
     try {
@@ -116,15 +118,15 @@ export async function transcribeAudio(
       if (rawText && rawText.trim().length > 0) {
         const cleaned = fixDuplicatedTranscript(refineTranscriptRoles(rawText.trim()));
         log('success', `[STT] Речь успешно расшифрована ${providerLabel} (${cleaned.length} симв.)`);
-        return { text: cleaned, engine: 'gigaam_v3' };
+        return { text: cleaned, engine: 'gigaam_v3', attemptedProvider: provider };
       }
       const emptyMsg = 'Аудиозапись не содержит разборчивой речи (тишина или звуковой сигнал).';
       log('info', `[STT] ${providerLabel}: ${emptyMsg}`);
-      return { text: '', engine: 'gigaam_v3', error: emptyMsg };
+      return { text: '', engine: 'gigaam_v3', attemptedProvider: provider, error: emptyMsg };
     } catch (err: any) {
       const errMsg = err.message || String(err);
       log('error', `[STT] Ошибка распознавания речи ${providerLabel}: ${errMsg}`);
-      return { text: '', engine: 'none', error: `Ошибка ${providerLabel}: ${errMsg}` };
+      return { text: '', engine: 'none', attemptedProvider: provider, error: errMsg };
     }
   }
 
@@ -136,6 +138,7 @@ export async function transcribeAudio(
     return {
       text: '',
       engine: 'none',
+      attemptedProvider: provider,
       error: errorMsg,
     };
   }
@@ -149,6 +152,7 @@ export async function transcribeAudio(
       return {
         text: cleaned,
         engine: 'yandex_speechkit',
+        attemptedProvider: provider,
       };
     } else {
       const emptyMsg = 'Аудиозапись не содержит разборчивой речи (тишина или звуковой сигнал).';
@@ -156,6 +160,7 @@ export async function transcribeAudio(
       return {
         text: '',
         engine: 'yandex_speechkit',
+        attemptedProvider: provider,
         error: emptyMsg,
       };
     }
@@ -165,7 +170,8 @@ export async function transcribeAudio(
     return {
       text: '',
       engine: 'none',
-      error: `Ошибка Yandex SpeechKit: ${skError}`,
+      attemptedProvider: provider,
+      error: skError,
     };
   }
 }

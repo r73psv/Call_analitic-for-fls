@@ -14,7 +14,7 @@ import {
   MessageSquareQuote, Send, Target, Banknote, CalendarClock, ArrowRightCircle,
   Award, Gauge, BarChart3, Filter, CheckCheck, MinusCircle, ChevronDown, ChevronUp, Info, Sparkle, RefreshCw
 } from 'lucide-react';
-import { CallRecord, NextStepItem, ContextClarification, StructuredCallSummary, CallEvaluation, CallEvaluationCriterion, VerifierField, CriteriaVerificationItem } from '../types.js';
+import { CallRecord, NextStepItem, ContextClarification, StructuredCallSummary, CallEvaluation, CallEvaluationCriterion, VerifierField, CriteriaVerificationItem, SttProvider } from '../types.js';
 import { ReanalyzeButton } from './ReanalyzeButton.js';
 import { getSttEngineDisplayName } from './TranscriptionModelSelector.js';
 import { refineTranscriptRoles } from '../services/transcriptUtils.js';
@@ -59,6 +59,7 @@ interface CallDetailsProps {
   onCallUpdated?: (updated: CallRecord) => void;
   onDeleteCall?: (id: string) => Promise<void>;
   userRole?: string;
+  activeSttModel?: SttProvider;
 }
 
 const PRESET_TAGS = [
@@ -104,6 +105,7 @@ export function CallDetails({
   onCallUpdated,
   onDeleteCall,
   userRole = 'admin',
+  activeSttModel,
 }: CallDetailsProps) {
   const [sendingVk, setSendingVk] = useState(false);
   const [sentVk, setSentVk] = useState(false);
@@ -161,7 +163,10 @@ export function CallDetails({
       const res = await fetch(`/api/calls/${call.call_id}/reanalyze`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ model: modelToUse }),
+        body: JSON.stringify({
+          model: modelToUse,
+          ...(activeSttModel ? { sttProvider: activeSttModel, forceRetranscribe: false } : {}),
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -1407,6 +1412,7 @@ export function CallDetails({
             callId={call.call_id}
             currentModel={call.model_used}
             currentSttEngine={call.transcription_engine}
+            activeSttModel={activeSttModel}
             hasAudio={Boolean(call.audio_url && !call.audio_deleted)}
             onReanalyzed={(updated) => {
               if (updated.summary_source === 'model') {

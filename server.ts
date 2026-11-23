@@ -894,11 +894,12 @@ async function analyzeCallTextOrAudio(
   }
 
   let sttErrorReason = '';
+  let attemptedSttProvider: SttProvider = resolveActiveSttProvider(sttProviderOverride);
   const hasAudio = !!(audioBase64 && audioBase64.data);
 
   // 1. If audio is available and transcript is missing, transcribe via configured Russian STT model
   if (!cleanTranscript && hasAudio) {
-    const activeProvider = resolveActiveSttProvider(sttProviderOverride);
+    const activeProvider = attemptedSttProvider;
     const activeProviderLabel = getSttProviderLabel(activeProvider);
     try {
       const audioBuffer = Buffer.from(audioBase64!.data, 'base64');
@@ -909,10 +910,13 @@ async function analyzeCallTextOrAudio(
         (type, msg) => appendLog(type, 'speechkit', msg),
         activeProvider
       );
+      if (sttResult.attemptedProvider) {
+        attemptedSttProvider = sttResult.attemptedProvider;
+      }
       if (sttResult.text && sttResult.text.trim()) {
         cleanTranscript = fixDuplicatedTranscript(sttResult.text.trim());
         usedTranscriptionEngine = sttResult.engine;
-        appendLog('success', 'speechkit', `Аудиозапись успешно расшифрована (${activeProviderLabel}, ${cleanTranscript.length} симв.)`);
+        appendLog('success', 'speechkit', `Аудиозапись успешно расшифрована (${getSttProviderLabel(attemptedSttProvider)}, ${cleanTranscript.length} симв.)`);
       } else {
         sttErrorReason = sttResult.error || 'Распознавание речи вернуло пустой текст (в записи отсутствует разборчивая речь или тишина)';
         usedTranscriptionEngine = sttResult.engine;
@@ -934,7 +938,9 @@ async function analyzeCallTextOrAudio(
     if (hasAudio) {
       const audioKbytes = Math.round((Buffer.from(audioBase64!.data, 'base64').length) / 1024);
       const durStr = callDurationSeconds !== undefined ? `, ${callDurationSeconds} сек.` : '';
-      const activeProviderLabel = getSttProviderLabel(resolveActiveSttProvider(sttProviderOverride));
+      // ВАЖНО: используем именно того провайдера, который фактически запускался,
+      // а не повторный вызов resolveActiveSttProvider() (глобальная настройка могла поменяться пока шёл запрос).
+      const activeProviderLabel = getSttProviderLabel(attemptedSttProvider);
       const isHardSttFailure = Boolean(
         sttErrorReason &&
         !sttErrorReason.includes('не содержит разборчивой речи')
@@ -962,7 +968,7 @@ async function analyzeCallTextOrAudio(
           ],
           operator_score: null,
           operator_comment: `Ошибка распознавания речи (${activeProviderLabel}): ${sttErrorReason}`,
-          error_message: sttErrorReason,
+          error_message: `Ошибка распознавания речи (${activeProviderLabel}): ${sttErrorReason}`,
           transcription_engine: 'none',
         };
       }
@@ -4583,12 +4589,15 @@ app.post('/api/calls/:id/reanalyze', async (req, res) => {
     return res.status(403).json({ error: 'Недостаточно прав для переанализа (доступно только Администраторам и Управляющим)' });
   }
 
-  const { model: modelOverride, sttProvider, forceRetranscribe } = req.body || {};
-  const normalizedStt = sttProvider ? normalizeSttProvider(String(sttProvider)) : undefined;
+  const { model: modelOverride, sttProvider, transcriptionModel, transcription_model, forceRetranscribe } = req.body || {};
+  const rawRequestedStt = sttProvider ?? transcriptionModel ?? transcription_model;
+  const normalizedStt = rawRequestedStt ? normalizeSttProvider(String(rawRequestedStt)) : undefined;
+  const shouldForceRetranscribe =
+    forceRetranscribe !== undefined ? Boolean(forceRetranscribe) : Boolean(normalizedStt);
   try {
     const updatedCall = await performCallReanalysis(id, modelOverride, {
       sttProvider: normalizedStt,
-      forceRetranscribe: Boolean(forceRetranscribe || sttProvider),
+      forceRetranscribe: shouldForceRetranscribe,
       isManual: true,
     });
     const isModelUnavailableFallback = Boolean(
@@ -4898,12 +4907,20 @@ app.post('/api/calls/analyze', async (req, res) => {
   }
 });
 
+// Защита от гонок: отслеживаем номер последнего запущенного переанализа для каждого callId,
+// чтобы зависший старый запрос (например, GigaASR на ретраях) не перезаписал более свежую транскрибацию Yandex SpeechKit.
+const latestReanalysisSeqByCallId = new Map<string, number>();
+
 // Core reanalysis logic for a call (reusable by API and background worker)
 async function performCallReanalysis(
   callId: string,
   modelOverride?: string,
   options?: { sttProvider?: SttProvider; forceRetranscribe?: boolean; isManual?: boolean }
 ): Promise<any> {
+  const reanalysisSeq = (latestReanalysisSeqByCallId.get(callId) || 0) + 1;
+  latestReanalysisSeqByCallId.set(callId, reanalysisSeq);
+  const isStaleReanalysis = () => latestReanalysisSeqByCallId.get(callId) !== reanalysisSeq;
+
   const db = readDb();
   const callIdx = db.calls.findIndex((c: any) => c.call_id === callId);
   if (callIdx === -1) {
@@ -5075,10 +5092,12 @@ async function performCallReanalysis(
     }
 
     const activeStt = resolveActiveSttProvider(options?.sttProvider);
-    const previousStt = call.transcription_engine && call.transcription_engine !== 'none'
-      ? normalizeSttProvider(call.transcription_engine)
-      : 'yandex_speechkit';
-    const engineSwitched = Boolean(activeStt !== previousStt);
+    const failedPreviousStt = call.transcription_engine === 'none';
+    const previousStt =
+      call.transcription_engine && call.transcription_engine !== 'none'
+        ? normalizeSttProvider(call.transcription_engine)
+        : null;
+    const engineSwitched = Boolean(failedPreviousStt || (previousStt && activeStt !== previousStt));
 
     const shouldRetranscribeFromAudio = Boolean(
       (options?.forceRetranscribe || engineSwitched || !existingTranscript) &&
@@ -5092,10 +5111,21 @@ async function performCallReanalysis(
       audioBase64 || undefined,
       audioDownloadFailed,
       call.duration_seconds,
-      options?.sttProvider,
+      activeStt,
       reanalysisTimestamp,
       { isManual: options?.isManual }
     );
+
+    if (isStaleReanalysis()) {
+      appendLog(
+        'info',
+        'speechkit',
+        `Устаревший фоновый переанализ (${getSttProviderLabel(activeStt)}) для звонка ${callId} проигнорирован, так как запущен более новый запрос.`
+      );
+      const currentDb = readDb();
+      const existingLatest = currentDb.calls.find((c: any) => c.call_id === callId);
+      return existingLatest || call;
+    }
 
     const finalDb = readDb();
     const finalCallIdx = finalDb.calls.findIndex((c: any) => c.call_id === callId);
@@ -5116,6 +5146,21 @@ async function performCallReanalysis(
         protectErr.statusCode = 503;
         protectErr.preservedPreviousResult = true;
         throw protectErr;
+      }
+
+      // Если при ручной перетранскрибации завершённой карточки выбранный STT упал —
+      // не затираем предыдущий успешный результат карточкой с ошибкой, возвращаем ошибку в UI.
+      const isManualSttFailureOnCompleted =
+        options?.isManual &&
+        Boolean(previousCompletedSnapshot) &&
+        Boolean(analysisResult.error_message) &&
+        analysisResult.transcription_engine === 'none';
+      if (isManualSttFailureOnCompleted) {
+        const sttErr: any = new Error(analysisResult.error_message || 'Ошибка распознавания речи');
+        sttErr.fallbackReason = analysisResult.error_message;
+        sttErr.statusCode = 503;
+        sttErr.preservedPreviousResult = true;
+        throw sttErr;
       }
 
       const isFailed =
@@ -5159,22 +5204,24 @@ async function performCallReanalysis(
       throw new Error('Внутренняя ошибка базы данных при сохранении результатов');
     }
   } catch (err: any) {
-    const errorDb = readDb();
-    const finalCallIdx = errorDb.calls.findIndex((c: any) => c.call_id === callId);
-    if (finalCallIdx !== -1) {
-      if (options?.isManual && previousCompletedSnapshot) {
-        // Сохраняем прежний завершённый результат анализа без перезаписи статусом failed или шаблоном
-        errorDb.calls[finalCallIdx] = {
-          ...previousCompletedSnapshot,
-          retry_count: (previousCompletedSnapshot.retry_count || 0) + 1,
-          last_retry_at: new Date().toISOString(),
-        };
-        writeDb(errorDb);
-        err.preservedPreviousResult = true;
-      } else {
-        errorDb.calls[finalCallIdx].status = 'failed';
-        errorDb.calls[finalCallIdx].error_message = err.message || String(err);
-        writeDb(errorDb);
+    if (!isStaleReanalysis()) {
+      const errorDb = readDb();
+      const finalCallIdx = errorDb.calls.findIndex((c: any) => c.call_id === callId);
+      if (finalCallIdx !== -1) {
+        if (options?.isManual && previousCompletedSnapshot) {
+          // Сохраняем прежний завершённый результат анализа без перезаписи статусом failed или шаблоном
+          errorDb.calls[finalCallIdx] = {
+            ...previousCompletedSnapshot,
+            retry_count: (previousCompletedSnapshot.retry_count || 0) + 1,
+            last_retry_at: new Date().toISOString(),
+          };
+          writeDb(errorDb);
+          err.preservedPreviousResult = true;
+        } else {
+          errorDb.calls[finalCallIdx].status = 'failed';
+          errorDb.calls[finalCallIdx].error_message = err.message || String(err);
+          writeDb(errorDb);
+        }
       }
     }
     appendLog('error', 'system', `Ошибка во время анализа звонка ${callId}: ${err.message}`);
@@ -5210,7 +5257,8 @@ app.post('/api/calls/batch-reanalyze', async (req, res) => {
     )
   );
 
-  const activeSttLabel = getSttProviderLabel(resolveActiveSttProvider());
+  const batchStt = resolveActiveSttProvider(req.body?.sttProvider);
+  const activeSttLabel = getSttProviderLabel(batchStt);
   appendLog('info', 'speechkit', `Запущен пакетный переанализ (${activeSttLabel}) для ${candidates.length} звонков...`);
 
   // Start background queue processing
@@ -5218,7 +5266,10 @@ app.post('/api/calls/batch-reanalyze', async (req, res) => {
     let successCount = 0;
     for (const c of candidates) {
       try {
-        await performCallReanalysis(c.call_id, modelOverride, { forceRetranscribe: true });
+        await performCallReanalysis(c.call_id, modelOverride, {
+          sttProvider: batchStt,
+          forceRetranscribe: true,
+        });
         successCount++;
         await new Promise(r => setTimeout(r, 600));
       } catch (err: any) {
@@ -5352,6 +5403,15 @@ app.post('/api/config', (req, res) => {
     process.env.SALON_NAME = cleanSalon;
     if (!db.config.credentials) db.config.credentials = {};
     db.config.credentials.salonName = cleanSalon;
+  }
+
+  if (body.transcriptionModel !== undefined) {
+    const normalizedStt = normalizeSttProvider(String(body.transcriptionModel));
+    body.transcriptionModel = normalizedStt;
+    db.config.transcriptionModel = normalizedStt;
+    if (!db.config.credentials) db.config.credentials = {};
+    db.config.credentials.transcriptionModel = normalizedStt;
+    process.env.STT_PROVIDER = normalizedStt;
   }
 
   db.config = {

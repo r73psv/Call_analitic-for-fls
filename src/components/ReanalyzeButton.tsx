@@ -12,6 +12,7 @@ interface ReanalyzeButtonProps {
   callId: string;
   currentModel?: string;
   currentSttEngine?: string;
+  activeSttModel?: SttProvider;
   hasAudio?: boolean;
   onReanalyzed: (updatedCall: CallRecord) => void;
   onError?: (errorMessage: string | null) => void;
@@ -22,6 +23,7 @@ export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
   callId,
   currentModel = 'GigaChat:Lite',
   currentSttEngine,
+  activeSttModel,
   hasAudio = false,
   onReanalyzed,
   onError,
@@ -59,12 +61,15 @@ export const ReanalyzeButton: React.FC<ReanalyzeButtonProps> = ({
         headers['Authorization'] = `Bearer ${token}`;
       }
 
+      const effectiveSttProvider = sttProvider || activeSttModel;
       const res = await fetch(`/api/calls/${callId}/reanalyze`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
           model: modelToUse,
-          ...(sttProvider ? { sttProvider, forceRetranscribe: true } : {}),
+          ...(effectiveSttProvider
+            ? { sttProvider: effectiveSttProvider, forceRetranscribe: Boolean(sttProvider) }
+            : {}),
         }),
       });
 

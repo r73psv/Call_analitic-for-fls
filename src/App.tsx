@@ -521,7 +521,12 @@ export default function App() {
       const res = await fetch(`/api/calls/${id}/reanalyze`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ model: config?.default_gigachat_model || 'GigaChat:Lite' }),
+        body: JSON.stringify({
+          model: config?.default_gigachat_model || 'GigaChat:Lite',
+          ...(config?.transcriptionModel
+            ? { sttProvider: config.transcriptionModel, forceRetranscribe: false }
+            : {}),
+        }),
       });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -1010,6 +1015,7 @@ export default function App() {
                       }}
                       onDeleteCall={handleDeleteCall}
                       userRole={userRole}
+                      activeSttModel={config?.transcriptionModel}
                     />
                   ) : (
                     <div className="bg-white border border-slate-100 rounded-2xl shadow-xs py-16 flex flex-col items-center justify-center p-8 text-center text-slate-400">
