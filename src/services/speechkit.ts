@@ -19,6 +19,11 @@ import {
   extractIvrPrefix,
   stripIvrFromTranscript
 } from './transcriptUtils.js';
+import {
+  withSttRetry,
+  isTransientSttError,
+  formatSttNetworkError,
+} from './sttRetry.js';
 
 export {
   calculateTextSimilarity,
@@ -760,32 +765,33 @@ const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 2000;
 
 export async function transcribeWithRetry(audioBuffer: Buffer): Promise<string> {
-  let lastError: Error | null = null;
-
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const transcript = await transcribeWithSpeechKit(audioBuffer);
-      return transcript;
-    } catch (error: any) {
-      lastError = error as Error;
-      const errorDetail = error.response?.data ? JSON.stringify(error.response.data) : error.message;
-      console.error(
-        `[SpeechKit] Попытка ${attempt}/${MAX_RETRIES} неудачна:`,
-        errorDetail
-      );
-
-      if (attempt < MAX_RETRIES) {
-        const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1); // 2с, 4с, 8с
-        console.log(`[SpeechKit] Повтор через ${delay / 1000} сек...`);
-        await new Promise(r => setTimeout(r, delay));
+  try {
+    return await withSttRetry(
+      () => transcribeWithSpeechKit(audioBuffer),
+      {
+        providerName: 'Yandex SpeechKit',
+        operationName: 'transcribe',
+        maxAttempts: MAX_RETRIES,
+        baseDelayMs: BASE_DELAY_MS,
+        maxDelayMs: 16000,
+        shouldRetry: (err) => isTransientSttError(err),
       }
-    }
+    );
+  } catch (error: any) {
+    const detail = formatSttNetworkError(error);
+    const attempts = typeof error?.sttAttempts === 'number' ? error.sttAttempts : MAX_RETRIES;
+    console.error(`[SpeechKit] Транскрибация завершилась ошибкой (попыток: ${attempts}):`, detail);
+    const wrapped: any = new Error(
+      attempts > 1
+        ? `SpeechKit недоступен после ${attempts} попыток: ${detail}`
+        : `SpeechKit недоступен: ${detail}`
+    );
+    if (error?.status) wrapped.status = error.status;
+    if (error?.response?.status) wrapped.status = error.response.status;
+    if (error?.code) wrapped.code = error.code;
+    wrapped.cause = error;
+    throw wrapped;
   }
-
-  console.error('[SpeechKit] Все 3 попытки неудачны. Транскрибация отменена.');
-  throw new Error(
-    `SpeechKit недоступен после ${MAX_RETRIES} попыток: ${lastError?.message}`
-  );
 }
 
 /**
@@ -952,23 +958,33 @@ async function requestAndPollLongRunning(
   };
 
   // Для формата MP3 параметр sampleRateHertz не указывается по официальной документации Yandex Cloud
-  const startRes = await axios.post(
-    url,
+  const startRes = await withSttRetry(
+    () =>
+      axios.post(
+        url,
+        {
+          config: {
+            specification,
+            folderId: folderId || undefined,
+          },
+          audio: {
+            uri: audioUri,
+          },
+        },
+        {
+          headers: {
+            Authorization: authHeader,
+            'Content-Type': 'application/json',
+          },
+          timeout: 30000,
+        }
+      ),
     {
-      config: {
-        specification,
-        folderId: folderId || undefined,
-      },
-      audio: {
-        uri: audioUri,
-      },
-    },
-    {
-      headers: {
-        Authorization: authHeader,
-        'Content-Type': 'application/json',
-      },
-      timeout: 30000,
+      providerName: 'Yandex SpeechKit',
+      operationName: 'longRunningRecognize',
+      maxAttempts: 4,
+      baseDelayMs: 1000,
+      maxDelayMs: 12000,
     }
   );
 
@@ -983,9 +999,19 @@ async function requestAndPollLongRunning(
   // длительностью 15-30 минут SpeechKit обрабатывает дольше 3 минут.
   for (let i = 0; i < MAX_POLL_ITERATIONS; i++) {
     await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
-    const poll = await axios.get(
-      `https://operation.api.cloud.yandex.net/operations/${operationId}`,
-      { headers: { Authorization: authHeader }, timeout: 15000 }
+    const poll = await withSttRetry(
+      () =>
+        axios.get(
+          `https://operation.api.cloud.yandex.net/operations/${operationId}`,
+          { headers: { Authorization: authHeader }, timeout: 15000 }
+        ),
+      {
+        providerName: 'Yandex SpeechKit',
+        operationName: 'operations:poll',
+        maxAttempts: 4,
+        baseDelayMs: 1000,
+        maxDelayMs: 10000,
+      }
     );
 
     if (poll.data.done) {
@@ -1024,15 +1050,25 @@ async function transcribeSynchronous(
     query.set('folderId', folderId);
   }
 
-  const syncRes = await axios.post(
-    `https://stt.api.cloud.yandex.net/speech/v1/stt:recognize?${query.toString()}`,
-    audioBuffer,
+  const syncRes = await withSttRetry(
+    () =>
+      axios.post(
+        `https://stt.api.cloud.yandex.net/speech/v1/stt:recognize?${query.toString()}`,
+        audioBuffer,
+        {
+          headers: {
+            Authorization: authHeader,
+            'Content-Type': 'application/octet-stream',
+          },
+          timeout: 120000,
+        }
+      ),
     {
-      headers: {
-        Authorization: authHeader,
-        'Content-Type': 'application/octet-stream',
-      },
-      timeout: 120000,
+      providerName: 'Yandex SpeechKit',
+      operationName: 'stt:recognize',
+      maxAttempts: 4,
+      baseDelayMs: 1000,
+      maxDelayMs: 12000,
     }
   );
 

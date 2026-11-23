@@ -19,6 +19,12 @@ import {
   mergeDualChannelTranscripts,
   TimedUtterance,
 } from './speechkit.js';
+import {
+  withSttRetry,
+  fetchWithSttRetry,
+  isTransientSttError,
+  formatSttNetworkError,
+} from './sttRetry.js';
 
 export const CLOUDRU_GIGAASR_TRANSCRIPTIONS_URL =
   'https://foundation-models.api.cloud.ru/v1/audio/transcriptions';
@@ -372,10 +378,20 @@ async function fetchCloudRuCatalogModels(
   if (apiKey) {
     headers['Authorization'] = apiKey.startsWith('Bearer ') ? apiKey : `Bearer ${apiKey}`;
   }
-  const res = await fetch(`${origin}/v1/models`, {
-    headers,
-    signal: AbortSignal.timeout(10000),
-  });
+  const res = await fetchWithSttRetry(
+    `${origin}/v1/models`,
+    () => ({
+      headers,
+      signal: AbortSignal.timeout(10000),
+    }),
+    {
+      providerName: 'GigaASR (Cloud.ru)',
+      operationName: 'v1/models',
+      maxAttempts: 3,
+      baseDelayMs: 600,
+      maxDelayMs: 4000,
+    }
+  );
   if (!res.ok) {
     return {
       status: res.status,
@@ -536,36 +552,48 @@ async function sendMultipartOnce(
   fieldName: 'file' | 'audio',
   cloudRuOpts?: CloudRuAttemptOpts
 ): Promise<{ status: number; ok: boolean; statusText: string; rawBody: string }> {
-  const form = new FormData();
-  const blob = new Blob([new Uint8Array(audioBuffer)], { type: meta.mime });
-  form.append(fieldName, blob, `call.${meta.ext}`);
-
   const modelParam = getModelParamForRequest(config);
-  form.append('model', modelParam);
-
-  if (config.isCloudRu) {
-    if (cloudRuOpts?.includeLanguage !== false) {
-      form.append('language', 'ru');
-    }
-    if (cloudRuOpts?.responseFormat) {
-      form.append('response_format', cloudRuOpts.responseFormat);
-    }
-  } else {
-    form.append('language', 'ru');
-    form.append('variant', config.variant);
-  }
-
   const headers: Record<string, string> = {};
   if (config.apiKey) {
     headers['Authorization'] = config.apiKey.startsWith('Bearer ') ? config.apiKey : `Bearer ${config.apiKey}`;
   }
 
-  const response = await fetch(config.apiUrl, {
-    method: 'POST',
-    headers,
-    body: form,
-    signal: AbortSignal.timeout(120000),
-  });
+  const audioBytes = new Uint8Array(audioBuffer);
+  const response = await fetchWithSttRetry(
+    config.apiUrl,
+    () => {
+      const form = new FormData();
+      const blob = new Blob([audioBytes], { type: meta.mime });
+      form.append(fieldName, blob, `call.${meta.ext}`);
+      form.append('model', modelParam);
+
+      if (config.isCloudRu) {
+        if (cloudRuOpts?.includeLanguage !== false) {
+          form.append('language', 'ru');
+        }
+        if (cloudRuOpts?.responseFormat) {
+          form.append('response_format', cloudRuOpts.responseFormat);
+        }
+      } else {
+        form.append('language', 'ru');
+        form.append('variant', config.variant);
+      }
+
+      return {
+        method: 'POST',
+        headers,
+        body: form,
+        signal: AbortSignal.timeout(120000),
+      };
+    },
+    {
+      providerName: config.isCloudRu ? 'GigaASR (Cloud.ru)' : 'GigaAM v3',
+      operationName: 'audio/transcriptions',
+      maxAttempts: 4,
+      baseDelayMs: 1000,
+      maxDelayMs: 12000,
+    }
+  );
 
   const rawBody = await response.text().catch(() => '');
   return {
@@ -653,12 +681,23 @@ async function sendChatAudioOnce(
     headers['Authorization'] = config.apiKey.startsWith('Bearer ') ? config.apiKey : `Bearer ${config.apiKey}`;
   }
 
-  const response = await fetch(chatUrl, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(120000),
-  });
+  const bodyJson = JSON.stringify(payload);
+  const response = await fetchWithSttRetry(
+    chatUrl,
+    () => ({
+      method: 'POST',
+      headers,
+      body: bodyJson,
+      signal: AbortSignal.timeout(120000),
+    }),
+    {
+      providerName: config.isCloudRu ? 'GigaASR (Cloud.ru)' : 'GigaAM v3',
+      operationName: 'chat/completions',
+      maxAttempts: 4,
+      baseDelayMs: 1000,
+      maxDelayMs: 12000,
+    }
+  );
 
   const rawBody = await response.text().catch(() => '');
   return {
@@ -1016,16 +1055,22 @@ async function postAudioToGigaAm(
     if (config.apiKey) {
       headers['Authorization'] = config.apiKey.startsWith('Bearer ') ? config.apiKey : `Bearer ${config.apiKey}`;
     }
-    const jsonRes = await axios.post(
-      config.apiUrl,
+    const jsonPayload = {
+      audio_base64: audioBuffer.toString('base64'),
+      model: `gigaam-v3-${config.variant}`,
+      variant: config.variant,
+      language: 'ru',
+      mime_type: meta.mime,
+    };
+    const jsonRes = await withSttRetry(
+      () => axios.post(config.apiUrl, jsonPayload, { headers, timeout: 120000 }),
       {
-        audio_base64: audioBuffer.toString('base64'),
-        model: `gigaam-v3-${config.variant}`,
-        variant: config.variant,
-        language: 'ru',
-        mime_type: meta.mime,
-      },
-      { headers, timeout: 120000 }
+        providerName: label,
+        operationName: 'json-fallback',
+        maxAttempts: 4,
+        baseDelayMs: 1000,
+        maxDelayMs: 12000,
+      }
     );
     return extractTextFromGigaAmResponse(jsonRes.data);
   }
@@ -1209,24 +1254,33 @@ export async function transcribeWithGigaAmRetry(
   mimeType: string = 'audio/mpeg',
   variantOverride?: GigaamModelVariant
 ): Promise<string> {
-  let lastError: Error | null = null;
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      return await transcribeWithGigaAm(audioBuffer, mimeType, variantOverride);
-    } catch (error: any) {
-      lastError = error as Error;
-      console.error(`[GigaASR / GigaAM v3] Попытка ${attempt}/${MAX_RETRIES} неудачна:`, error.message);
-      // Ошибки авторизации и 404 не имеют смысла для ретраев
-      if (error.status === 401 || error.status === 403 || error.status === 404) {
-        break;
+  try {
+    return await withSttRetry(
+      () => transcribeWithGigaAm(audioBuffer, mimeType, variantOverride),
+      {
+        providerName: 'GigaASR / GigaAM v3',
+        operationName: 'transcribe',
+        maxAttempts: MAX_RETRIES,
+        baseDelayMs: BASE_DELAY_MS,
+        maxDelayMs: 16000,
+        shouldRetry: (err) => isTransientSttError(err),
       }
-      if (attempt < MAX_RETRIES) {
-        const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
-        await new Promise((r) => setTimeout(r, delay));
-      }
-    }
+    );
+  } catch (error: any) {
+    const detail = formatSttNetworkError(error);
+    const attempts = typeof error?.sttAttempts === 'number' ? error.sttAttempts : MAX_RETRIES;
+    console.error(`[GigaASR / GigaAM v3] Транскрибация завершилась ошибкой (попыток: ${attempts}):`, detail);
+    const wrapped: any = new Error(
+      attempts > 1
+        ? `GigaASR / GigaAM v3 недоступен после ${attempts} попыток: ${detail}`
+        : `GigaASR / GigaAM v3 недоступен: ${detail}`
+    );
+    if (error?.status) wrapped.status = error.status;
+    if (error?.response?.status) wrapped.status = error.response.status;
+    if (error?.code) wrapped.code = error.code;
+    wrapped.cause = error;
+    throw wrapped;
   }
-  throw new Error(`GigaASR / GigaAM v3 недоступен: ${lastError?.message}`);
 }
 
 /**

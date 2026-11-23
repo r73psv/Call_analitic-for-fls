@@ -21,6 +21,12 @@ import {
   mergeDualChannelTranscripts,
   TimedUtterance,
 } from './speechkit.js';
+import {
+  withSttRetry,
+  isTransientSttError,
+  formatSttNetworkError,
+  extractHttpStatus,
+} from './sttRetry.js';
 
 const TBANK_STT_BASE_URL = process.env.TBANK_VOICEKIT_ENDPOINT || 'https://api.tbank.ru';
 const MAX_RETRIES = 3;
@@ -240,27 +246,39 @@ async function recognizeSyncRaw(
   sampleRateHertz: number,
   creds: TbankVoiceKitCredentials
 ): Promise<any[]> {
-  const jwt = createTbankVoiceKitJwt(creds.apiKey, creds.secretKey);
-  const res = await axios.post(
-    `${TBANK_STT_BASE_URL}/v1/stt:recognize`,
-    {
-      config: {
-        encoding,
-        sample_rate_hertz: sampleRateHertz,
-        num_channels: 1,
-        enable_automatic_punctuation: true,
-        language_code: 'ru-RU',
-      },
-      audio: {
-        content: audioBuffer.toString('base64'),
-      },
+  const audioContentBase64 = audioBuffer.toString('base64');
+  const res = await withSttRetry(
+    () => {
+      const jwt = createTbankVoiceKitJwt(creds.apiKey, creds.secretKey);
+      return axios.post(
+        `${TBANK_STT_BASE_URL}/v1/stt:recognize`,
+        {
+          config: {
+            encoding,
+            sample_rate_hertz: sampleRateHertz,
+            num_channels: 1,
+            enable_automatic_punctuation: true,
+            language_code: 'ru-RU',
+          },
+          audio: {
+            content: audioContentBase64,
+          },
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${jwt}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 120000,
+        }
+      );
     },
     {
-      headers: {
-        Authorization: `Bearer ${jwt}`,
-        'Content-Type': 'application/json',
-      },
-      timeout: 120000,
+      providerName: 'T-Bank VoiceKit',
+      operationName: 'stt:recognize',
+      maxAttempts: 4,
+      baseDelayMs: 1000,
+      maxDelayMs: 12000,
     }
   );
 
@@ -342,7 +360,11 @@ export async function transcribeWithTbankVoiceKit(audioBuffer: Buffer): Promise<
         return fixDuplicatedTranscript(refineTranscriptRoles(rawText.trim()));
       }
     } catch (directErr: any) {
-      console.warn('[T-Bank VoiceKit] Прямое распознавание завершилось ошибкой, переключение на PCM:', directErr.message);
+      const directStatus = extractHttpStatus(directErr);
+      if (directStatus === 401 || directStatus === 403 || directStatus === 407) {
+        throw directErr;
+      }
+      console.warn('[T-Bank VoiceKit] Прямое распознавание завершилось ошибкой, переключение на PCM:', formatSttNetworkError(directErr));
       const pcm = convertToLinear16Mono(audioBuffer);
       if (pcm && pcm.length > 0) {
         const rawText = await recognizeSync(pcm, 'LINEAR16', 16000, creds);
@@ -387,21 +409,33 @@ export async function transcribeWithTbankVoiceKit(audioBuffer: Buffer): Promise<
 }
 
 export async function transcribeWithTbankVoiceKitRetry(audioBuffer: Buffer): Promise<string> {
-  let lastError: Error | null = null;
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      return await transcribeWithTbankVoiceKit(audioBuffer);
-    } catch (error: any) {
-      lastError = error as Error;
-      const detail = error.response?.data ? JSON.stringify(error.response.data) : error.message;
-      console.error(`[T-Bank VoiceKit] Попытка ${attempt}/${MAX_RETRIES} неудачна:`, detail);
-      if (attempt < MAX_RETRIES) {
-        const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
-        await new Promise((r) => setTimeout(r, delay));
+  try {
+    return await withSttRetry(
+      () => transcribeWithTbankVoiceKit(audioBuffer),
+      {
+        providerName: 'T-Bank VoiceKit',
+        operationName: 'transcribe',
+        maxAttempts: MAX_RETRIES,
+        baseDelayMs: BASE_DELAY_MS,
+        maxDelayMs: 16000,
+        shouldRetry: (err) => isTransientSttError(err),
       }
-    }
+    );
+  } catch (error: any) {
+    const detail = formatSttNetworkError(error);
+    const attempts = typeof error?.sttAttempts === 'number' ? error.sttAttempts : MAX_RETRIES;
+    console.error(`[T-Bank VoiceKit] Транскрибация завершилась ошибкой (попыток: ${attempts}):`, detail);
+    const wrapped: any = new Error(
+      attempts > 1
+        ? `T-Bank VoiceKit недоступен после ${attempts} попыток: ${detail}`
+        : `T-Bank VoiceKit недоступен: ${detail}`
+    );
+    if (error?.status) wrapped.status = error.status;
+    if (error?.response?.status) wrapped.status = error.response.status;
+    if (error?.code) wrapped.code = error.code;
+    wrapped.cause = error;
+    throw wrapped;
   }
-  throw new Error(`T-Bank VoiceKit недоступен после ${MAX_RETRIES} попыток: ${lastError?.message}`);
 }
 
 export async function testTbankVoiceKitConnection(
@@ -413,29 +447,40 @@ export async function testTbankVoiceKitConnection(
     throw new Error('Не указаны API Key и Secret Key для T-Bank VoiceKit');
   }
 
-  const jwt = createTbankVoiceKitJwt(creds.apiKey, creds.secretKey);
   // Отправляем минимальный тестовый буфер тишины (LINEAR16 16kHz 0.2s)
-  const silenceBuf = Buffer.alloc(6400);
+  const silenceContentBase64 = Buffer.alloc(6400).toString('base64');
 
   try {
-    await axios.post(
-      `${TBANK_STT_BASE_URL}/v1/stt:recognize`,
-      {
-        config: {
-          encoding: 'LINEAR16',
-          sample_rate_hertz: 16000,
-          num_channels: 1,
-        },
-        audio: {
-          content: silenceBuf.toString('base64'),
-        },
+    await withSttRetry(
+      () => {
+        const jwt = createTbankVoiceKitJwt(creds.apiKey, creds.secretKey);
+        return axios.post(
+          `${TBANK_STT_BASE_URL}/v1/stt:recognize`,
+          {
+            config: {
+              encoding: 'LINEAR16',
+              sample_rate_hertz: 16000,
+              num_channels: 1,
+            },
+            audio: {
+              content: silenceContentBase64,
+            },
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${jwt}`,
+              'Content-Type': 'application/json',
+            },
+            timeout: 10000,
+          }
+        );
       },
       {
-        headers: {
-          Authorization: `Bearer ${jwt}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 10000,
+        providerName: 'T-Bank VoiceKit',
+        operationName: 'connection-test',
+        maxAttempts: 2,
+        baseDelayMs: 600,
+        maxDelayMs: 2000,
       }
     );
 
