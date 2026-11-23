@@ -20,7 +20,8 @@ import { getGigaAmConfig, isGigaAmConfigured } from './src/services/gigaam-asr.j
 import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation, harmonizeMistakesAndEvaluation, filterOutdatedReminderMistakes, reconcileMistakesWithCriteria, generateLocalFallbackAnalysis } from './src/services/gigachat.js';
 import { classifyCallContext } from './src/services/summaryUtils.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
-import { readStoreSync, writeStore } from './src/store/store.js';
+import { readStoreSync, writeStore, getDefaultConfig } from './src/store/store.js';
+import { loadServerEnvironment, persistServerEnvVars, hydrateStoreFromServerEnv } from './src/services/serverEnv.js';
 import { readConsentStoreSync, writeConsentStore } from './src/store/consent-store.js';
 import { ensureAutoConsent, getConsentForPhone, registerConsent, syncConsentsFromCalls } from './src/store/consents.js';
 import { initCleanupScheduler, runCleanupNow } from './src/store/cleanup.js';
@@ -45,8 +46,8 @@ import {
   sendWcgpRequest
 } from './src/services/megafonRest.js';
 
-// Setup environment variables
-dotenv.config();
+// Setup server environment variables (deployment env + .env + persistent runtime .env)
+loadServerEnvironment();
 
 // Обязательный глобальный тайм-аут по умолчанию для всех исходящих HTTP-вызовов
 axios.defaults.timeout = 30000;
@@ -91,33 +92,8 @@ function getFullDataForSync() {
   };
 }
 
-// Local Database initialization
-const DEFAULT_CONFIG: SystemConfig = {
-  activeModel: 'GigaChat:Lite',
-  default_gigachat_model: 'GigaChat:Lite',
-  salonName: (process.env.SALON_NAME || 'Fashion Look Studio').trim(),
-  megafon: {
-    token: 'megafon_ats_auth_token_example_123',
-    webhookUrl: '/api/calls/webhook',
-    autoImport: true,
-    active: true,
-    pollingEnabled: false,
-    pollingIntervalMinutes: 5,
-    lastPollingTime: new Date(Date.now() - 12 * 3600000).toISOString() // 12 hours ago
-  },
-  vk: {
-    token: 'vk_group_api_token_example_xyz',
-    chatId: '2000000045',
-    enabled: true,
-    template: `🔔 *Анализ звонка #{call_id}*\n📅 *Дата и время (UTC+4):* {call_date_time}\n⏱️ *Длительность:* {duration}\n\n👤 *Клиент:* {client_name}\n📞 *Оценка оператора:* {operator_score}\n💬 *Резюме:* {summary}\n⚠️ *Конфликт:* {is_dispute_text} ({dispute_reason})\n📋 *Обещания менеджера:* {promises}\n💡 *Рекомендации:* {recommendations}`
-  },
-  yclients: {
-    userToken: 'yclients_user_token_example_777',
-    partnerToken: 'yclients_partner_token_example_888',
-    salonId: '987654',
-    enabled: true
-  }
-};
+// Local Database initialization (always derived from server environment variables)
+const DEFAULT_CONFIG: SystemConfig = getDefaultConfig();
 
 export function getEffectiveSalonName(cfg?: SystemConfig): string {
   if (cfg) {
@@ -2818,6 +2794,8 @@ async function performS3Hydration(): Promise<boolean> {
       if (data.config) db.config = { ...db.config, ...data.config };
       if (Array.isArray(data.users) && data.users.length > 0) db.users = data.users;
       if (Array.isArray(data.access_log)) db.access_log = data.access_log;
+      // Deployment server environment variables always take precedence over older S3 backup snapshots
+      hydrateStoreFromServerEnv(db);
       await writeStore(db);
 
       if (Array.isArray(data.consents)) {
@@ -5397,10 +5375,12 @@ app.post('/api/config', (req, res) => {
     }
   }
 
+  const envUpdates: Record<string, string> = {};
+
   if (body.salonName !== undefined) {
     const cleanSalon = String(body.salonName).trim() || 'Fashion Look Studio';
     db.config.salonName = cleanSalon;
-    process.env.SALON_NAME = cleanSalon;
+    envUpdates.SALON_NAME = cleanSalon;
     if (!db.config.credentials) db.config.credentials = {};
     db.config.credentials.salonName = cleanSalon;
   }
@@ -5411,7 +5391,85 @@ app.post('/api/config', (req, res) => {
     db.config.transcriptionModel = normalizedStt;
     if (!db.config.credentials) db.config.credentials = {};
     db.config.credentials.transcriptionModel = normalizedStt;
-    process.env.STT_PROVIDER = normalizedStt;
+    envUpdates.STT_PROVIDER = normalizedStt;
+  }
+
+  if (body.default_gigachat_model || body.activeModel) {
+    const m = String(body.default_gigachat_model || body.activeModel).trim();
+    if (['GigaChat:Lite', 'GigaChat:Pro', 'GigaChat:Max', 'GigaChat:Ultra'].includes(m)) {
+      envUpdates.GIGACHAT_MODEL = m;
+    }
+  }
+
+  if (!db.config.credentials) db.config.credentials = {};
+
+  if (body.megafon) {
+    if (body.megafon.apiVersion !== undefined) {
+      const v = body.megafon.apiVersion === 'rest_wcgp' ? 'rest_wcgp' : 'json_rpc';
+      db.config.credentials.megafonApiVersion = v;
+      envUpdates.MEGAFON_API_VERSION = v;
+    }
+    if (body.megafon.token !== undefined && body.megafon.token !== '••••••••') {
+      const t = String(body.megafon.token).trim();
+      db.config.credentials.megafonToken = t;
+      envUpdates.MEGAFON_TOKEN = t;
+    }
+    if (body.megafon.restDomain !== undefined) {
+      const d = String(body.megafon.restDomain).trim();
+      db.config.credentials.megafonRestDomain = d;
+      envUpdates.MEGAFON_REST_DOMAIN = d;
+    }
+    if (body.megafon.restToken !== undefined && body.megafon.restToken !== '••••••••') {
+      const rt = String(body.megafon.restToken).trim();
+      db.config.credentials.megafonRestToken = rt;
+      envUpdates.MEGAFON_REST_TOKEN = rt;
+    }
+    if (body.megafon.crmToken !== undefined && body.megafon.crmToken !== '••••••••') {
+      const ct = String(body.megafon.crmToken).trim();
+      db.config.credentials.megafonCrmToken = ct;
+      envUpdates.MEGAFON_CRM_TOKEN = ct;
+    }
+    if (body.megafon.lkLogin !== undefined) {
+      const ll = String(body.megafon.lkLogin).trim();
+      db.config.credentials.megafonLkLogin = ll;
+      envUpdates.MEGAFON_LK_LOGIN = ll;
+    }
+    if (body.megafon.lkPassword !== undefined && body.megafon.lkPassword !== '••••••••') {
+      const lp = String(body.megafon.lkPassword).trim();
+      db.config.credentials.megafonLkPassword = lp;
+      envUpdates.MEGAFON_LK_PASSWORD = lp;
+    }
+  }
+
+  if (body.vk) {
+    if (body.vk.token !== undefined && body.vk.token !== '••••••••') {
+      const vt = String(body.vk.token).trim();
+      db.config.credentials.vkToken = vt;
+      envUpdates.VK_TOKEN = vt;
+    }
+    if (body.vk.chatId !== undefined) {
+      const vc = String(body.vk.chatId).trim();
+      db.config.credentials.vkChatId = vc;
+      envUpdates.VK_CHAT_ID = vc;
+    }
+  }
+
+  if (body.yclients) {
+    if (body.yclients.userToken !== undefined && body.yclients.userToken !== '••••••••') {
+      const yu = String(body.yclients.userToken).trim();
+      db.config.credentials.yclientsUserToken = yu;
+      envUpdates.YCLIENTS_USER_TOKEN = yu;
+    }
+    if (body.yclients.partnerToken !== undefined && body.yclients.partnerToken !== '••••••••') {
+      const yp = String(body.yclients.partnerToken).trim();
+      db.config.credentials.yclientsPartnerToken = yp;
+      envUpdates.YCLIENTS_PARTNER_TOKEN = yp;
+    }
+    if (body.yclients.salonId !== undefined) {
+      const ys = String(body.yclients.salonId).trim();
+      db.config.credentials.yclientsSalonId = ys;
+      envUpdates.YCLIENTS_SALON_ID = ys;
+    }
   }
 
   db.config = {
@@ -5432,8 +5490,9 @@ app.post('/api/config', (req, res) => {
     }
   };
 
+  persistServerEnvVars(envUpdates);
   writeDb(db);
-  appendLog('info', 'system', `Конфигурация системы успешно обновлена (салон: «${db.config.salonName}»). Интервал авто-опроса АТС: ${db.config.megafon.pollingIntervalMinutes} мин.`);
+  appendLog('info', 'system', `Конфигурация системы успешно обновлена и синхронизирована с переменными сервера (салон: «${db.config.salonName}»). Интервал авто-опроса АТС: ${db.config.megafon.pollingIntervalMinutes} мин.`);
   res.json(db.config);
 });
 

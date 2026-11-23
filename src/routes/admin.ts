@@ -22,6 +22,7 @@ import { archiveCallsToS3, getS3ArchiveStatus, listS3Archives } from '../service
 import { testTbankVoiceKitConnection, isTbankVoiceKitConfigured } from '../services/tbank-voicekit.js';
 import { testGigaAmConnection, getGigaAmConfig, isGigaAmConfigured, normalizeGigaamVariant, normalizeGigaAmEndpointUrl } from '../services/gigaam-asr.js';
 import { resolveActiveSttProvider, normalizeSttProvider } from '../services/transcriptionService.js';
+import { persistServerEnvVars, getServerEnvStatus, getEnvValue } from '../services/serverEnv.js';
 import { SystemCredentials, GigaChatModel, AutoCleanupSettings, LogEntry } from '../types.js';
 
 export const adminRouter = Router();
@@ -39,95 +40,99 @@ adminRouter.get('/credentials', async (req: Request, res: Response) => {
     const creds: SystemCredentials = store.config.credentials || {};
 
     const keyInfo = getAuthorizedKeyInfo();
-    const rawKeyPath = creds.yandexServiceAccountKeyFile || process.env.YC_SERVICE_ACCOUNT_KEY_FILE || '';
+    const rawKeyPath = getEnvValue('YC_SERVICE_ACCOUNT_KEY_FILE') || creds.yandexServiceAccountKeyFile || '';
     const cleanKeyPath = rawKeyPath.length > 200 || rawKeyPath.includes('\n')
       ? (keyInfo.filePath || '/app/keys/authorized_key.json')
       : (rawKeyPath || '/app/keys/authorized_key.json');
 
+    const effectiveSalonName = getEnvValue('SALON_NAME') || store.config.salonName || creds.salonName || 'Fashion Look Studio';
+    const effectiveGigaKey = getEnvValue('GIGACHAT_AUTH_KEY', 'GIGACHAT_CREDENTIALS') || creds.gigachatAuthKey || '';
+    const effectiveYandexKey = getEnvValue('YC_API_KEY') || creds.yandexApiKey || '';
+    const effectiveYandexStorageKey = getEnvValue('YC_STORAGE_ACCESS_KEY', 'YC_S3_KEY_ID') || creds.yandexStorageAccessKey || '';
+    const effectiveYandexStorageBucket = getEnvValue('YC_STORAGE_BUCKET') || creds.yandexStorageBucket || '';
+    const effectiveS3AccessKey = getEnvValue('S3_ACCESS_KEY') || creds.s3AccessKey || '';
+
     res.json({
       // Салон красоты
-      salonName: store.config.salonName || creds.salonName || process.env.SALON_NAME || 'Fashion Look Studio',
+      salonName: effectiveSalonName,
 
       // GigaChat
-      gigachatAuthKey: creds.gigachatAuthKey || process.env.GIGACHAT_AUTH_KEY || '',
-      gigachatModel: creds.gigachatModel || store.config.default_gigachat_model || 'GigaChat:Lite',
-      gigachatScope: creds.gigachatScope || process.env.GIGACHAT_SCOPE || 'GIGACHAT_API_PERS',
-      gigachatConfigured: !!(creds.gigachatAuthKey || process.env.GIGACHAT_AUTH_KEY),
+      gigachatAuthKey: effectiveGigaKey,
+      gigachatModel: getEnvValue('GIGACHAT_MODEL', 'GIGACHAT_DEFAULT_MODEL') || creds.gigachatModel || store.config.default_gigachat_model || 'GigaChat:Lite',
+      gigachatScope: getEnvValue('GIGACHAT_SCOPE') || creds.gigachatScope || 'GIGACHAT_API_PERS',
+      gigachatConfigured: !!effectiveGigaKey,
       customSystemPrompt: store.config.customSystemPrompt || creds.customSystemPrompt || '',
-      defaultSystemPrompt: getDefaultSystemPrompt(store.config.salonName || creds.salonName || process.env.SALON_NAME || 'Fashion Look Studio'),
+      defaultSystemPrompt: getDefaultSystemPrompt(effectiveSalonName),
 
       // Yandex SpeechKit
-      yandexApiKey: creds.yandexApiKey || process.env.YC_API_KEY || '',
-      yandexFolderId: creds.yandexFolderId || process.env.YC_FOLDER_ID || '',
-      yandexServiceAccountId: creds.yandexServiceAccountId || process.env.YC_SERVICE_ACCOUNT_ID || keyInfo.serviceAccountId || '',
+      yandexApiKey: effectiveYandexKey,
+      yandexFolderId: getEnvValue('YC_FOLDER_ID') || creds.yandexFolderId || '',
+      yandexServiceAccountId: getEnvValue('YC_SERVICE_ACCOUNT_ID') || creds.yandexServiceAccountId || keyInfo.serviceAccountId || '',
       yandexServiceAccountKeyFile: cleanKeyPath,
-      yandexServiceAccountKeyJson: creds.yandexServiceAccountKeyJson || process.env.YC_SERVICE_ACCOUNT_KEY_JSON || '',
+      yandexServiceAccountKeyJson: getEnvValue('YC_SERVICE_ACCOUNT_KEY_JSON') || creds.yandexServiceAccountKeyJson || '',
       yandexKeyInfo: keyInfo,
-      yandexConfigured: !!(keyInfo.configured || creds.yandexApiKey || process.env.YC_API_KEY),
+      yandexConfigured: !!(keyInfo.configured || effectiveYandexKey),
       geminiConfigured: !!process.env.GEMINI_API_KEY,
 
       // Модель транскрибации речи (STT)
       transcriptionModel: resolveActiveSttProvider(),
 
       // T-Bank VoiceKit (Тинькофф Облако STT)
-      tbankApiKey: creds.tbankApiKey || process.env.TBANK_VOICEKIT_API_KEY || '',
-      tbankSecretKey: creds.tbankSecretKey || process.env.TBANK_VOICEKIT_SECRET_KEY || '',
+      tbankApiKey: getEnvValue('TBANK_VOICEKIT_API_KEY') || creds.tbankApiKey || '',
+      tbankSecretKey: getEnvValue('TBANK_VOICEKIT_SECRET_KEY') || creds.tbankSecretKey || '',
       tbankConfigured: isTbankVoiceKitConfigured(),
 
       // GigaAM v3 (SaluteDevices / Sber ASR)
-      gigaamApiUrl: normalizeGigaAmEndpointUrl(creds.gigaamApiUrl || process.env.GIGAAM_API_URL || '', getGigaAmConfig().variant),
-      gigaamApiKey: creds.gigaamApiKey || process.env.GIGAAM_API_KEY || '',
+      gigaamApiUrl: normalizeGigaAmEndpointUrl(getEnvValue('GIGAAM_API_URL') || creds.gigaamApiUrl || '', getGigaAmConfig().variant),
+      gigaamApiKey: getEnvValue('GIGAAM_API_KEY') || creds.gigaamApiKey || '',
       gigaamVariant: getGigaAmConfig().variant,
       gigaamConfigured: isGigaAmConfigured(),
 
       // 152-ФЗ Ключ шифрования БД и ПДн
-      storeEncryptionKey: creds.storeEncryptionKey || process.env.STORE_ENCRYPTION_KEY || '',
+      storeEncryptionKey: getEnvValue('STORE_ENCRYPTION_KEY') || creds.storeEncryptionKey || '',
       storeEncryptionKeyConfigured: isStoreEncryptionKeyConfigured(),
 
       // Yandex Object Storage (для аудиозаписей SpeechKit)
-      yandexStorageBucket: creds.yandexStorageBucket || process.env.YC_STORAGE_BUCKET || '',
-      yandexStorageAccessKey: creds.yandexStorageAccessKey || process.env.YC_STORAGE_ACCESS_KEY || process.env.YC_S3_KEY_ID || '',
-      yandexStorageSecretKey: creds.yandexStorageSecretKey || process.env.YC_STORAGE_SECRET_KEY || process.env.YC_S3_SECRET_KEY || '',
-      yandexStorageEndpoint: creds.yandexStorageEndpoint || process.env.YC_STORAGE_ENDPOINT || 'https://storage.yandexcloud.net',
-      yandexStorageRegion: creds.yandexStorageRegion || process.env.YC_STORAGE_REGION || 'ru-central1',
-      yandexStorageConfigured: !!(
-        (creds.yandexStorageAccessKey || process.env.YC_STORAGE_ACCESS_KEY || process.env.YC_S3_KEY_ID) &&
-        (creds.yandexStorageBucket || process.env.YC_STORAGE_BUCKET)
-      ),
+      yandexStorageBucket: effectiveYandexStorageBucket,
+      yandexStorageAccessKey: effectiveYandexStorageKey,
+      yandexStorageSecretKey: getEnvValue('YC_STORAGE_SECRET_KEY', 'YC_S3_SECRET_KEY') || creds.yandexStorageSecretKey || '',
+      yandexStorageEndpoint: getEnvValue('YC_STORAGE_ENDPOINT') || creds.yandexStorageEndpoint || 'https://storage.yandexcloud.net',
+      yandexStorageRegion: getEnvValue('YC_STORAGE_REGION') || creds.yandexStorageRegion || 'ru-central1',
+      yandexStorageConfigured: !!(effectiveYandexStorageKey && effectiveYandexStorageBucket),
 
       // S3 Timeweb (для резервной копии базы данных)
-      s3Endpoint: creds.s3Endpoint || process.env.S3_ENDPOINT || 'https://s3.timeweb.cloud',
-      s3AccessKey: creds.s3AccessKey || process.env.S3_ACCESS_KEY || '',
-      s3SecretKey: creds.s3SecretKey || process.env.S3_SECRET_KEY || '',
-      s3BucketName: creds.s3BucketName || process.env.S3_BUCKET_NAME || '',
-      s3KeyPrefix: creds.s3KeyPrefix || process.env.S3_KEY_PREFIX || 'lik28/data/',
-      s3Region: creds.s3Region || process.env.S3_REGION || 'ru-1',
-      s3Configured: !!(creds.s3AccessKey || process.env.S3_ACCESS_KEY),
+      s3Endpoint: getEnvValue('S3_ENDPOINT') || creds.s3Endpoint || 'https://s3.timeweb.cloud',
+      s3AccessKey: effectiveS3AccessKey,
+      s3SecretKey: getEnvValue('S3_SECRET_KEY') || creds.s3SecretKey || '',
+      s3BucketName: getEnvValue('S3_BUCKET_NAME') || creds.s3BucketName || '',
+      s3KeyPrefix: getEnvValue('S3_KEY_PREFIX') || creds.s3KeyPrefix || 'lik28/data/',
+      s3Region: getEnvValue('S3_REGION') || creds.s3Region || 'ru-1',
+      s3Configured: !!effectiveS3AccessKey,
 
       // Мегафон ВАТС
-      megafonApiVersion: creds.megafonApiVersion || store.config.megafon.apiVersion || process.env.MEGAFON_API_VERSION || 'json_rpc',
-      megafonToken: creds.megafonToken || store.config.megafon.token || '',
-      megafonRestDomain: creds.megafonRestDomain || store.config.megafon.restDomain || process.env.MEGAFON_REST_DOMAIN || '',
-      megafonRestToken: creds.megafonRestToken || store.config.megafon.restToken || process.env.MEGAFON_REST_TOKEN || '',
-      megafonCrmToken: creds.megafonCrmToken || store.config.megafon.crmToken || process.env.MEGAFON_CRM_TOKEN || '',
+      megafonApiVersion: getEnvValue('MEGAFON_API_VERSION') || creds.megafonApiVersion || store.config.megafon.apiVersion || 'json_rpc',
+      megafonToken: getEnvValue('MEGAFON_TOKEN') || creds.megafonToken || store.config.megafon.token || '',
+      megafonRestDomain: getEnvValue('MEGAFON_REST_DOMAIN') || creds.megafonRestDomain || store.config.megafon.restDomain || '',
+      megafonRestToken: getEnvValue('MEGAFON_REST_TOKEN') || creds.megafonRestToken || store.config.megafon.restToken || '',
+      megafonCrmToken: getEnvValue('MEGAFON_CRM_TOKEN') || creds.megafonCrmToken || store.config.megafon.crmToken || '',
       megafonRestPollingPeriod: store.config.megafon.restPollingPeriod || 'today',
-      megafonLkLogin: creds.megafonLkLogin || store.config.megafon.lkLogin || '',
-      megafonLkPassword: creds.megafonLkPassword || store.config.megafon.lkPassword || '',
+      megafonLkLogin: getEnvValue('MEGAFON_LK_LOGIN') || creds.megafonLkLogin || store.config.megafon.lkLogin || '',
+      megafonLkPassword: getEnvValue('MEGAFON_LK_PASSWORD') || creds.megafonLkPassword || store.config.megafon.lkPassword || '',
       megafonWebhookUrl: store.config.megafon.webhookUrl || '/api/calls/webhook',
       megafonAutoImport: store.config.megafon.autoImport !== false,
       megafonPollingEnabled: !!store.config.megafon.pollingEnabled,
       megafonPollingIntervalMinutes: store.config.megafon.pollingIntervalMinutes || 15,
 
       // VK
-      vkToken: creds.vkToken || store.config.vk.token || '',
-      vkChatId: creds.vkChatId || store.config.vk.chatId || '',
+      vkToken: getEnvValue('VK_TOKEN') || creds.vkToken || store.config.vk.token || '',
+      vkChatId: getEnvValue('VK_CHAT_ID') || creds.vkChatId || store.config.vk.chatId || '',
       vkTemplate: store.config.vk.template || '',
       vkEnabled: !!store.config.vk.enabled,
 
       // YClients
-      yclientsUserToken: creds.yclientsUserToken || store.config.yclients.userToken || '',
-      yclientsPartnerToken: creds.yclientsPartnerToken || store.config.yclients.partnerToken || '',
-      yclientsSalonId: creds.yclientsSalonId || store.config.yclients.salonId || '',
+      yclientsUserToken: getEnvValue('YCLIENTS_USER_TOKEN') || creds.yclientsUserToken || store.config.yclients.userToken || '',
+      yclientsPartnerToken: getEnvValue('YCLIENTS_PARTNER_TOKEN') || creds.yclientsPartnerToken || store.config.yclients.partnerToken || '',
+      yclientsSalonId: getEnvValue('YCLIENTS_SALON_ID') || creds.yclientsSalonId || store.config.yclients.salonId || '',
       yclientsEnabled: !!store.config.yclients.enabled,
 
       // 152-ФЗ TTL settings
@@ -137,6 +142,9 @@ adminRouter.get('/credentials', async (req: Request, res: Response) => {
         fullDeleteDays: 90,
         accessLogDays: 365,
       },
+
+      // Метаданные источников переменных окружения (без значений секретов)
+      envStatus: getServerEnvStatus(),
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -172,8 +180,19 @@ adminRouter.post('/yandex-key-upload', async (req: Request, res: Response) => {
     if (!store.config.credentials) store.config.credentials = {};
     const creds = store.config.credentials;
 
-    // Determine target save path
-    let targetFile = customPath || creds.yandexServiceAccountKeyFile || process.env.YC_SERVICE_ACCOUNT_KEY_FILE || '/app/keys/authorized_key.json';
+    // Determine safe target save path confined to allowed key directories
+    const allowedKeyDirs = [
+      path.resolve('/app/keys'),
+      path.resolve(process.cwd(), 'keys'),
+    ];
+    const requestedPath = typeof customPath === 'string' && customPath.trim()
+      ? path.resolve(customPath.trim())
+      : path.resolve(creds.yandexServiceAccountKeyFile || process.env.YC_SERVICE_ACCOUNT_KEY_FILE || '/app/keys/authorized_key.json');
+
+    const isAllowedPath = allowedKeyDirs.some(
+      (baseDir) => requestedPath.startsWith(baseDir + path.sep) && path.extname(requestedPath).toLowerCase() === '.json'
+    );
+    let targetFile = isAllowedPath ? requestedPath : path.resolve('/app/keys/authorized_key.json');
 
     try {
       const dir = path.dirname(targetFile);
@@ -181,9 +200,9 @@ adminRouter.post('/yandex-key-upload', async (req: Request, res: Response) => {
         fs.mkdirSync(dir, { recursive: true });
       }
       fs.writeFileSync(targetFile, JSON.stringify(parsed, null, 2), { mode: 0o600 });
-    } catch (writeErr: any) {
+    } catch {
       // Fallback to project keys directory
-      targetFile = path.join(process.cwd(), 'keys', 'authorized_key.json');
+      targetFile = path.resolve(process.cwd(), 'keys', 'authorized_key.json');
       const dir = path.dirname(targetFile);
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
@@ -193,8 +212,13 @@ adminRouter.post('/yandex-key-upload', async (req: Request, res: Response) => {
 
     creds.yandexServiceAccountKeyFile = targetFile;
     creds.yandexServiceAccountKeyJson = JSON.stringify(parsed);
-    process.env.YC_SERVICE_ACCOUNT_KEY_FILE = targetFile;
-    process.env.YC_SERVICE_ACCOUNT_KEY_JSON = creds.yandexServiceAccountKeyJson;
+    creds.yandexServiceAccountId = parsed.service_account_id;
+
+    const envPersist = persistServerEnvVars({
+      YC_SERVICE_ACCOUNT_KEY_FILE: targetFile,
+      YC_SERVICE_ACCOUNT_KEY_JSON: creds.yandexServiceAccountKeyJson,
+      YC_SERVICE_ACCOUNT_ID: parsed.service_account_id,
+    });
 
     invalidateAuthorizedKeyCache();
     await writeStore(store);
@@ -208,11 +232,12 @@ adminRouter.post('/yandex-key-upload', async (req: Request, res: Response) => {
 
     res.json({
       success: true,
-      message: 'Файл authorized_key.json успешно загружен, проверен и применён',
+      message: 'Файл authorized_key.json успешно загружен, проверен и сохранён в переменных окружения сервера',
       serviceAccountId: parsed.service_account_id,
       keyId: parsed.id,
       filePath: targetFile,
       keyInfo: getAuthorizedKeyInfo(),
+      persistedEnvKeys: envPersist.savedKeys,
     });
   } catch (err: any) {
     res.status(500).json({ success: false, error: `Ошибка сохранения ключа: ${err.message}` });
@@ -233,16 +258,17 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
     }
 
     const creds = store.config.credentials;
+    const envUpdates: Record<string, string> = {};
 
     // 1. GigaChat
     if (body.gigachatAuthKey !== undefined) {
       creds.gigachatAuthKey = String(body.gigachatAuthKey).trim();
-      process.env.GIGACHAT_AUTH_KEY = creds.gigachatAuthKey;
+      envUpdates.GIGACHAT_AUTH_KEY = creds.gigachatAuthKey;
       invalidateGigaChatTokenCache();
     }
     if (body.gigachatScope !== undefined) {
       creds.gigachatScope = String(body.gigachatScope).trim();
-      process.env.GIGACHAT_SCOPE = creds.gigachatScope;
+      envUpdates.GIGACHAT_SCOPE = creds.gigachatScope;
       invalidateGigaChatTokenCache();
     }
     if (body.gigachatModel) {
@@ -251,7 +277,7 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
         creds.gigachatModel = body.gigachatModel;
         store.config.default_gigachat_model = body.gigachatModel;
         store.config.activeModel = body.gigachatModel;
-        process.env.GIGACHAT_DEFAULT_MODEL = body.gigachatModel;
+        envUpdates.GIGACHAT_MODEL = body.gigachatModel;
       }
     }
     if (body.customSystemPrompt !== undefined) {
@@ -263,25 +289,25 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
     // 2. Yandex SpeechKit
     if (body.yandexApiKey !== undefined) {
       creds.yandexApiKey = String(body.yandexApiKey).trim();
-      process.env.YC_API_KEY = creds.yandexApiKey;
+      envUpdates.YC_API_KEY = creds.yandexApiKey;
     }
     if (body.yandexFolderId !== undefined) {
       creds.yandexFolderId = String(body.yandexFolderId).trim();
-      process.env.YC_FOLDER_ID = creds.yandexFolderId;
+      envUpdates.YC_FOLDER_ID = creds.yandexFolderId;
     }
     if (body.yandexServiceAccountId !== undefined) {
       creds.yandexServiceAccountId = String(body.yandexServiceAccountId).trim();
-      process.env.YC_SERVICE_ACCOUNT_ID = creds.yandexServiceAccountId;
+      envUpdates.YC_SERVICE_ACCOUNT_ID = creds.yandexServiceAccountId;
       invalidateAuthorizedKeyCache();
     }
     if (body.yandexServiceAccountKeyFile !== undefined) {
       creds.yandexServiceAccountKeyFile = String(body.yandexServiceAccountKeyFile).trim();
-      process.env.YC_SERVICE_ACCOUNT_KEY_FILE = creds.yandexServiceAccountKeyFile;
+      envUpdates.YC_SERVICE_ACCOUNT_KEY_FILE = creds.yandexServiceAccountKeyFile;
       invalidateAuthorizedKeyCache();
     }
     if (body.yandexServiceAccountKeyJson !== undefined) {
       creds.yandexServiceAccountKeyJson = String(body.yandexServiceAccountKeyJson).trim();
-      process.env.YC_SERVICE_ACCOUNT_KEY_JSON = creds.yandexServiceAccountKeyJson;
+      envUpdates.YC_SERVICE_ACCOUNT_KEY_JSON = creds.yandexServiceAccountKeyJson;
       invalidateAuthorizedKeyCache();
     }
 
@@ -290,30 +316,30 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
       const normalized = normalizeSttProvider(String(body.transcriptionModel));
       store.config.transcriptionModel = normalized;
       creds.transcriptionModel = normalized;
-      process.env.STT_PROVIDER = normalized;
+      envUpdates.STT_PROVIDER = normalized;
     }
     if (body.tbankApiKey !== undefined) {
       creds.tbankApiKey = String(body.tbankApiKey).trim();
-      process.env.TBANK_VOICEKIT_API_KEY = creds.tbankApiKey;
+      envUpdates.TBANK_VOICEKIT_API_KEY = creds.tbankApiKey;
     }
     if (body.tbankSecretKey !== undefined) {
       creds.tbankSecretKey = String(body.tbankSecretKey).trim();
-      process.env.TBANK_VOICEKIT_SECRET_KEY = creds.tbankSecretKey;
+      envUpdates.TBANK_VOICEKIT_SECRET_KEY = creds.tbankSecretKey;
     }
     if (body.gigaamApiUrl !== undefined) {
       const nextVariant = body.gigaamVariant !== undefined
         ? normalizeGigaamVariant(String(body.gigaamVariant))
         : creds.gigaamVariant;
       creds.gigaamApiUrl = normalizeGigaAmEndpointUrl(String(body.gigaamApiUrl), nextVariant);
-      process.env.GIGAAM_API_URL = creds.gigaamApiUrl;
+      envUpdates.GIGAAM_API_URL = creds.gigaamApiUrl;
     }
     if (body.gigaamApiKey !== undefined) {
       creds.gigaamApiKey = String(body.gigaamApiKey).trim();
-      process.env.GIGAAM_API_KEY = creds.gigaamApiKey;
+      envUpdates.GIGAAM_API_KEY = creds.gigaamApiKey;
     }
     if (body.gigaamVariant !== undefined) {
       creds.gigaamVariant = normalizeGigaamVariant(String(body.gigaamVariant));
-      process.env.GIGAAM_MODEL_VARIANT = creds.gigaamVariant;
+      envUpdates.GIGAAM_MODEL_VARIANT = creds.gigaamVariant;
     }
 
     // 152-ФЗ Ключ шифрования БД и ПДн (STORE_ENCRYPTION_KEY)
@@ -321,7 +347,7 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
       const keyVal = String(body.storeEncryptionKey).trim();
       if (keyVal) {
         creds.storeEncryptionKey = keyVal;
-        process.env.STORE_ENCRYPTION_KEY = keyVal;
+        envUpdates.STORE_ENCRYPTION_KEY = keyVal;
         setStoreEncryptionKey(keyVal);
       }
     }
@@ -331,57 +357,55 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
       const cleanSalonName = String(body.salonName).trim() || 'Fashion Look Studio';
       store.config.salonName = cleanSalonName;
       creds.salonName = cleanSalonName;
-      process.env.SALON_NAME = cleanSalonName;
+      envUpdates.SALON_NAME = cleanSalonName;
     }
 
     // 3. Yandex Object Storage (для аудиозаписей SpeechKit)
     if (body.yandexStorageBucket !== undefined) {
       creds.yandexStorageBucket = String(body.yandexStorageBucket).trim();
-      process.env.YC_STORAGE_BUCKET = creds.yandexStorageBucket;
+      envUpdates.YC_STORAGE_BUCKET = creds.yandexStorageBucket;
     }
     if (body.yandexStorageAccessKey !== undefined) {
       creds.yandexStorageAccessKey = String(body.yandexStorageAccessKey).trim();
-      process.env.YC_STORAGE_ACCESS_KEY = creds.yandexStorageAccessKey;
-      process.env.YC_S3_KEY_ID = creds.yandexStorageAccessKey;
+      envUpdates.YC_STORAGE_ACCESS_KEY = creds.yandexStorageAccessKey;
     }
     if (body.yandexStorageSecretKey !== undefined) {
       creds.yandexStorageSecretKey = String(body.yandexStorageSecretKey).trim();
-      process.env.YC_STORAGE_SECRET_KEY = creds.yandexStorageSecretKey;
-      process.env.YC_S3_SECRET_KEY = creds.yandexStorageSecretKey;
+      envUpdates.YC_STORAGE_SECRET_KEY = creds.yandexStorageSecretKey;
     }
     if (body.yandexStorageEndpoint !== undefined) {
       creds.yandexStorageEndpoint = String(body.yandexStorageEndpoint).trim();
-      process.env.YC_STORAGE_ENDPOINT = creds.yandexStorageEndpoint;
+      envUpdates.YC_STORAGE_ENDPOINT = creds.yandexStorageEndpoint;
     }
     if (body.yandexStorageRegion !== undefined) {
       creds.yandexStorageRegion = String(body.yandexStorageRegion).trim();
-      process.env.YC_STORAGE_REGION = creds.yandexStorageRegion;
+      envUpdates.YC_STORAGE_REGION = creds.yandexStorageRegion;
     }
 
     // 4. S3 Timeweb / Внешнее хранилище (для резервной копии базы данных 152-ФЗ)
     if (body.s3Endpoint !== undefined) {
       creds.s3Endpoint = String(body.s3Endpoint).trim();
-      process.env.S3_ENDPOINT = creds.s3Endpoint;
+      envUpdates.S3_ENDPOINT = creds.s3Endpoint;
     }
     if (body.s3AccessKey !== undefined) {
       creds.s3AccessKey = String(body.s3AccessKey).trim();
-      process.env.S3_ACCESS_KEY = creds.s3AccessKey;
+      envUpdates.S3_ACCESS_KEY = creds.s3AccessKey;
     }
     if (body.s3SecretKey !== undefined) {
       creds.s3SecretKey = String(body.s3SecretKey).trim();
-      process.env.S3_SECRET_KEY = creds.s3SecretKey;
+      envUpdates.S3_SECRET_KEY = creds.s3SecretKey;
     }
     if (body.s3BucketName !== undefined) {
       creds.s3BucketName = String(body.s3BucketName).trim();
-      process.env.S3_BUCKET_NAME = creds.s3BucketName;
+      envUpdates.S3_BUCKET_NAME = creds.s3BucketName;
     }
     if (body.s3KeyPrefix !== undefined) {
       creds.s3KeyPrefix = String(body.s3KeyPrefix).trim();
-      process.env.S3_KEY_PREFIX = creds.s3KeyPrefix;
+      envUpdates.S3_KEY_PREFIX = creds.s3KeyPrefix;
     }
     if (body.s3Region !== undefined) {
       creds.s3Region = String(body.s3Region).trim();
-      process.env.S3_REGION = creds.s3Region;
+      envUpdates.S3_REGION = creds.s3Region;
     }
 
     // 4. Мегафон ВАТС
@@ -389,27 +413,27 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
       const v = body.megafonApiVersion === 'rest_wcgp' ? 'rest_wcgp' : 'json_rpc';
       store.config.megafon.apiVersion = v;
       creds.megafonApiVersion = v;
-      process.env.MEGAFON_API_VERSION = v;
+      envUpdates.MEGAFON_API_VERSION = v;
     }
     if (body.megafonToken !== undefined) {
       creds.megafonToken = String(body.megafonToken).trim();
       store.config.megafon.token = creds.megafonToken;
-      process.env.MEGAFON_TOKEN = creds.megafonToken;
+      envUpdates.MEGAFON_TOKEN = creds.megafonToken;
     }
     if (body.megafonRestDomain !== undefined) {
       creds.megafonRestDomain = String(body.megafonRestDomain).trim();
       store.config.megafon.restDomain = creds.megafonRestDomain;
-      process.env.MEGAFON_REST_DOMAIN = creds.megafonRestDomain;
+      envUpdates.MEGAFON_REST_DOMAIN = creds.megafonRestDomain;
     }
     if (body.megafonRestToken !== undefined) {
       creds.megafonRestToken = String(body.megafonRestToken).trim();
       store.config.megafon.restToken = creds.megafonRestToken;
-      process.env.MEGAFON_REST_TOKEN = creds.megafonRestToken;
+      envUpdates.MEGAFON_REST_TOKEN = creds.megafonRestToken;
     }
     if (body.megafonCrmToken !== undefined) {
       creds.megafonCrmToken = String(body.megafonCrmToken).trim();
       store.config.megafon.crmToken = creds.megafonCrmToken;
-      process.env.MEGAFON_CRM_TOKEN = creds.megafonCrmToken;
+      envUpdates.MEGAFON_CRM_TOKEN = creds.megafonCrmToken;
     }
     if (body.megafonRestPollingPeriod !== undefined) {
       store.config.megafon.restPollingPeriod = body.megafonRestPollingPeriod;
@@ -417,12 +441,12 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
     if (body.megafonLkLogin !== undefined) {
       creds.megafonLkLogin = String(body.megafonLkLogin).trim();
       store.config.megafon.lkLogin = creds.megafonLkLogin;
-      process.env.MEGAFON_LK_LOGIN = creds.megafonLkLogin;
+      envUpdates.MEGAFON_LK_LOGIN = creds.megafonLkLogin;
     }
     if (body.megafonLkPassword !== undefined) {
       creds.megafonLkPassword = String(body.megafonLkPassword).trim();
       store.config.megafon.lkPassword = creds.megafonLkPassword;
-      process.env.MEGAFON_LK_PASSWORD = creds.megafonLkPassword;
+      envUpdates.MEGAFON_LK_PASSWORD = creds.megafonLkPassword;
     }
     if (body.megafonWebhookUrl !== undefined) store.config.megafon.webhookUrl = String(body.megafonWebhookUrl).trim();
     if (body.megafonAutoImport !== undefined) store.config.megafon.autoImport = Boolean(body.megafonAutoImport);
@@ -441,12 +465,12 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
     if (body.vkToken !== undefined) {
       creds.vkToken = String(body.vkToken).trim();
       store.config.vk.token = creds.vkToken;
-      process.env.VK_TOKEN = creds.vkToken;
+      envUpdates.VK_TOKEN = creds.vkToken;
     }
     if (body.vkChatId !== undefined) {
       creds.vkChatId = String(body.vkChatId).trim();
       store.config.vk.chatId = creds.vkChatId;
-      process.env.VK_CHAT_ID = creds.vkChatId;
+      envUpdates.VK_CHAT_ID = creds.vkChatId;
     }
     if (body.vkTemplate !== undefined) store.config.vk.template = String(body.vkTemplate);
     if (body.vkEnabled !== undefined) store.config.vk.enabled = Boolean(body.vkEnabled);
@@ -455,17 +479,17 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
     if (body.yclientsUserToken !== undefined) {
       creds.yclientsUserToken = String(body.yclientsUserToken).trim();
       store.config.yclients.userToken = creds.yclientsUserToken;
-      process.env.YCLIENTS_USER_TOKEN = creds.yclientsUserToken;
+      envUpdates.YCLIENTS_USER_TOKEN = creds.yclientsUserToken;
     }
     if (body.yclientsPartnerToken !== undefined) {
       creds.yclientsPartnerToken = String(body.yclientsPartnerToken).trim();
       store.config.yclients.partnerToken = creds.yclientsPartnerToken;
-      process.env.YCLIENTS_PARTNER_TOKEN = creds.yclientsPartnerToken;
+      envUpdates.YCLIENTS_PARTNER_TOKEN = creds.yclientsPartnerToken;
     }
     if (body.yclientsSalonId !== undefined) {
       creds.yclientsSalonId = String(body.yclientsSalonId).trim();
       store.config.yclients.salonId = creds.yclientsSalonId;
-      process.env.YCLIENTS_SALON_ID = creds.yclientsSalonId;
+      envUpdates.YCLIENTS_SALON_ID = creds.yclientsSalonId;
     }
     if (body.yclientsEnabled !== undefined) store.config.yclients.enabled = Boolean(body.yclientsEnabled);
 
@@ -479,18 +503,24 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
       };
     }
 
+    // Сохраняем все изменённые секреты и параметры в переменные окружения на сервере (.env + process.env)
+    const envPersist = persistServerEnvVars(envUpdates);
+
     await writeStore(store);
 
     await logAccess(
       getCurrentUser(req)?.name || 'Администратор',
       'write',
-      'Обновлены системные токены, ключи и параметры интеграций в админ-панели',
+      `Обновлены системные токены, ключи и переменные окружения сервера (${envPersist.savedKeys.length} перем.)`,
       req.ip || '127.0.0.1'
     );
 
     res.json({
       success: true,
-      message: 'Все токены, ключи и настройки успешно сохранены в зашифрованное хранилище',
+      message: 'Все токены, ключи и настройки сохранены в переменных окружения сервера и зашифрованном хранилище',
+      persistedEnvKeys: envPersist.savedKeys,
+      persistedEnvFiles: envPersist.persistedFiles,
+      envWarnings: envPersist.warnings.length > 0 ? envPersist.warnings : undefined,
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -522,15 +552,14 @@ adminRouter.post('/change-admin-password', async (req: Request, res: Response) =
       return res.status(404).json({ error: 'Пользователь-администратор не найден' });
     }
 
-    // Verify current password
-    const isCurrentValid = verifyPassword(String(currentPassword), adminUser.passwordHash, adminUser.salt) ||
-      (String(currentPassword) === 'admin123');
+    // Verify current password against stored PBKDF2 hash
+    const isCurrentValid = verifyPassword(String(currentPassword), adminUser.passwordHash, adminUser.salt);
 
     if (!isCurrentValid) {
       return res.status(401).json({ error: 'Неверный текущий пароль' });
     }
 
-    // Update password
+    // Update password hash in store and persist ADMIN_PASSWORD in server environment
     const hashed = hashPassword(String(newPassword));
     adminUser.passwordHash = hashed.hash;
     adminUser.salt = hashed.salt;
@@ -539,16 +568,17 @@ adminRouter.post('/change-admin-password', async (req: Request, res: Response) =
     store.config.credentials.adminPasswordHash = hashed.hash;
     store.config.credentials.adminPasswordSalt = hashed.salt;
 
+    persistServerEnvVars({ ADMIN_PASSWORD: String(newPassword) });
     await writeStore(store);
 
     await logAccess(
       adminUser.name,
       'write',
-      'Пароль администратора успешно изменен',
+      'Пароль администратора успешно изменен и сохранён в переменных сервера',
       req.ip || '127.0.0.1'
     );
 
-    res.json({ success: true, message: 'Пароль администратора успешно обновлен' });
+    res.json({ success: true, message: 'Пароль администратора успешно обновлен и сохранён в переменных сервера' });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

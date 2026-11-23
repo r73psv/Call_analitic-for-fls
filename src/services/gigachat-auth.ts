@@ -15,6 +15,10 @@ function isUsableGigaChatKey(key?: string | null): boolean {
 }
 
 export function getEffectiveGigaChatKey(): string {
+  const envKey = process.env.GIGACHAT_AUTH_KEY || process.env.GIGACHAT_CREDENTIALS || '';
+  if (isUsableGigaChatKey(envKey)) {
+    return envKey.trim();
+  }
   try {
     const store = readStoreSync();
     const storeKey = store.config?.credentials?.gigachatAuthKey;
@@ -22,13 +26,16 @@ export function getEffectiveGigaChatKey(): string {
       return storeKey!.trim();
     }
   } catch (e) {
-    // Ignore store read issues and fallback to env
+    // Ignore store read issues
   }
-  const envKey = process.env.GIGACHAT_AUTH_KEY || process.env.GIGACHAT_CREDENTIALS || '';
-  return isUsableGigaChatKey(envKey) ? envKey.trim() : '';
+  return '';
 }
 
 export function getEffectiveGigaChatScope(): string {
+  const envScope = (process.env.GIGACHAT_SCOPE || '').trim();
+  if (envScope) {
+    return envScope;
+  }
   try {
     const store = readStoreSync();
     if (store.config?.credentials?.gigachatScope) {
@@ -37,7 +44,7 @@ export function getEffectiveGigaChatScope(): string {
   } catch (e) {
     // Ignore
   }
-  return (process.env.GIGACHAT_SCOPE || 'GIGACHAT_API_PERS').trim();
+  return 'GIGACHAT_API_PERS';
 }
 
 export interface GigaChatConfigStatus {

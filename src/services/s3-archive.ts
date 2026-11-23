@@ -20,25 +20,29 @@ export interface S3ClientArchiveInfo {
  * Получение настроенного S3 клиента (Timeweb S3 / S3-совместимое хранилище)
  */
 export function getArchiveS3Client(): S3ClientArchiveInfo | null {
-  let endpoint = process.env.S3_ENDPOINT || 'https://s3.timeweb.cloud';
-  let accessKeyId = process.env.S3_ACCESS_KEY;
-  let secretAccessKey = process.env.S3_SECRET_KEY;
-  let bucket = process.env.S3_BUCKET_NAME;
-  let region = process.env.S3_REGION || 'ru-1';
-  let keyPrefix = process.env.S3_KEY_PREFIX || 'lik28/data/';
+  let endpoint = (process.env.S3_ENDPOINT || '').trim();
+  let accessKeyId = (process.env.S3_ACCESS_KEY || '').trim();
+  let secretAccessKey = (process.env.S3_SECRET_KEY || '').trim();
+  let bucket = (process.env.S3_BUCKET_NAME || '').trim();
+  let region = (process.env.S3_REGION || '').trim();
+  let keyPrefix = (process.env.S3_KEY_PREFIX || '').trim();
 
   try {
     const store = readStoreSync();
     const creds = store.config?.credentials;
     if (creds) {
-      if (creds.s3Endpoint) endpoint = creds.s3Endpoint;
-      if (creds.s3AccessKey) accessKeyId = creds.s3AccessKey;
-      if (creds.s3SecretKey) secretAccessKey = creds.s3SecretKey;
-      if (creds.s3BucketName) bucket = creds.s3BucketName;
-      if (creds.s3Region) region = creds.s3Region;
-      if (creds.s3KeyPrefix) keyPrefix = creds.s3KeyPrefix;
+      if (!endpoint && creds.s3Endpoint) endpoint = creds.s3Endpoint.trim();
+      if (!accessKeyId && creds.s3AccessKey) accessKeyId = creds.s3AccessKey.trim();
+      if (!secretAccessKey && creds.s3SecretKey) secretAccessKey = creds.s3SecretKey.trim();
+      if (!bucket && creds.s3BucketName) bucket = creds.s3BucketName.trim();
+      if (!region && creds.s3Region) region = creds.s3Region.trim();
+      if (!keyPrefix && creds.s3KeyPrefix) keyPrefix = creds.s3KeyPrefix.trim();
     }
   } catch {}
+
+  endpoint = endpoint || 'https://s3.timeweb.cloud';
+  region = region || 'ru-1';
+  keyPrefix = keyPrefix || 'lik28/data/';
 
   if (!endpoint || !accessKeyId || !secretAccessKey || !bucket) {
     return null;

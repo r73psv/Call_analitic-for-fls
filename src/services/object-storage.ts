@@ -16,25 +16,28 @@ export interface YandexStorageConfig {
 }
 
 export function getYandexStorageConfig(): YandexStorageConfig | null {
-  let accessKeyId = process.env.YC_STORAGE_ACCESS_KEY || process.env.YC_S3_KEY_ID;
-  let secretAccessKey = process.env.YC_STORAGE_SECRET_KEY || process.env.YC_S3_SECRET_KEY;
-  let bucket = process.env.YC_STORAGE_BUCKET;
-  let endpoint = process.env.YC_STORAGE_ENDPOINT || 'https://storage.yandexcloud.net';
-  let region = process.env.YC_STORAGE_REGION || 'ru-central1';
+  let accessKeyId = (process.env.YC_STORAGE_ACCESS_KEY || process.env.YC_S3_KEY_ID || '').trim();
+  let secretAccessKey = (process.env.YC_STORAGE_SECRET_KEY || process.env.YC_S3_SECRET_KEY || '').trim();
+  let bucket = (process.env.YC_STORAGE_BUCKET || '').trim();
+  let endpoint = (process.env.YC_STORAGE_ENDPOINT || '').trim();
+  let region = (process.env.YC_STORAGE_REGION || '').trim();
 
   try {
     const store = readStoreSync();
     const creds = store.config?.credentials;
     if (creds) {
-      if (creds.yandexStorageAccessKey) accessKeyId = creds.yandexStorageAccessKey;
-      if (creds.yandexStorageSecretKey) secretAccessKey = creds.yandexStorageSecretKey;
-      if (creds.yandexStorageBucket) bucket = creds.yandexStorageBucket;
-      if (creds.yandexStorageEndpoint) endpoint = creds.yandexStorageEndpoint;
-      if (creds.yandexStorageRegion) region = creds.yandexStorageRegion;
+      if (!accessKeyId && creds.yandexStorageAccessKey) accessKeyId = creds.yandexStorageAccessKey.trim();
+      if (!secretAccessKey && creds.yandexStorageSecretKey) secretAccessKey = creds.yandexStorageSecretKey.trim();
+      if (!bucket && creds.yandexStorageBucket) bucket = creds.yandexStorageBucket.trim();
+      if (!endpoint && creds.yandexStorageEndpoint) endpoint = creds.yandexStorageEndpoint.trim();
+      if (!region && creds.yandexStorageRegion) region = creds.yandexStorageRegion.trim();
     }
   } catch (e) {
     // ignore
   }
+
+  endpoint = endpoint || 'https://storage.yandexcloud.net';
+  region = region || 'ru-central1';
 
   if (!accessKeyId || !secretAccessKey || !bucket) {
     return null;

@@ -46,15 +46,18 @@ export function getTbankVoiceKitCredentials(
   let storeSecretKey = '';
   try {
     const store = readStoreSync();
-    storeApiKey = store.config?.credentials?.tbankApiKey || '';
-    storeSecretKey = store.config?.credentials?.tbankSecretKey || '';
+    storeApiKey = (store.config?.credentials?.tbankApiKey || '').trim();
+    storeSecretKey = (store.config?.credentials?.tbankSecretKey || '').trim();
   } catch {
     // ignore store read errors during early boot
   }
 
+  const envApiKey = (process.env.TBANK_VOICEKIT_API_KEY || '').trim();
+  const envSecretKey = (process.env.TBANK_VOICEKIT_SECRET_KEY || '').trim();
+
   return {
-    apiKey: (apiKeyOverride ?? storeApiKey ?? process.env.TBANK_VOICEKIT_API_KEY ?? '').trim(),
-    secretKey: (secretKeyOverride ?? storeSecretKey ?? process.env.TBANK_VOICEKIT_SECRET_KEY ?? '').trim(),
+    apiKey: ((apiKeyOverride !== undefined ? apiKeyOverride : '') || envApiKey || storeApiKey).trim(),
+    secretKey: ((secretKeyOverride !== undefined ? secretKeyOverride : '') || envSecretKey || storeSecretKey).trim(),
   };
 }
 

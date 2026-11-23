@@ -165,20 +165,21 @@ export function getGigaAmConfig(
 
   const rawUrl = apiUrlOverride !== undefined
     ? apiUrlOverride
-    : (storeUrl || process.env.GIGAAM_API_URL || '');
+    : ((process.env.GIGAAM_API_URL || '').trim() || storeUrl);
   const apiKey = (
     apiKeyOverride !== undefined
       ? apiKeyOverride
-      : (storeKey || process.env.GIGAAM_API_KEY || '')
+      : ((process.env.GIGAAM_API_KEY || '').trim() || storeKey)
   ).trim();
 
-  const rawVariant = variantOverride || storeVariant || process.env.GIGAAM_MODEL_VARIANT;
+  const envVariant = (process.env.GIGAAM_MODEL_VARIANT || '').trim();
+  const rawVariant = variantOverride || envVariant || storeVariant;
   let variant = normalizeGigaamVariant(rawVariant);
   const apiUrl = normalizeGigaAmEndpointUrl(rawUrl, variant);
   const isCloudRu = isCloudRuEvolutionEndpoint(apiUrl, variant);
 
   // Если URL указывает на Cloud.ru Evolution, а вариант остался дефолтным (e2e_rnnt), используем GigaChat/GigaASR
-  if (apiUrl.toLowerCase().includes('cloud.ru') && !variantOverride && !storeVariant && variant === 'e2e_rnnt') {
+  if (apiUrl.toLowerCase().includes('cloud.ru') && !variantOverride && !storeVariant && !envVariant && variant === 'e2e_rnnt') {
     variant = 'GigaChat/GigaASR';
   }
 

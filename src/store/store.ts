@@ -11,6 +11,7 @@ import { CallRecord, LogEntry, SystemConfig, AccessLogEntry, User, SystemNotific
 import { getInitialUsers } from './user-store.js';
 import { readConsentStoreSync, setConsentStoreDirect } from './consent-store.js';
 import { deduplicateCalls } from '../services/callUtils.js';
+import { hydrateStoreFromServerEnv, getEnvValue } from '../services/serverEnv.js';
 
 const DATA_PATH_ENC = process.env.DATA_PATH_ENC || path.join(process.cwd(), 'data', 'data-store.enc');
 const DATA_PATH_JSON = process.env.DATA_PATH || path.join(process.cwd(), 'data', 'data-store.json');
@@ -27,25 +28,32 @@ export interface AppDatabase {
 }
 
 export function getDefaultConfig(): SystemConfig {
-  const megafonToken = (process.env.MEGAFON_TOKEN || '').trim();
+  const megafonToken = getEnvValue('MEGAFON_TOKEN');
   const megafonApiVersion = ((process.env.MEGAFON_API_VERSION as any) === 'rest_wcgp' ? 'rest_wcgp' : 'json_rpc');
-  const megafonRestDomain = (process.env.MEGAFON_REST_DOMAIN || '').trim();
-  const megafonRestToken = (process.env.MEGAFON_REST_TOKEN || '').trim();
-  const megafonCrmToken = (process.env.MEGAFON_CRM_TOKEN || '').trim();
-  const vkToken = (process.env.VK_TOKEN || '').trim();
-  const vkChatId = (process.env.VK_CHAT_ID || '').trim();
-  const yclientsUserToken = (process.env.YCLIENTS_USER_TOKEN || '').trim();
-  const yclientsPartnerToken = (process.env.YCLIENTS_PARTNER_TOKEN || '').trim();
-  const yclientsSalonId = (process.env.YCLIENTS_SALON_ID || '').trim();
+  const megafonRestDomain = getEnvValue('MEGAFON_REST_DOMAIN');
+  const megafonRestToken = getEnvValue('MEGAFON_REST_TOKEN');
+  const megafonCrmToken = getEnvValue('MEGAFON_CRM_TOKEN');
+  const megafonLkLogin = getEnvValue('MEGAFON_LK_LOGIN');
+  const megafonLkPassword = getEnvValue('MEGAFON_LK_PASSWORD');
+  const vkToken = getEnvValue('VK_TOKEN');
+  const vkChatId = getEnvValue('VK_CHAT_ID');
+  const yclientsUserToken = getEnvValue('YCLIENTS_USER_TOKEN');
+  const yclientsPartnerToken = getEnvValue('YCLIENTS_PARTNER_TOKEN');
+  const yclientsSalonId = getEnvValue('YCLIENTS_SALON_ID');
+  const gigachatAuthKey = getEnvValue('GIGACHAT_AUTH_KEY', 'GIGACHAT_CREDENTIALS');
+  const gigachatModel = (getEnvValue('GIGACHAT_MODEL', 'GIGACHAT_DEFAULT_MODEL') || 'GigaChat:Lite') as any;
+  const gigachatScope = (getEnvValue('GIGACHAT_SCOPE') || 'GIGACHAT_API_PERS') as 'GIGACHAT_API_PERS' | 'GIGACHAT_API_B2B' | 'GIGACHAT_API_CORP';
+  const sttProvider =
+    process.env.STT_PROVIDER === 'tbank_voicekit' || process.env.STT_PROVIDER === 'gigaam_v3'
+      ? process.env.STT_PROVIDER
+      : 'yandex_speechkit';
+  const salonName = (process.env.SALON_NAME || 'Fashion Look Studio').trim();
 
   return {
-    activeModel: (process.env.GIGACHAT_MODEL as any) || 'GigaChat:Lite',
-    default_gigachat_model: (process.env.GIGACHAT_MODEL as any) || 'GigaChat:Lite',
-    transcriptionModel:
-      process.env.STT_PROVIDER === 'tbank_voicekit' || process.env.STT_PROVIDER === 'gigaam_v3'
-        ? process.env.STT_PROVIDER
-        : 'yandex_speechkit',
-    salonName: (process.env.SALON_NAME || 'Лик 28').trim(),
+    activeModel: gigachatModel,
+    default_gigachat_model: gigachatModel,
+    transcriptionModel: sttProvider,
+    salonName,
     megafon: {
       apiVersion: megafonApiVersion,
       token: megafonToken,
@@ -58,6 +66,8 @@ export function getDefaultConfig(): SystemConfig {
       restDomain: megafonRestDomain,
       restToken: megafonRestToken,
       crmToken: megafonCrmToken,
+      lkLogin: megafonLkLogin,
+      lkPassword: megafonLkPassword,
       restPollingPeriod: 'today',
     },
     vk: {
@@ -73,45 +83,54 @@ export function getDefaultConfig(): SystemConfig {
       enabled: Boolean(yclientsUserToken && yclientsSalonId),
     },
     credentials: {
-      ...(((process.env.GIGACHAT_AUTH_KEY || process.env.GIGACHAT_CREDENTIALS || '').trim())
-        ? { gigachatAuthKey: (process.env.GIGACHAT_AUTH_KEY || process.env.GIGACHAT_CREDENTIALS || '').trim() }
-        : {}),
-      gigachatScope: ((process.env.GIGACHAT_SCOPE || 'GIGACHAT_API_PERS').trim() as 'GIGACHAT_API_PERS' | 'GIGACHAT_API_B2B' | 'GIGACHAT_API_CORP'),
+      salonName,
+      transcriptionModel: sttProvider,
+      ...(gigachatAuthKey ? { gigachatAuthKey } : {}),
+      gigachatScope,
+      gigachatModel,
+      ...(getEnvValue('YC_API_KEY') ? { yandexApiKey: getEnvValue('YC_API_KEY') } : {}),
+      ...(getEnvValue('YC_FOLDER_ID') ? { yandexFolderId: getEnvValue('YC_FOLDER_ID') } : {}),
+      ...(getEnvValue('YC_SERVICE_ACCOUNT_ID') ? { yandexServiceAccountId: getEnvValue('YC_SERVICE_ACCOUNT_ID') } : {}),
+      ...(getEnvValue('YC_SERVICE_ACCOUNT_KEY_FILE') ? { yandexServiceAccountKeyFile: getEnvValue('YC_SERVICE_ACCOUNT_KEY_FILE') } : {}),
+      ...(getEnvValue('YC_SERVICE_ACCOUNT_KEY_JSON') ? { yandexServiceAccountKeyJson: getEnvValue('YC_SERVICE_ACCOUNT_KEY_JSON') } : {}),
+      ...(getEnvValue('TBANK_VOICEKIT_API_KEY') ? { tbankApiKey: getEnvValue('TBANK_VOICEKIT_API_KEY') } : {}),
+      ...(getEnvValue('TBANK_VOICEKIT_SECRET_KEY') ? { tbankSecretKey: getEnvValue('TBANK_VOICEKIT_SECRET_KEY') } : {}),
+      ...(getEnvValue('GIGAAM_API_URL') ? { gigaamApiUrl: getEnvValue('GIGAAM_API_URL') } : {}),
+      ...(getEnvValue('GIGAAM_API_KEY') ? { gigaamApiKey: getEnvValue('GIGAAM_API_KEY') } : {}),
+      ...(getEnvValue('GIGAAM_MODEL_VARIANT') ? { gigaamVariant: getEnvValue('GIGAAM_MODEL_VARIANT') as any } : {}),
+      ...(getEnvValue('STORE_ENCRYPTION_KEY') ? { storeEncryptionKey: getEnvValue('STORE_ENCRYPTION_KEY') } : {}),
+      ...(getEnvValue('YC_STORAGE_BUCKET') ? { yandexStorageBucket: getEnvValue('YC_STORAGE_BUCKET') } : {}),
+      ...(getEnvValue('YC_STORAGE_ACCESS_KEY', 'YC_S3_KEY_ID') ? { yandexStorageAccessKey: getEnvValue('YC_STORAGE_ACCESS_KEY', 'YC_S3_KEY_ID') } : {}),
+      ...(getEnvValue('YC_STORAGE_SECRET_KEY', 'YC_S3_SECRET_KEY') ? { yandexStorageSecretKey: getEnvValue('YC_STORAGE_SECRET_KEY', 'YC_S3_SECRET_KEY') } : {}),
+      ...(getEnvValue('YC_STORAGE_ENDPOINT') ? { yandexStorageEndpoint: getEnvValue('YC_STORAGE_ENDPOINT') } : {}),
+      ...(getEnvValue('YC_STORAGE_REGION') ? { yandexStorageRegion: getEnvValue('YC_STORAGE_REGION') } : {}),
+      ...(getEnvValue('S3_ENDPOINT') ? { s3Endpoint: getEnvValue('S3_ENDPOINT') } : {}),
+      ...(getEnvValue('S3_ACCESS_KEY') ? { s3AccessKey: getEnvValue('S3_ACCESS_KEY') } : {}),
+      ...(getEnvValue('S3_SECRET_KEY') ? { s3SecretKey: getEnvValue('S3_SECRET_KEY') } : {}),
+      ...(getEnvValue('S3_BUCKET_NAME') ? { s3BucketName: getEnvValue('S3_BUCKET_NAME') } : {}),
+      ...(getEnvValue('S3_KEY_PREFIX') ? { s3KeyPrefix: getEnvValue('S3_KEY_PREFIX') } : {}),
+      ...(getEnvValue('S3_REGION') ? { s3Region: getEnvValue('S3_REGION') } : {}),
+      megafonApiVersion,
+      ...(megafonToken ? { megafonToken } : {}),
+      ...(megafonRestDomain ? { megafonRestDomain } : {}),
+      ...(megafonRestToken ? { megafonRestToken } : {}),
+      ...(megafonCrmToken ? { megafonCrmToken } : {}),
+      ...(megafonLkLogin ? { megafonLkLogin } : {}),
+      ...(megafonLkPassword ? { megafonLkPassword } : {}),
+      ...(vkToken ? { vkToken } : {}),
+      ...(vkChatId ? { vkChatId } : {}),
+      ...(yclientsUserToken ? { yclientsUserToken } : {}),
+      ...(yclientsPartnerToken ? { yclientsPartnerToken } : {}),
+      ...(yclientsSalonId ? { yclientsSalonId } : {}),
     },
   };
 }
 
-function hydrateGigaChatCredentials(db: AppDatabase): void {
+function hydrateAllServerSecrets(db: AppDatabase): void {
   if (!db.config) {
     db.config = getDefaultConfig();
   }
-  if (!db.config.credentials) {
-    db.config.credentials = {};
-  }
-
-  const envKey = (process.env.GIGACHAT_AUTH_KEY || process.env.GIGACHAT_CREDENTIALS || '').trim();
-  const validEnvKey = envKey && envKey !== '<ключ-авторизации-GigaChat>' ? envKey : '';
-  const storeKey = (db.config.credentials.gigachatAuthKey || '').trim();
-  const validStoreKey = storeKey && storeKey !== '<ключ-авторизации-GigaChat>' ? storeKey : '';
-
-  if (validStoreKey) {
-    db.config.credentials.gigachatAuthKey = validStoreKey;
-    if (!validEnvKey) {
-      process.env.GIGACHAT_AUTH_KEY = validStoreKey;
-    }
-  } else if (validEnvKey) {
-    db.config.credentials.gigachatAuthKey = validEnvKey;
-  }
-
-  const storeScope = (db.config.credentials.gigachatScope || '').trim();
-  const envScope = (process.env.GIGACHAT_SCOPE || '').trim();
-  if (storeScope) {
-    if (!envScope) {
-      process.env.GIGACHAT_SCOPE = storeScope;
-    }
-  } else if (envScope) {
-    db.config.credentials.gigachatScope = envScope as 'GIGACHAT_API_PERS' | 'GIGACHAT_API_B2B' | 'GIGACHAT_API_CORP';
-  }
+  hydrateStoreFromServerEnv(db);
 }
 
 export const DEFAULT_CONFIG: SystemConfig = getDefaultConfig();
@@ -255,7 +274,7 @@ export function readStoreSync(): AppDatabase {
             }
           }
         }
-        hydrateGigaChatCredentials(parsed);
+        hydrateAllServerSecrets(parsed);
         memCache = parsed;
         return memCache;
       } else if (payload && Array.isArray(payload.calls)) {
@@ -276,7 +295,7 @@ export function readStoreSync(): AppDatabase {
             }
           }
         }
-        hydrateGigaChatCredentials(payload);
+        hydrateAllServerSecrets(payload);
         memCache = payload;
         return memCache;
       }
@@ -316,7 +335,7 @@ export function readStoreSync(): AppDatabase {
             }
           }
         }
-        hydrateGigaChatCredentials(parsed);
+        hydrateAllServerSecrets(parsed);
         memCache = parsed;
         return memCache;
       }
@@ -338,7 +357,7 @@ export function readStoreSync(): AppDatabase {
         if (!Array.isArray(parsed.notifications)) {
           parsed.notifications = [];
         }
-        hydrateGigaChatCredentials(parsed);
+        hydrateAllServerSecrets(parsed);
         memCache = parsed;
         return memCache;
       }
@@ -360,8 +379,9 @@ export function readStoreSync(): AppDatabase {
     ],
     access_log: [],
     users: getInitialUsers(),
-    config: DEFAULT_CONFIG,
+    config: getDefaultConfig(),
   };
+  hydrateAllServerSecrets(memCache);
 
   return memCache;
 }
@@ -394,7 +414,7 @@ export async function readStore(): Promise<AppDatabase> {
           parsed.config.megafon.token = process.env.MEGAFON_TOKEN.trim();
           parsed.config.megafon.active = true;
         }
-        hydrateGigaChatCredentials(parsed);
+        hydrateAllServerSecrets(parsed);
         memCache = parsed;
         return memCache;
       } else if (payload && Array.isArray(payload.calls)) {
@@ -402,7 +422,7 @@ export async function readStore(): Promise<AppDatabase> {
         if (!payload.users || payload.users.length === 0) {
           payload.users = getInitialUsers();
         }
-        hydrateGigaChatCredentials(payload);
+        hydrateAllServerSecrets(payload);
         memCache = payload;
         return memCache;
       }
@@ -422,7 +442,7 @@ export async function readStore(): Promise<AppDatabase> {
         if (Array.isArray(parsed.calls)) {
           parsed.calls = deduplicateCalls(parsed.calls);
         }
-        hydrateGigaChatCredentials(parsed);
+        hydrateAllServerSecrets(parsed);
         memCache = parsed;
         return memCache;
       }
@@ -443,7 +463,7 @@ export async function readStore(): Promise<AppDatabase> {
           parsed.users = getInitialUsers();
         }
         console.log(`[Store] Миграция открытого ${legacyPath} в зашифрованный data-store.enc (152-ФЗ)...`);
-        hydrateGigaChatCredentials(parsed);
+        hydrateAllServerSecrets(parsed);
         memCache = parsed;
         await writeStore(memCache);
         return memCache;
@@ -467,8 +487,9 @@ export async function readStore(): Promise<AppDatabase> {
     ],
     access_log: [],
     users: getInitialUsers(),
-    config: DEFAULT_CONFIG,
+    config: getDefaultConfig(),
   };
+  hydrateAllServerSecrets(memCache);
 
   await writeStore(memCache);
   return memCache;

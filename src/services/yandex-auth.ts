@@ -322,23 +322,27 @@ export async function getIamToken(): Promise<string> {
 }
 
 export function getYandexApiKey(): string | null {
+  const envKey = (process.env.YC_API_KEY || '').trim();
+  if (envKey) return envKey;
   try {
     const store = readStoreSync();
     if (store.config?.credentials?.yandexApiKey) {
-      return store.config.credentials.yandexApiKey;
+      return store.config.credentials.yandexApiKey.trim();
     }
   } catch (e) {}
-  return process.env.YC_API_KEY || null;
+  return null;
 }
 
 export function getYandexFolderId(): string | null {
+  const envFolder = (process.env.YC_FOLDER_ID || '').trim();
+  if (envFolder) return envFolder;
   try {
     const store = readStoreSync();
     if (store.config?.credentials?.yandexFolderId) {
-      return store.config.credentials.yandexFolderId;
+      return store.config.credentials.yandexFolderId.trim();
     }
   } catch (e) {}
-  return process.env.YC_FOLDER_ID || null;
+  return null;
 }
 
 export async function getYandexAuthHeader(): Promise<string> {

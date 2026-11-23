@@ -8,6 +8,7 @@ import crypto from 'crypto';
 import { UserRole, AccessLogEntry, User, AuthSession } from '../types.js';
 import { readStore, writeStore } from '../store/store.js';
 import { hashPassword, verifyPassword } from '../store/user-store.js';
+import { persistServerEnvVars } from '../services/serverEnv.js';
 
 // In-memory active sessions store: token -> AuthSession
 const sessionCache = new Map<string, AuthSession>();
@@ -329,22 +330,26 @@ authRouter.post('/change-password', async (req: Request, res: Response) => {
       return res.status(404).json({ error: `Пользователь "${targetUsername}" не найден` });
     }
 
-    // Проверяем текущий пароль пользователя
-    const isCurrentValid = verifyPassword(String(currentPassword), user.passwordHash, user.salt) ||
-      (user.role === 'admin' && String(currentPassword) === 'admin123') ||
-      (user.role === 'manager' && String(currentPassword) === 'manager123') ||
-      (user.role === 'operator' && String(currentPassword) === 'operator123') ||
-      (user.role === 'viewer' && String(currentPassword) === 'viewer123');
+    // Проверяем текущий пароль пользователя строго по PBKDF2-хэшу
+    const isCurrentValid = verifyPassword(String(currentPassword), user.passwordHash, user.salt);
 
     if (!isCurrentValid) {
       return res.status(401).json({ error: 'Неверный текущий пароль' });
     }
 
     // Хэшируем и сохраняем новый пароль
-    const hashed = hashPassword(String(newPassword).trim());
+    const nextPassword = String(newPassword).trim();
+    const hashed = hashPassword(nextPassword);
     user.passwordHash = hashed.hash;
     user.salt = hashed.salt;
     user.updatedAt = new Date().toISOString();
+
+    if (user.role === 'admin' && user.username === 'admin') {
+      if (!store.config.credentials) store.config.credentials = {};
+      store.config.credentials.adminPasswordHash = hashed.hash;
+      store.config.credentials.adminPasswordSalt = hashed.salt;
+      persistServerEnvVars({ ADMIN_PASSWORD: nextPassword });
+    }
 
     await writeStore(store);
 
