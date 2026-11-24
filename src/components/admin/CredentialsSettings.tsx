@@ -174,11 +174,14 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
   const [testingVk, setTestingVk] = useState(false);
   const [vkTestResult, setVkTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
-  // YClients
-  const [yclientsUserToken, setYclientsUserToken] = useState('');
+  // YClients (строго чтение списка мастеров: логин, пароль + YCLIENTS_PARTNER_TOKEN)
+  const [yclientsLogin, setYclientsLogin] = useState('');
+  const [yclientsPassword, setYclientsPassword] = useState('');
   const [yclientsPartnerToken, setYclientsPartnerToken] = useState('');
   const [yclientsSalonId, setYclientsSalonId] = useState('');
   const [yclientsEnabled, setYclientsEnabled] = useState(true);
+  const [testingYclients, setTestingYclients] = useState(false);
+  const [yclientsTestResult, setYclientsTestResult] = useState<{ ok: boolean; msg: string; masters?: string[] } | null>(null);
 
   // TTL
   const [ttlAudioDays, setTtlAudioDays] = useState(14);
@@ -267,7 +270,8 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
       setVkTemplate(data.vkTemplate || '');
       setVkEnabled(!!data.vkEnabled);
 
-      setYclientsUserToken(data.yclientsUserToken || '');
+      setYclientsLogin(data.yclientsLogin || '');
+      setYclientsPassword(data.yclientsPassword || '');
       setYclientsPartnerToken(data.yclientsPartnerToken || '');
       setYclientsSalonId(data.yclientsSalonId || '');
       setYclientsEnabled(!!data.yclientsEnabled);
@@ -353,7 +357,8 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
         vkChatId,
         vkTemplate,
         vkEnabled,
-        yclientsUserToken,
+        yclientsLogin,
+        yclientsPassword,
         yclientsPartnerToken,
         yclientsSalonId,
         yclientsEnabled,
@@ -793,6 +798,40 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
       setVkTestResult({ ok: false, msg: err.message });
     } finally {
       setTestingVk(false);
+    }
+  };
+
+  const handleTestYclients = async () => {
+    setTestingYclients(true);
+    setYclientsTestResult(null);
+    try {
+      const res = await fetch('/api/admin/test/yclients', {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({
+          login: yclientsLogin,
+          password: yclientsPassword,
+          partnerToken: yclientsPartnerToken,
+          salonId: yclientsSalonId,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        const masterNames = Array.isArray(data.masters)
+          ? data.masters.map((m: any) => m?.name).filter(Boolean)
+          : [];
+        setYclientsTestResult({
+          ok: true,
+          msg: data.message || `Получено мастеров: ${masterNames.length}`,
+          masters: masterNames,
+        });
+      } else {
+        setYclientsTestResult({ ok: false, msg: data.error || 'Ошибка чтения мастеров из YClients' });
+      }
+    } catch (err: any) {
+      setYclientsTestResult({ ok: false, msg: err.message });
+    } finally {
+      setTestingYclients(false);
     }
   };
 
@@ -2814,15 +2853,28 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
                 <Calendar className="w-5 h-5" />
               </div>
               <div>
-                <h4 className="font-bold text-slate-900 text-xs">YClients & Политика очистки 152-ФЗ</h4>
-                <p className="text-[11px] text-slate-500">Автоматическое удаление записей по истечении TTL</p>
+                <h4 className="font-bold text-slate-900 text-xs">YClients (чтение мастеров) & Политика очистки 152-ФЗ</h4>
+                <p className="text-[11px] text-slate-500">Только чтение списка мастеров салона — запись в YClients не производится</p>
               </div>
             </div>
+            <label className="flex items-center gap-1.5 text-[11px] font-medium text-slate-600 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={yclientsEnabled}
+                onChange={(e) => setYclientsEnabled(e.target.checked)}
+                className="w-3.5 h-3.5 rounded text-indigo-600"
+              />
+              Активно
+            </label>
+          </div>
+
+          <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl px-3 py-2 text-[11px] text-amber-900">
+            <strong>Режим только чтения:</strong> приложение аутентифицируется по логину и паролю (+ <code className="font-mono">YCLIENTS_PARTNER_TOKEN</code>) и читает только список мастеров (<code className="font-mono">GET /staff/&#123;salonId&#125;</code>). Запись и изменение данных в YClients полностью отключены.
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">ID салона «{salonName || 'Fashion Look Studio'}» (YClients)</label>
+              <label className="block text-xs font-bold text-slate-700 mb-1">ID салона «{salonName || 'Fashion Look Studio'}» (YCLIENTS_SALON_ID)</label>
               <input
                 type="text"
                 value={yclientsSalonId}
@@ -2832,15 +2884,57 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
               />
             </div>
             <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Токен пользователя YClients</label>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Логин YClients (YCLIENTS_LOGIN)</label>
               <input
-                type={showKeys ? 'text' : 'password'}
-                value={yclientsUserToken}
-                onChange={(e) => setYclientsUserToken(e.target.value)}
-                placeholder="User Token"
+                type="text"
+                value={yclientsLogin}
+                onChange={(e) => setYclientsLogin(e.target.value)}
+                placeholder="телефон или email"
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono"
               />
             </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Пароль YClients (YCLIENTS_PASSWORD)</label>
+              <input
+                type={showKeys ? 'text' : 'password'}
+                value={yclientsPassword}
+                onChange={(e) => setYclientsPassword(e.target.value)}
+                placeholder="Пароль учетной записи YClients"
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Partner Token (YCLIENTS_PARTNER_TOKEN)</label>
+              <input
+                type={showKeys ? 'text' : 'password'}
+                value={yclientsPartnerToken}
+                onChange={(e) => setYclientsPartnerToken(e.target.value)}
+                placeholder="Партнерский токен YClients API"
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={handleTestYclients}
+              disabled={testingYclients}
+              className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5"
+            >
+              <Calendar className="w-3.5 h-3.5 text-indigo-600" />
+              {testingYclients ? 'Чтение мастеров...' : 'Проверить чтение мастеров'}
+            </button>
+            {yclientsTestResult && (
+              <span className={`text-[11px] font-medium ${yclientsTestResult.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
+                {yclientsTestResult.msg}
+                {yclientsTestResult.ok && yclientsTestResult.masters && yclientsTestResult.masters.length > 0 && (
+                  <span className="text-slate-600 font-normal">
+                    {' '}({yclientsTestResult.masters.slice(0, 8).join(', ')}{yclientsTestResult.masters.length > 8 ? '…' : ''})
+                  </span>
+                )}
+              </span>
+            )}
           </div>
 
           <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-2">

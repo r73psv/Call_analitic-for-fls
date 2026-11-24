@@ -19,6 +19,7 @@
 import axios from 'axios';
 import { readStoreSync } from '../store/store.js';
 import { getGigaChatToken, isGigaChatConfigured, invalidateGigaChatTokenCache } from './gigachat-auth.js';
+import { fetchYclientsMasters } from './yclients.js';
 import { GigaChatModel, AnalysisResult, CallRecord, NextStepItem, KeyFacts, TokenUsage, ContextClarification, StructuredCallSummary, CallEvaluationCriterion, CallEvaluation } from '../types.js';
 import {
   VERIFIER_PROMPT,
@@ -57,9 +58,14 @@ export const FALLBACK_SALON_MASTERS = [
 let crmMastersCache: { list: string[]; fetchedAt: number } | null = null;
 const CRM_MASTERS_CACHE_TTL_MS = 10 * 60 * 1000;
 
+export function clearCrmMastersCache(): void {
+  crmMastersCache = null;
+}
+
 /**
- * Динамически подтягивает актуальный список мастеров из YClients CRM (с 10-минутным кэшем
- * и резервным списком известных мастеров салона).
+ * Динамически подтягивает актуальный список мастеров из YClients CRM
+ * в режиме «только чтение» (аутентификация по логину и паролю + YCLIENTS_PARTNER_TOKEN,
+ * с 10-минутным кэшем и резервным списком известных мастеров салона).
  */
 export async function getCrmMastersList(): Promise<string[]> {
   if (crmMastersCache && Date.now() - crmMastersCache.fetchedAt < CRM_MASTERS_CACHE_TTL_MS) {
@@ -69,41 +75,10 @@ export async function getCrmMastersList(): Promise<string[]> {
   const merged = new Set<string>(FALLBACK_SALON_MASTERS);
 
   try {
-    const store = readStoreSync();
-    const yclients = store?.config?.yclients;
-    const userToken = (yclients?.userToken || process.env.YCLIENTS_USER_TOKEN || '').trim();
-    const partnerToken = (yclients?.partnerToken || process.env.YCLIENTS_PARTNER_TOKEN || '').trim();
-    const salonId = (yclients?.salonId || process.env.YCLIENTS_SALON_ID || '').trim();
-
-    if (
-      userToken &&
-      salonId &&
-      !userToken.includes('example') &&
-      !partnerToken.includes('example')
-    ) {
-      const authHeader = partnerToken
-        ? `Bearer ${partnerToken}, User ${userToken}`
-        : `Bearer ${userToken}`;
-      const res = await fetch(`https://api.yclients.com/api/v1/staff/${encodeURIComponent(salonId)}`, {
-        method: 'GET',
-        headers: {
-          Accept: 'application/vnd.yclients.v2+json',
-          Authorization: authHeader,
-        },
-        signal: AbortSignal.timeout(10000),
-      });
-
-      if (res.ok) {
-        const json: any = await res.json();
-        const staffList: any[] = Array.isArray(json?.data) ? json.data : [];
-        for (const member of staffList) {
-          if (member && member.fired !== 1 && member.hidden !== 1 && typeof member.name === 'string') {
-            const cleanName = member.name.trim();
-            if (cleanName.length >= 2) {
-              merged.add(cleanName);
-            }
-          }
-        }
+    const masters = await fetchYclientsMasters();
+    for (const member of masters) {
+      if (member?.name && member.name.trim().length >= 2) {
+        merged.add(member.name.trim());
       }
     }
   } catch (err: any) {

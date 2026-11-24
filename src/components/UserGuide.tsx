@@ -531,10 +531,10 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
 
               <div className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-1.5 shadow-3xs">
                 <span className="font-bold text-slate-900 flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500" /> Yclients CRM
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500" /> Yclients CRM (только чтение мастеров)
                 </span>
                 <p className="text-slate-600 leading-relaxed">
-                  Синхронизация карточек клиентов, проверка существующих записей в расписании салона красоты и отправка ссылки на аудиозапись звонка в карточку визита.
+                  Доступ ограничен режимом «только чтение»: аутентификация по логину и паролю (+ <code className="font-mono">YCLIENTS_PARTNER_TOKEN</code>) используется исключительно для получения актуального списка мастеров салона. Запись и изменение данных в Yclients не производятся.
                 </p>
               </div>
 

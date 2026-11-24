@@ -96,6 +96,8 @@ export interface SystemCredentials {
   megafonLkPassword?: string;
   vkToken?: string;
   vkChatId?: string;
+  yclientsLogin?: string;
+  yclientsPassword?: string;
   yclientsUserToken?: string;
   yclientsPartnerToken?: string;
   yclientsSalonId?: string;
@@ -367,10 +369,13 @@ export interface VkConfig {
 }
 
 export interface YclientsConfig {
-  userToken: string;
+  login?: string;
+  password?: string;
+  userToken?: string;
   partnerToken: string;
   salonId: string;
   enabled: boolean;
+  readOnly?: boolean;
 }
 
 export interface AutoCleanupSettings {

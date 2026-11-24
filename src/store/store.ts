@@ -37,6 +37,8 @@ export function getDefaultConfig(): SystemConfig {
   const megafonLkPassword = getEnvValue('MEGAFON_LK_PASSWORD');
   const vkToken = getEnvValue('VK_TOKEN');
   const vkChatId = getEnvValue('VK_CHAT_ID');
+  const yclientsLogin = getEnvValue('YCLIENTS_LOGIN');
+  const yclientsPassword = getEnvValue('YCLIENTS_PASSWORD');
   const yclientsUserToken = getEnvValue('YCLIENTS_USER_TOKEN');
   const yclientsPartnerToken = getEnvValue('YCLIENTS_PARTNER_TOKEN');
   const yclientsSalonId = getEnvValue('YCLIENTS_SALON_ID');
@@ -77,10 +79,13 @@ export function getDefaultConfig(): SystemConfig {
       template: `🔔 *Анализ звонка #{call_id}*\n📅 *Дата:* {call_date_time}\n⏱️ *Длительность:* {duration}\n👤 *Клиент:* {client_name}\n📞 *Оценка оператора:* {operator_score}\n💬 *Резюме:* {summary}\n⚠️ *Конфликт:* {is_dispute_text}\n💡 *Рекомендации:* {recommendations}`,
     },
     yclients: {
+      login: yclientsLogin,
+      password: yclientsPassword,
       userToken: yclientsUserToken,
       partnerToken: yclientsPartnerToken,
       salonId: yclientsSalonId,
-      enabled: Boolean(yclientsUserToken && yclientsSalonId),
+      enabled: Boolean(yclientsLogin && yclientsPassword && yclientsSalonId),
+      readOnly: true,
     },
     credentials: {
       salonName,
@@ -119,6 +124,8 @@ export function getDefaultConfig(): SystemConfig {
       ...(megafonLkPassword ? { megafonLkPassword } : {}),
       ...(vkToken ? { vkToken } : {}),
       ...(vkChatId ? { vkChatId } : {}),
+      ...(yclientsLogin ? { yclientsLogin } : {}),
+      ...(yclientsPassword ? { yclientsPassword } : {}),
       ...(yclientsUserToken ? { yclientsUserToken } : {}),
       ...(yclientsPartnerToken ? { yclientsPartnerToken } : {}),
       ...(yclientsSalonId ? { yclientsSalonId } : {}),

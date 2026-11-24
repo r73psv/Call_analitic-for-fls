@@ -17,12 +17,13 @@ import { invalidateGigaChatTokenCache } from '../services/gigachat-auth.js';
 import { invalidateAuthorizedKeyCache, getAuthorizedKeyInfo, getIamToken, testYandexSpeechKit } from '../services/yandex-auth.js';
 import { setStoreEncryptionKey, isStoreEncryptionKeyConfigured } from '../store/crypto-store.js';
 import { scanTempFiles, cleanTempFiles, runCleanupNow } from '../store/cleanup.js';
-import { getDefaultSystemPrompt } from '../services/gigachat.js';
+import { getDefaultSystemPrompt, clearCrmMastersCache } from '../services/gigachat.js';
 import { archiveCallsToS3, getS3ArchiveStatus, listS3Archives } from '../services/s3-archive.js';
 import { testTbankVoiceKitConnection, isTbankVoiceKitConfigured } from '../services/tbank-voicekit.js';
 import { testGigaAmConnection, getGigaAmConfig, isGigaAmConfigured, normalizeGigaamVariant, normalizeGigaAmEndpointUrl } from '../services/gigaam-asr.js';
 import { resolveActiveSttProvider, normalizeSttProvider } from '../services/transcriptionService.js';
 import { persistServerEnvVars, getServerEnvStatus, getEnvValue } from '../services/serverEnv.js';
+import { clearYclientsCache, fetchYclientsMasters, testYclientsReadOnlyConnection } from '../services/yclients.js';
 import { SystemCredentials, GigaChatModel, AutoCleanupSettings, LogEntry } from '../types.js';
 
 export const adminRouter = Router();
@@ -129,11 +130,14 @@ adminRouter.get('/credentials', async (req: Request, res: Response) => {
       vkTemplate: store.config.vk.template || '',
       vkEnabled: !!store.config.vk.enabled,
 
-      // YClients
+      // YClients (строго чтение списка мастеров: логин, пароль + YCLIENTS_PARTNER_TOKEN)
+      yclientsLogin: getEnvValue('YCLIENTS_LOGIN') || creds.yclientsLogin || store.config.yclients.login || '',
+      yclientsPassword: getEnvValue('YCLIENTS_PASSWORD') || creds.yclientsPassword || store.config.yclients.password || '',
       yclientsUserToken: getEnvValue('YCLIENTS_USER_TOKEN') || creds.yclientsUserToken || store.config.yclients.userToken || '',
       yclientsPartnerToken: getEnvValue('YCLIENTS_PARTNER_TOKEN') || creds.yclientsPartnerToken || store.config.yclients.partnerToken || '',
       yclientsSalonId: getEnvValue('YCLIENTS_SALON_ID') || creds.yclientsSalonId || store.config.yclients.salonId || '',
       yclientsEnabled: !!store.config.yclients.enabled,
+      yclientsReadOnly: true,
 
       // 152-ФЗ TTL settings
       ttlSettings: store.config.ttlSettings || {
@@ -475,23 +479,47 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
     if (body.vkTemplate !== undefined) store.config.vk.template = String(body.vkTemplate);
     if (body.vkEnabled !== undefined) store.config.vk.enabled = Boolean(body.vkEnabled);
 
-    // 6. YClients
+    // 6. YClients (строго чтение списка мастеров: логин, пароль + YCLIENTS_PARTNER_TOKEN)
+    let yclientsUpdated = false;
+    if (body.yclientsLogin !== undefined) {
+      creds.yclientsLogin = String(body.yclientsLogin).trim();
+      store.config.yclients.login = creds.yclientsLogin;
+      envUpdates.YCLIENTS_LOGIN = creds.yclientsLogin;
+      yclientsUpdated = true;
+    }
+    if (body.yclientsPassword !== undefined) {
+      creds.yclientsPassword = String(body.yclientsPassword).trim();
+      store.config.yclients.password = creds.yclientsPassword;
+      envUpdates.YCLIENTS_PASSWORD = creds.yclientsPassword;
+      yclientsUpdated = true;
+    }
     if (body.yclientsUserToken !== undefined) {
       creds.yclientsUserToken = String(body.yclientsUserToken).trim();
       store.config.yclients.userToken = creds.yclientsUserToken;
       envUpdates.YCLIENTS_USER_TOKEN = creds.yclientsUserToken;
+      yclientsUpdated = true;
     }
     if (body.yclientsPartnerToken !== undefined) {
       creds.yclientsPartnerToken = String(body.yclientsPartnerToken).trim();
       store.config.yclients.partnerToken = creds.yclientsPartnerToken;
       envUpdates.YCLIENTS_PARTNER_TOKEN = creds.yclientsPartnerToken;
+      yclientsUpdated = true;
     }
     if (body.yclientsSalonId !== undefined) {
       creds.yclientsSalonId = String(body.yclientsSalonId).trim();
       store.config.yclients.salonId = creds.yclientsSalonId;
       envUpdates.YCLIENTS_SALON_ID = creds.yclientsSalonId;
+      yclientsUpdated = true;
     }
-    if (body.yclientsEnabled !== undefined) store.config.yclients.enabled = Boolean(body.yclientsEnabled);
+    if (body.yclientsEnabled !== undefined) {
+      store.config.yclients.enabled = Boolean(body.yclientsEnabled);
+      yclientsUpdated = true;
+    }
+    store.config.yclients.readOnly = true;
+    if (yclientsUpdated) {
+      clearYclientsCache();
+      clearCrmMastersCache();
+    }
 
     // 7. TTL Settings
     if (body.ttlSettings) {
@@ -844,6 +872,61 @@ adminRouter.post('/test/vk', async (req: Request, res: Response) => {
     res.json({ success: true, message: 'Тестовое уведомление успешно отправлено в ВКонтакте' });
   } catch (err: any) {
     res.status(400).json({ success: false, error: `Ошибка отправки в VK: ${err.message}` });
+  }
+});
+
+/**
+ * POST /api/admin/test/yclients
+ * Проверка подключения к YClients в режиме «только чтение» (логин + пароль + YCLIENTS_PARTNER_TOKEN)
+ * и получение актуального списка мастеров салона. Запись в YClients не производится.
+ */
+adminRouter.post('/test/yclients', async (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    const result = await testYclientsReadOnlyConnection({
+      login: typeof body.login === 'string' ? body.login : undefined,
+      password: typeof body.password === 'string' ? body.password : undefined,
+      partnerToken: typeof body.partnerToken === 'string' ? body.partnerToken : undefined,
+      salonId: typeof body.salonId === 'string' ? body.salonId : undefined,
+    });
+
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({
+      success: false,
+      readOnly: true,
+      error: err?.message || 'Ошибка проверки чтения мастеров YClients',
+    });
+  }
+});
+
+/**
+ * GET /api/admin/yclients/masters
+ * Возвращает список активных мастеров салона из YClients (строго чтение).
+ */
+adminRouter.get('/yclients/masters', async (req: Request, res: Response) => {
+  try {
+    const bypassCache = req.query.refresh === 'true';
+    const masters = await fetchYclientsMasters({
+      bypassCache,
+      ignoreEnabledFlag: true,
+    });
+    res.json({
+      success: true,
+      readOnly: true,
+      count: masters.length,
+      masters,
+    });
+  } catch (err: any) {
+    res.status(400).json({
+      success: false,
+      readOnly: true,
+      error: err?.message || 'Не удалось загрузить список мастеров из YClients',
+    });
   }
 });
 

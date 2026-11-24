@@ -81,10 +81,12 @@ export const MANAGED_SERVER_ENV_KEYS = new Set<string>([
   'VK_TOKEN',
   'VK_CHAT_ID',
 
-  // YClients CRM
-  'YCLIENTS_USER_TOKEN',
+  // YClients CRM (строго чтение списка мастеров)
+  'YCLIENTS_LOGIN',
+  'YCLIENTS_PASSWORD',
   'YCLIENTS_PARTNER_TOKEN',
   'YCLIENTS_SALON_ID',
+  'YCLIENTS_USER_TOKEN',
 ]);
 
 /** Canonical alias pairs kept in sync when either side is loaded or updated. */
@@ -599,11 +601,15 @@ export function hydrateStoreFromServerEnv(
   }
   if (!db.config.yclients) {
     db.config.yclients = {
-      userToken: '',
+      login: '',
+      password: '',
       partnerToken: '',
       salonId: '',
       enabled: false,
+      readOnly: true,
     };
+  } else {
+    db.config.yclients.readOnly = true;
   }
 
   const creds = db.config.credentials;
@@ -820,7 +826,24 @@ export function hydrateStoreFromServerEnv(
     false
   );
 
-  // YClients
+  // YClients (только чтение мастеров: логин, пароль, Partner Token, ID салона)
+  syncField(
+    ['YCLIENTS_LOGIN'],
+    () => creds.yclientsLogin || db.config.yclients.login,
+    (v) => {
+      creds.yclientsLogin = v;
+      db.config.yclients.login = v;
+    },
+    false
+  );
+  syncField(
+    ['YCLIENTS_PASSWORD'],
+    () => creds.yclientsPassword || db.config.yclients.password,
+    (v) => {
+      creds.yclientsPassword = v;
+      db.config.yclients.password = v;
+    }
+  );
   syncField(
     ['YCLIENTS_USER_TOKEN'],
     () => creds.yclientsUserToken || db.config.yclients.userToken,
@@ -846,6 +869,7 @@ export function hydrateStoreFromServerEnv(
     },
     false
   );
+  db.config.yclients.readOnly = true;
 
   // Sync admin user password hash when ADMIN_PASSWORD is supplied from server environment
   const envAdminPwd = getEnvValue('ADMIN_PASSWORD', 'ADMIN_INITIAL_PASSWORD');

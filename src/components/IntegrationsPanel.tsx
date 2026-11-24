@@ -125,7 +125,8 @@ export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: 
   const [vkTemplate, setVkTemplate] = useState(config.vk?.template || '');
   
   const [ycEnabled, setYcEnabled] = useState(config.yclients?.enabled ?? true);
-  const [ycUserToken, setYcUserToken] = useState(config.yclients?.userToken || '');
+  const [ycLogin, setYcLogin] = useState(config.yclients?.login || '');
+  const [ycPassword, setYcPassword] = useState(config.yclients?.password || '');
   const [ycPartnerToken, setYcPartnerToken] = useState(config.yclients?.partnerToken || '');
   const [ycSalonId, setYcSalonId] = useState(config.yclients?.salonId || '');
 
@@ -154,7 +155,8 @@ export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: 
       setVkTemplate(config.vk?.template || '');
 
       setYcEnabled(config.yclients?.enabled ?? true);
-      setYcUserToken(config.yclients?.userToken || '');
+      setYcLogin(config.yclients?.login || '');
+      setYcPassword(config.yclients?.password || '');
       setYcPartnerToken(config.yclients?.partnerToken || '');
       setYcSalonId(config.yclients?.salonId || '');
     }
@@ -363,9 +365,11 @@ export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: 
         yclients: {
           ...config.yclients,
           enabled: ycEnabled,
-          userToken: ycUserToken,
+          login: ycLogin.trim(),
+          password: ycPassword,
           partnerToken: ycPartnerToken,
-          salonId: ycSalonId,
+          salonId: ycSalonId.trim(),
+          readOnly: true,
         },
       };
 
@@ -1125,12 +1129,15 @@ export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: 
             </div>
           </div>
 
-          {/* YClients */}
+          {/* YClients (строго чтение мастеров) */}
           <div className="pt-3 border-t border-slate-100">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2">
                 <Database className="w-5 h-5 text-amber-600" />
-                <h3 className="text-sm font-bold text-slate-800">Yclients (CRM салона)</h3>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-800">YClients (чтение мастеров)</h3>
+                  <p className="text-[11px] text-slate-500">Только чтение списка мастеров салона, без записи в CRM</p>
+                </div>
               </div>
               <input
                 type="checkbox"
@@ -1148,14 +1155,44 @@ export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: 
                   value={ycSalonId}
                   onChange={(e) => setYcSalonId(e.target.value)}
                   placeholder="987654"
-                  className="w-full p-2 border border-slate-200 rounded-lg text-xs"
+                  className="w-full p-2 border border-slate-200 rounded-lg text-xs font-mono"
                 />
               </div>
               <div>
-                <label className="block font-medium text-slate-600 mb-1">Статус 152-ФЗ:</label>
-                <div className="p-2 bg-slate-50 border border-slate-200 rounded-lg text-[11px] text-slate-600">
-                  Без транскрипта и персональных данных
+                <label className="block font-medium text-slate-600 mb-1">Режим доступа:</label>
+                <div className="p-2 bg-amber-50 border border-amber-200 rounded-lg text-[11px] text-amber-800 font-medium">
+                  Только чтение мастеров (запись отключена)
                 </div>
+              </div>
+              <div>
+                <label className="block font-medium text-slate-600 mb-1">Логин YClients:</label>
+                <input
+                  type="text"
+                  value={ycLogin}
+                  onChange={(e) => setYcLogin(e.target.value)}
+                  placeholder="телефон или email"
+                  className="w-full p-2 border border-slate-200 rounded-lg text-xs font-mono"
+                />
+              </div>
+              <div>
+                <label className="block font-medium text-slate-600 mb-1">Пароль YClients:</label>
+                <input
+                  type="password"
+                  value={ycPassword}
+                  onChange={(e) => setYcPassword(e.target.value)}
+                  placeholder="Пароль"
+                  className="w-full p-2 border border-slate-200 rounded-lg text-xs font-mono"
+                />
+              </div>
+              <div className="col-span-2">
+                <label className="block font-medium text-slate-600 mb-1">Partner Token (YCLIENTS_PARTNER_TOKEN):</label>
+                <input
+                  type="password"
+                  value={ycPartnerToken}
+                  onChange={(e) => setYcPartnerToken(e.target.value)}
+                  placeholder="Партнерский токен YClients API"
+                  className="w-full p-2 border border-slate-200 rounded-lg text-xs font-mono"
+                />
               </div>
             </div>
           </div>

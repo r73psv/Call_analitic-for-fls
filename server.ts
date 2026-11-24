@@ -17,7 +17,8 @@ import { transcribeWithRetry, fixDuplicatedTranscript, refineTranscriptRoles } f
 import { transcribeAudio, resolveActiveSttProvider, getSttProviderLabel, normalizeSttProvider } from './src/services/transcriptionService.js';
 import { isTbankVoiceKitConfigured } from './src/services/tbank-voicekit.js';
 import { getGigaAmConfig, isGigaAmConfigured } from './src/services/gigaam-asr.js';
-import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation, harmonizeMistakesAndEvaluation, filterOutdatedReminderMistakes, reconcileMistakesWithCriteria, generateLocalFallbackAnalysis } from './src/services/gigachat.js';
+import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation, harmonizeMistakesAndEvaluation, filterOutdatedReminderMistakes, reconcileMistakesWithCriteria, generateLocalFallbackAnalysis, clearCrmMastersCache } from './src/services/gigachat.js';
+import { clearYclientsCache } from './src/services/yclients.js';
 import { classifyCallContext } from './src/services/summaryUtils.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
 import { readStoreSync, writeStore, getDefaultConfig } from './src/store/store.js';
@@ -1406,68 +1407,8 @@ async function sendToVk(call: CallRecord, config: VkConfig, force: boolean = fal
   }
 }
 
-// Integration Sender - Yclients (REST API)
-async function sendToYclients(call: CallRecord, config: YclientsConfig) {
-  if (!config.enabled || !config.userToken) {
-    appendLog('warning', 'yclients', `Интеграция с Yclients: Отправка пропущена (интеграция отключена или токен отсутствует).`);
-    return false;
-  }
-
-  // Do NOT send to Yclients if call failed with a technical error or audio is not ready
-  const statusStr = String(call.status);
-  const isTechnicalError = isTechnicalErrorResult(call) || isTechnicalFailedCall(call);
-  const isFailedOrLoading = statusStr === 'failed' || 
-                            statusStr === 'error' || 
-                            isTechnicalError ||
-                            !call.transcript || 
-                            call.transcript === 'Загрузка аудиозаписи...' || 
-                            call.transcript.includes('Аудиозапись не была загружена') ||
-                            call.transcript.includes('Запись разговора и стенограмма отсутствуют') ||
-                            call.transcript.includes('не удавалось скачать') ||
-                            call.transcript.includes('не сформирована') ||
-                            call.transcript.includes('не состоялся по технической причине');
-
-  if (isFailedOrLoading) {
-    appendLog('info', 'yclients', `[Интеграция Yclients] Отправка звонка ${call.call_id} отложена: произошла ошибка или анализ завершился сбоем. Выгрузка в Yclients произойдет только после успешного повторного анализа.`);
-    return false;
-  }
-
-  const payload = {
-    call_id: call.call_id,
-    timestamp: call.timestamp,
-    client_name: call.client_name,
-    operator_score: call.operator_score,
-    is_dispute: call.key_facts.is_dispute,
-    summary: call.summary,
-    comment: `[ИИ-Анализ CallQA] Оценка: ${call.operator_score}/10. Резюме: ${call.summary}. Конфликт: ${call.key_facts.is_dispute ? 'Да' : 'Нет'}. Обещания: ${call.key_facts.promises.join(', ')}`
-  };
-
-  try {
-    appendLog('info', 'yclients', `Создание сервисной заметки/задачи для салона ${config.salonId} в Yclients по звонку ${call.call_id}...`);
-    
-    // Real REST API integration fetch call
-    const response = await fetch(`https://api.yclients.com/api/v1/comments/${config.salonId}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.userToken}, Partner ${config.partnerToken}`
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(15000)
-    });
-    
-    const result = await response.json();
-    appendLog('success', 'yclients', `Данные анализа успешно засинхронизированы с CRM Yclients!`);
-    return true;
-  } catch (error: any) {
-    if (config.userToken.includes('example')) {
-      appendLog('success', 'yclients', `[Симуляция Yclients] Запись привязана к карточке клиента в Yclients. Создана задача по обещаниям менеджера.`, `Payload:\n${JSON.stringify(payload, null, 2)}`);
-      return true;
-    }
-    appendLog('error', 'yclients', `Ошибка отправки в Yclients: ${error.message || error}`);
-    return false;
-  }
-}
+// YClients работает СТРОГО в режиме «только чтение» списка мастеров (см. src/services/yclients.ts).
+// Запись комментариев, задач или иных данных в YClients запрещена.
 
 // SIMULATED EXTERNAL MEGAFON ATS SERVER
 const getMockMegafonServerCalls = () => [
@@ -2622,9 +2563,6 @@ async function importCallRecord(extCall: any): Promise<boolean> {
           if (!isFailedCall && savedCall.status === 'completed') {
             if (updatedDb.config.vk.enabled) {
               await sendToVk(savedCall, updatedDb.config.vk);
-            }
-            if (updatedDb.config.yclients.enabled) {
-              await sendToYclients(savedCall, updatedDb.config.yclients);
             }
           } else {
             appendLog('info', 'megafon', `Звонок ${extCall.call_id}: аудиозапись не сформирована или произошла ошибка, отправка в ВК отложена до успешной повторной загрузки.`);
@@ -4858,13 +4796,10 @@ app.post('/api/calls/analyze', async (req, res) => {
       // Trigger real-time toast notification for managers & admins
       notifyCallAnalyzed(savedCall);
 
-      // Trigger automatic integrations ONLY on successful analysis
+      // Trigger automatic integrations ONLY on successful analysis (YClients is strictly read-only)
       if (!isFailed && savedCall.status === 'completed') {
         if (updatedDb.config.vk.enabled) {
           await sendToVk(savedCall, updatedDb.config.vk);
-        }
-        if (updatedDb.config.yclients.enabled) {
-          await sendToYclients(savedCall, updatedDb.config.yclients);
         }
       }
 
@@ -5168,12 +5103,9 @@ async function performCallReanalysis(
       notifyCallAnalyzed(savedCall);
 
       if (!isFailed && savedCall.status === 'completed') {
-        // Trigger automatic integrations only upon successful processing
+        // Trigger automatic integrations only upon successful processing (YClients is strictly read-only)
         if (finalDb.config.vk.enabled) {
           await sendToVk(savedCall, finalDb.config.vk);
-        }
-        if (finalDb.config.yclients.enabled) {
-          await sendToYclients(savedCall, finalDb.config.yclients);
         }
       }
 
@@ -5351,8 +5283,11 @@ app.get('/api/config', (req, res) => {
     },
     yclients: {
       ...db.config.yclients,
-      userToken: '••••••••',
-      partnerToken: '••••••••'
+      login: db.config.yclients?.login || '',
+      password: db.config.yclients?.password ? '••••••••' : '',
+      userToken: db.config.yclients?.userToken ? '••••••••' : '',
+      partnerToken: db.config.yclients?.partnerToken ? '••••••••' : '',
+      readOnly: true
     }
   };
 
@@ -5454,23 +5389,65 @@ app.post('/api/config', (req, res) => {
     }
   }
 
+  let yclientsChanged = false;
   if (body.yclients) {
+    if (body.yclients.login !== undefined) {
+      const yl = String(body.yclients.login).trim();
+      db.config.credentials.yclientsLogin = yl;
+      envUpdates.YCLIENTS_LOGIN = yl;
+      yclientsChanged = true;
+    }
+    if (body.yclients.password !== undefined && body.yclients.password !== '••••••••') {
+      const ypass = String(body.yclients.password).trim();
+      db.config.credentials.yclientsPassword = ypass;
+      envUpdates.YCLIENTS_PASSWORD = ypass;
+      yclientsChanged = true;
+    }
     if (body.yclients.userToken !== undefined && body.yclients.userToken !== '••••••••') {
       const yu = String(body.yclients.userToken).trim();
       db.config.credentials.yclientsUserToken = yu;
       envUpdates.YCLIENTS_USER_TOKEN = yu;
+      yclientsChanged = true;
     }
     if (body.yclients.partnerToken !== undefined && body.yclients.partnerToken !== '••••••••') {
       const yp = String(body.yclients.partnerToken).trim();
       db.config.credentials.yclientsPartnerToken = yp;
       envUpdates.YCLIENTS_PARTNER_TOKEN = yp;
+      yclientsChanged = true;
     }
     if (body.yclients.salonId !== undefined) {
       const ys = String(body.yclients.salonId).trim();
       db.config.credentials.yclientsSalonId = ys;
       envUpdates.YCLIENTS_SALON_ID = ys;
+      yclientsChanged = true;
     }
   }
+
+  const nextYclients = {
+    ...db.config.yclients,
+    ...(body.yclients || {}),
+    login:
+      body.yclients?.login !== undefined
+        ? String(body.yclients.login).trim()
+        : db.config.yclients?.login || '',
+    password:
+      body.yclients?.password !== undefined && body.yclients.password !== '••••••••'
+        ? String(body.yclients.password).trim()
+        : db.config.yclients?.password || '',
+    partnerToken:
+      body.yclients?.partnerToken !== undefined && body.yclients.partnerToken !== '••••••••'
+        ? String(body.yclients.partnerToken).trim()
+        : db.config.yclients?.partnerToken || '',
+    userToken:
+      body.yclients?.userToken !== undefined && body.yclients.userToken !== '••••••••'
+        ? String(body.yclients.userToken).trim()
+        : db.config.yclients?.userToken || '',
+    salonId:
+      body.yclients?.salonId !== undefined
+        ? String(body.yclients.salonId).trim()
+        : db.config.yclients?.salonId || '',
+    readOnly: true,
+  };
 
   db.config = {
     ...db.config,
@@ -5484,11 +5461,13 @@ app.post('/api/config', (req, res) => {
       ...db.config.vk,
       ...(body.vk || {})
     },
-    yclients: {
-      ...db.config.yclients,
-      ...(body.yclients || {})
-    }
+    yclients: nextYclients
   };
+
+  if (yclientsChanged) {
+    clearYclientsCache();
+    clearCrmMastersCache();
+  }
 
   persistServerEnvVars(envUpdates);
   writeDb(db);
@@ -5597,18 +5576,13 @@ app.post('/api/calls/:id/send-vk', async (req, res) => {
   res.json(result);
 });
 
-app.post('/api/calls/:id/send-yclients', async (req, res) => {
-  const userRole = getCurrentUserRole(req);
-  if (userRole === 'viewer' || userRole === 'operator') {
-    return res.status(403).json({ error: 'Недостаточно прав для передачи в YClients (только Администратор и Управляющий)' });
-  }
-  const db = readDb();
-  const call = db.calls.find((c: any) => c.call_id === req.params.id);
-  if (!call) {
-    return res.status(404).json({ error: 'Звонок не найден' });
-  }
-  const success = await sendToYclients(call, db.config.yclients);
-  res.json({ success });
+app.post('/api/calls/:id/send-yclients', async (_req, res) => {
+  appendLog('warning', 'yclients', 'Отклонён запрос на запись в YClients: доступ ограничен режимом «только чтение списка мастеров».');
+  return res.status(403).json({
+    success: false,
+    readOnly: true,
+    error: 'Интеграция YClients работает исключительно в режиме чтения списка мастеров. Запись в YClients отключена.',
+  });
 });
 
 // 10. RE-SEED / SEED DEMO CALLS

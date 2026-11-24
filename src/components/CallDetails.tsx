@@ -54,7 +54,6 @@ const VERIFIER_VERDICT_LABELS: Record<string, string> = {
 interface CallDetailsProps {
   call: CallRecord;
   onSendVk: (id: string) => Promise<{ success: boolean; error?: string }>;
-  onSendYclients: (id: string) => Promise<boolean>;
   onReanalyze?: (id: string) => Promise<boolean>;
   onCallUpdated?: (updated: CallRecord) => void;
   onDeleteCall?: (id: string) => Promise<void>;
@@ -100,7 +99,6 @@ export function getTagBadgeStyle(tag: string) {
 export function CallDetails({ 
   call, 
   onSendVk, 
-  onSendYclients, 
   onReanalyze,
   onCallUpdated,
   onDeleteCall,
@@ -109,8 +107,6 @@ export function CallDetails({
 }: CallDetailsProps) {
   const [sendingVk, setSendingVk] = useState(false);
   const [sentVk, setSentVk] = useState(false);
-  const [sendingYc, setSendingYc] = useState(false);
-  const [sentYc, setSentYc] = useState(false);
   const [vkError, setVkError] = useState<string | null>(null);
   const [exportingFormat, setExportingFormat] = useState<'pdf' | 'csv' | null>(null);
   const [exportSuccessFormat, setExportSuccessFormat] = useState<'pdf' | 'csv' | null>(null);
@@ -1013,16 +1009,6 @@ export function CallDetails({
     }
   };
 
-  const handleYc = async () => {
-    setSendingYc(true);
-    const success = await onSendYclients(call.call_id);
-    setSendingYc(false);
-    if (success) {
-      setSentYc(true);
-      setTimeout(() => setSentYc(false), 3000);
-    }
-  };
-
   const getScoreColor = (score: number | null | undefined) => {
     if (score === null || score === undefined) return 'text-slate-500 bg-slate-50 border-slate-200';
     if (score >= 8) return 'text-green-600 bg-green-50 border-green-200';
@@ -1482,19 +1468,6 @@ export function CallDetails({
           >
             {sentVk ? <Check className="w-3.5 h-3.5" /> : <MessageCircle className="w-3.5 h-3.5 text-sky-500" />}
             {sentVk ? 'Отправлено в VK' : 'ВКонтакте (152-ФЗ)'}
-          </button>
-
-          <button
-            onClick={handleYc}
-            disabled={sendingYc || call.status !== 'completed'}
-            className={`text-xs font-medium px-3.5 py-1.5 rounded-lg border flex items-center gap-1.5 transition-all ${
-              sentYc 
-                ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
-                : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
-            }`}
-          >
-            {sentYc ? <Check className="w-3.5 h-3.5" /> : <Database className="w-3.5 h-3.5 text-amber-500" />}
-            {sentYc ? 'В Yclients' : 'В Yclients CRM'}
           </button>
 
           {/* 152-ФЗ Export Suite (PDF / CSV) */}

@@ -497,18 +497,6 @@ export default function App() {
     }
   };
 
-  const handleSendYclients = async (id: string) => {
-    try {
-      const result = await safeFetchJson<any>(`/api/calls/${id}/send-yclients`, { 
-        method: 'POST',
-      }, authToken, userRole);
-      await loadData(true);
-      return result.success;
-    } catch (err) {
-      return false;
-    }
-  };
-
   const handleReanalyze = async (id: string) => {
     try {
       const headers: Record<string, string> = {
@@ -1008,7 +996,6 @@ export default function App() {
                     <CallDetails 
                       call={selectedCall} 
                       onSendVk={handleSendVk}
-                      onSendYclients={handleSendYclients}
                       onReanalyze={handleReanalyze}
                       onCallUpdated={(updated) => {
                         setCalls(prev => prev.map(c => c.call_id === updated.call_id ? updated : c));
