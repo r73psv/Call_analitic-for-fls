@@ -16,7 +16,8 @@ import { CallRecord, LogEntry, SystemConfig, ModelType, DashboardStats, KeyFacts
 import { transcribeWithRetry, fixDuplicatedTranscript, refineTranscriptRoles } from './src/services/speechkit.js';
 import { transcribeAudio, resolveActiveSttProvider, getSttProviderLabel, normalizeSttProvider } from './src/services/transcriptionService.js';
 import { isTbankVoiceKitConfigured } from './src/services/tbank-voicekit.js';
-import { getGigaAmConfig, isGigaAmConfigured } from './src/services/gigaam-asr.js';
+import { getGigaAmConfig, isGigaAmConfigured, formatGigaAsrIncidentSummary, getAsrQueueStatus } from './src/services/gigaam-asr.js';
+import { savePendingTranscriptionAudio, loadPendingTranscriptionAudio, deletePendingTranscriptionAudio } from './src/services/s3-archive.js';
 import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation, harmonizeMistakesAndEvaluation, filterOutdatedReminderMistakes, reconcileMistakesWithCriteria, generateLocalFallbackAnalysis, clearCrmMastersCache } from './src/services/gigachat.js';
 import { clearYclientsCache } from './src/services/yclients.js';
 import { classifyCallContext } from './src/services/summaryUtils.js';
@@ -794,6 +795,9 @@ async function executeSingleModelAttempt(
   }
 }
 
+const PENDING_ASR_RETRY_DELAY_MS = 12 * 60 * 1000; // 12 минут (окно 10–15 мин)
+const PENDING_ASR_MAX_DEFERRED_ATTEMPTS = 5;
+
 // Unified Multi-Provider STT (Yandex SpeechKit / T-Bank VoiceKit / GigaAM v3) + Sber GigaChat LLM Calling Logic with 152-ФЗ Anonymization
 async function analyzeCallTextOrAudio(
   requestedModel: string,
@@ -803,10 +807,13 @@ async function analyzeCallTextOrAudio(
   callDurationSeconds?: number,
   sttProviderOverride?: SttProvider,
   callTimestamp?: string,
-  options?: { isManual?: boolean }
+  options?: { isManual?: boolean; callId?: string; isPreparedWav?: boolean; deferredAttempt?: number }
 ): Promise<Partial<CallRecord>> {
   let cleanTranscript = (transcriptInput || '').trim();
   let usedTranscriptionEngine: string | undefined;
+  let sttAttempts = 1;
+  let preparedWavBuffer: Buffer | undefined;
+  let sttHttpStatus: number | undefined;
 
   // 0. Strict check: calls under 10 seconds MUST NOT hallucinate dialogue or receive scores
   if (callDurationSeconds !== undefined && callDurationSeconds < 10) {
@@ -885,15 +892,29 @@ async function analyzeCallTextOrAudio(
         audioBuffer,
         mime,
         (type, msg) => appendLog(type, 'speechkit', msg),
-        activeProvider
+        activeProvider,
+        undefined,
+        {
+          callId: options?.callId,
+          isPreparedWav: options?.isPreparedWav,
+          emitIncidentSummary: false,
+        }
       );
       if (sttResult.attemptedProvider) {
         attemptedSttProvider = sttResult.attemptedProvider;
       }
+      sttAttempts = sttResult.attempts ?? 1;
+      preparedWavBuffer = sttResult.preparedWav;
+      sttHttpStatus = sttResult.httpStatus;
       if (sttResult.text && sttResult.text.trim()) {
         cleanTranscript = fixDuplicatedTranscript(sttResult.text.trim());
         usedTranscriptionEngine = sttResult.engine;
         appendLog('success', 'speechkit', `Аудиозапись успешно расшифрована (${getSttProviderLabel(attemptedSttProvider)}, ${cleanTranscript.length} симв.)`);
+        if (attemptedSttProvider === 'gigaam_v3') {
+          const summaryLine = formatGigaAsrIncidentSummary(options?.callId, 'completed', { attempts: sttAttempts });
+          console.log(summaryLine);
+          appendLog('success', 'speechkit', summaryLine);
+        }
       } else {
         sttErrorReason = sttResult.error || 'Распознавание речи вернуло пустой текст (в записи отсутствует разборчивая речь или тишина)';
         usedTranscriptionEngine = sttResult.engine;
@@ -902,6 +923,7 @@ async function analyzeCallTextOrAudio(
     } catch (sttErr: any) {
       sttErrorReason = sttErr.message || String(sttErr);
       usedTranscriptionEngine = 'none';
+      sttHttpStatus = typeof sttErr?.status === 'number' ? sttErr.status : undefined;
       appendLog('error', 'speechkit', `Ошибка распознавания речи (${activeProviderLabel}): ${sttErrorReason}`);
     }
   }
@@ -913,7 +935,8 @@ async function analyzeCallTextOrAudio(
   // Strict check for calls WITHOUT speech:
   if (!cleanTranscript) {
     if (hasAudio) {
-      const audioKbytes = Math.round((Buffer.from(audioBase64!.data, 'base64').length) / 1024);
+      const originalAudioBuf = Buffer.from(audioBase64!.data, 'base64');
+      const audioKbytes = Math.round(originalAudioBuf.length / 1024);
       const durStr = callDurationSeconds !== undefined ? `, ${callDurationSeconds} сек.` : '';
       // ВАЖНО: используем именно того провайдера, который фактически запускался,
       // а не повторный вызов resolveActiveSttProvider() (глобальная настройка могла поменяться пока шёл запрос).
@@ -924,7 +947,68 @@ async function analyzeCallTextOrAudio(
       );
 
       if (isHardSttFailure) {
-        appendLog('error', 'speechkit', `Транскрибация (${activeProviderLabel}) не выполнена: ${sttErrorReason}`);
+        const isConfigOrAuthError =
+          sttHttpStatus === 401 ||
+          sttHttpStatus === 403 ||
+          /не настроен|укажите api[- ]?ключ|ошибка авторизации|unauthorized|forbidden/i.test(sttErrorReason);
+        const currentDeferredAttempt = options?.deferredAttempt ?? 0;
+        const shouldDeferRetry = !isConfigOrAuthError && currentDeferredAttempt < PENDING_ASR_MAX_DEFERRED_ATTEMPTS;
+
+        if (shouldDeferRetry) {
+          const bufferToArchive = preparedWavBuffer && preparedWavBuffer.length > 44 ? preparedWavBuffer : originalAudioBuf;
+          const wavReady = Boolean((preparedWavBuffer && preparedWavBuffer.length > 44) || options?.isPreparedWav);
+          const effectiveCallId = options?.callId || `call-${Date.now()}`;
+          const savedMeta = await savePendingTranscriptionAudio(effectiveCallId, bufferToArchive, {
+            isWav: wavReady,
+            mimeType: audioBase64!.mimeType,
+          });
+          const retryDelayMin = Math.round(PENDING_ASR_RETRY_DELAY_MS / 60000);
+          const retryAfterIso = new Date(Date.now() + PENDING_ASR_RETRY_DELAY_MS).toISOString();
+          const deferSummary = formatGigaAsrIncidentSummary(effectiveCallId, 'deferred', {
+            reason: `${sttErrorReason}; повтор через ${retryDelayMin} мин, ${wavReady ? 'WAV готов' : 'исходное аудио'} (${savedMeta.storage.toUpperCase()})`,
+          });
+          console.warn(deferSummary);
+          appendLog('warning', 'speechkit', deferSummary);
+
+          return {
+            status: 'needs_transcription',
+            transcription_status: 'Требует расшифровки',
+            pending_asr_s3_key: savedMeta.s3Key,
+            pending_asr_local_path: savedMeta.localPath,
+            pending_asr_wav_ready: savedMeta.isWav,
+            pending_asr_mime_type: savedMeta.mimeType,
+            pending_asr_retry_after: retryAfterIso,
+            pending_asr_attempts: currentDeferredAttempt + 1,
+            pending_asr_last_error: sttErrorReason,
+            transcript: `Требует расшифровки. Аудиозапись сохранена (${savedMeta.storage.toUpperCase()}, ${wavReady ? 'WAV 16кГц готов' : `${audioKbytes} КБ`}), запланирован автоматический повтор через ${retryDelayMin} мин.`,
+            summary: `Требует расшифровки: ${activeProviderLabel} временно недоступен (${sttErrorReason}). Аудиозапись сохранена без потерь, автоматический повтор расшифровки через ${retryDelayMin} мин.`,
+            key_facts: {
+              is_dispute: false,
+              dispute_reason: null,
+              promises: [],
+              tone_client: 'нейтральный',
+              tone_manager: 'нейтральный',
+              call_outcome: 'Требует расшифровки',
+              booking_status: 'не применимо',
+              client_issue: `Требует расшифровки (${activeProviderLabel}): ${sttErrorReason}`,
+            },
+            trigger_phrases: [],
+            recommendations: [
+              `Звонок поставлен в очередь автоматического повтора расшифровки через ${retryDelayMin} мин.`,
+              'При необходимости вы можете прослушать запись в плеере или запустить пересчёт вручную.',
+            ],
+            operator_score: null,
+            operator_comment: `Требует расшифровки (${activeProviderLabel}): ${sttErrorReason}`,
+            error_message: `Требует расшифровки (${activeProviderLabel}): ${sttErrorReason}`,
+            transcription_engine: 'none',
+          };
+        }
+
+        const failSummary = formatGigaAsrIncidentSummary(options?.callId, 'failed', {
+          reason: sttErrorReason,
+        });
+        console.error(failSummary);
+        appendLog('error', 'speechkit', failSummary);
         return {
           transcript: `Ошибка распознавания речи (${activeProviderLabel}): ${sttErrorReason}`,
           summary: `Аудиозапись доступна (${audioKbytes} КБ${durStr}), но транскрибация через ${activeProviderLabel} завершилась ошибкой: ${sttErrorReason}`,
@@ -2537,18 +2621,20 @@ async function importCallRecord(extCall: any): Promise<boolean> {
           audioDownloadFailed,
           extCall.duration_seconds,
           undefined,
-          newCall.timestamp
+          newCall.timestamp,
+          { callId: extCall.call_id }
         );
 
         const updatedDb = readDb();
         const callIdx = updatedDb.calls.findIndex((c: any) => c.call_id === extCall.call_id);
         
         if (callIdx !== -1) {
-          const isFailedCall = audioDownloadFailed || isTechnicalErrorResult(analysisResult);
+          const isDeferredAsr = analysisResult.status === 'needs_transcription';
+          const isFailedCall = !isDeferredAsr && (audioDownloadFailed || isTechnicalErrorResult(analysisResult));
           updatedDb.calls[callIdx] = {
             ...updatedDb.calls[callIdx],
             ...analysisResult,
-            status: isFailedCall ? 'failed' : 'completed'
+            status: isDeferredAsr ? 'needs_transcription' : (isFailedCall ? 'failed' : 'completed')
           } as CallRecord;
           
           const savedCall = updatedDb.calls[callIdx];
@@ -2714,11 +2800,47 @@ setInterval(async () => {
   }
 }, 30000); // Check state every 30 seconds
 
+// Планировщик автоматического повтора звонков со статусом «Требует расшифровки» (через 10–15 мин, без повторной конвертации WAV)
+let pendingAsrSchedulerBusy = false;
+setInterval(async () => {
+  if (pendingAsrSchedulerBusy) return;
+  pendingAsrSchedulerBusy = true;
+  try {
+    const db = readDb();
+    const nowMs = Date.now();
+    const dueCalls = (db.calls || []).filter((c: CallRecord) => {
+      const isPending = c.status === 'needs_transcription' || c.transcription_status === 'Требует расшифровки';
+      if (!isPending) return false;
+      if (!c.pending_asr_retry_after) return true;
+      const retryAt = Date.parse(c.pending_asr_retry_after);
+      return Number.isNaN(retryAt) || retryAt <= nowMs;
+    });
+
+    // Обрабатываем строго последовательно — по одному звонку за проход через общий семафор ASR
+    for (const dueCall of dueCalls) {
+      try {
+        appendLog(
+          'info',
+          'speechkit',
+          `[GigaASR Scheduler] Автоматический повтор расшифровки звонка ${dueCall.call_id} (попытка ${(dueCall.pending_asr_attempts || 0) + 1}/${PENDING_ASR_MAX_DEFERRED_ATTEMPTS}, WAV готов: ${dueCall.pending_asr_wav_ready ? 'да' : 'нет'})...`
+        );
+        await performCallReanalysis(dueCall.call_id, undefined, { forceRetranscribe: true });
+      } catch (retryErr: any) {
+        console.warn(`[GigaASR Scheduler] Ошибка при автоповторе звонка ${dueCall.call_id}:`, retryErr?.message || retryErr);
+      }
+    }
+  } catch (schedErr: any) {
+    console.warn('[GigaASR Scheduler] Сбой цикла проверки отложенных расшифровок:', schedErr?.message || schedErr);
+  } finally {
+    pendingAsrSchedulerBusy = false;
+  }
+}, 60000);
+
 // REST API ROUTES
 
 // Health check endpoint for Docker / Container orchestrators
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString(), asrQueue: getAsrQueueStatus() });
 });
 
 // Helper to execute S3 hydration into local database stores
@@ -4894,7 +5016,8 @@ app.post('/api/calls/analyze', async (req, res) => {
       false,
       durationSec,
       sttOverride,
-      newCall.timestamp
+      newCall.timestamp,
+      { callId: newCallId }
     );
 
     // Update in Db
@@ -4902,11 +5025,12 @@ app.post('/api/calls/analyze', async (req, res) => {
     const callIdx = updatedDb.calls.findIndex((c: any) => c.call_id === newCallId);
     
     if (callIdx !== -1) {
-      const isFailed = isTechnicalErrorResult(analysisResult);
+      const isDeferredAsr = analysisResult.status === 'needs_transcription';
+      const isFailed = !isDeferredAsr && isTechnicalErrorResult(analysisResult);
       updatedDb.calls[callIdx] = {
         ...updatedDb.calls[callIdx],
         ...analysisResult,
-        status: isFailed ? 'failed' : 'completed'
+        status: isDeferredAsr ? 'needs_transcription' : (isFailed ? 'failed' : 'completed')
       } as CallRecord;
       
       const savedCall = updatedDb.calls[callIdx];
@@ -5064,14 +5188,38 @@ async function performCallReanalysis(
 
     let audioBase64: { data: string; mimeType: string } | null = null;
     let audioDownloadFailed = false;
+    let isPreparedWav = false;
+
+    // 0. Если ранее аудио (или готовый WAV 16кГц) было сохранено для отложенного повтора в S3 / локальном хранилище —
+    // загружаем напрямую без повторного скачивания и без повторной конвертации WAV!
+    if (call.pending_asr_s3_key || call.pending_asr_local_path) {
+      const pendingBuf = await loadPendingTranscriptionAudio({
+        s3Key: call.pending_asr_s3_key,
+        localPath: call.pending_asr_local_path,
+      });
+      if (pendingBuf && pendingBuf.length > 0) {
+        isPreparedWav = Boolean(call.pending_asr_wav_ready);
+        audioBase64 = {
+          data: pendingBuf.toString('base64'),
+          mimeType: isPreparedWav ? 'audio/wav' : (call.pending_asr_mime_type || 'audio/mpeg'),
+        };
+        appendLog(
+          'info',
+          'speechkit',
+          `[Повтор ASR] Загружено сохранённое аудио звонка ${callId} (${Math.round(pendingBuf.length / 1024)} КБ, WAV готов: ${isPreparedWav ? 'да — без повторной конвертации' : 'нет'}).`
+        );
+      }
+    }
 
     // Сначала проверяем локальный кэш аудио (на случай если файл уже загружен)
-    const cachedBeforeLookup = readAudioFromCache(callId, audioUrl);
-    if (cachedBeforeLookup) {
-      audioBase64 = {
-        data: cachedBeforeLookup.buffer.toString('base64'),
-        mimeType: cachedBeforeLookup.mimeType,
-      };
+    if (!audioBase64) {
+      const cachedBeforeLookup = readAudioFromCache(callId, audioUrl);
+      if (cachedBeforeLookup) {
+        audioBase64 = {
+          data: cachedBeforeLookup.buffer.toString('base64'),
+          mimeType: cachedBeforeLookup.mimeType,
+        };
+      }
     }
 
     // If it is a real Megafon call, lookup direct link ONLY if audioUrl is missing or is a web report link
@@ -5145,7 +5293,12 @@ async function performCallReanalysis(
       call.duration_seconds,
       activeStt,
       reanalysisTimestamp,
-      { isManual: options?.isManual }
+      {
+        isManual: options?.isManual,
+        callId,
+        isPreparedWav,
+        deferredAttempt: call.pending_asr_attempts || 0,
+      }
     );
 
     if (isStaleReanalysis()) {
@@ -5195,10 +5348,18 @@ async function performCallReanalysis(
         throw sttErr;
       }
 
+      const isDeferredAsr = analysisResult.status === 'needs_transcription';
       const isFailed =
-        (audioDownloadFailed && !existingTranscript) ||
-        Boolean(analysisResult.error_message) ||
-        isTechnicalErrorResult(analysisResult);
+        !isDeferredAsr &&
+        ((audioDownloadFailed && !existingTranscript) ||
+          Boolean(analysisResult.error_message) ||
+          isTechnicalErrorResult(analysisResult));
+      const previousPendingMeta = {
+        s3Key: finalDb.calls[finalCallIdx].pending_asr_s3_key,
+        localPath: finalDb.calls[finalCallIdx].pending_asr_local_path,
+      };
+      const nextStatus: CallRecord['status'] = isDeferredAsr ? 'needs_transcription' : (isFailed ? 'failed' : 'completed');
+
       finalDb.calls[finalCallIdx] = {
         ...finalDb.calls[finalCallIdx],
         ...analysisResult,
@@ -5207,7 +5368,18 @@ async function performCallReanalysis(
         missed_opportunities: analysisResult.missed_opportunities,
         fallback_reason: analysisResult.summary_source === 'model' ? undefined : analysisResult.fallback_reason,
         error_message: analysisResult.error_message || undefined,
-        status: isFailed ? 'failed' : 'completed',
+        status: nextStatus,
+        ...(nextStatus === 'completed'
+          ? {
+              transcription_status: undefined,
+              pending_asr_s3_key: undefined,
+              pending_asr_local_path: undefined,
+              pending_asr_wav_ready: undefined,
+              pending_asr_mime_type: undefined,
+              pending_asr_retry_after: undefined,
+              pending_asr_last_error: undefined,
+            }
+          : {}),
         is_demo: false,
         model_used: selectedModel,
         gigachat_model: selectedModel.startsWith('GigaChat') ? (selectedModel as GigaChatModel) : 'GigaChat:Lite'
@@ -5217,6 +5389,10 @@ async function performCallReanalysis(
       }
       const savedCall = finalDb.calls[finalCallIdx];
       writeDb(finalDb);
+
+      if (nextStatus === 'completed' && (previousPendingMeta.s3Key || previousPendingMeta.localPath)) {
+        deletePendingTranscriptionAudio(previousPendingMeta).catch(() => {});
+      }
 
       // Trigger real-time toast notification for managers & admins
       notifyCallAnalyzed(savedCall);

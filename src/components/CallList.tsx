@@ -24,6 +24,7 @@ interface CallListProps {
 }
 
 const STATUS_BADGES: Record<string, { label: string; className: string }> = {
+  needs_transcription: { label: 'Требует расшифровки', className: 'bg-amber-100 text-amber-800 border-amber-300' },
   missed: { label: 'Пропущен', className: 'bg-amber-50 text-amber-600 border-amber-200' },
   Cancel: { label: 'Отменен', className: 'bg-rose-50 text-rose-600 border-rose-200' },
   Busy: { label: 'Занято', className: 'bg-amber-50 text-amber-700 border-amber-200' },

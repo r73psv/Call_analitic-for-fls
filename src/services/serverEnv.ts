@@ -50,6 +50,7 @@ export const MANAGED_SERVER_ENV_KEYS = new Set<string>([
   'GIGAAM_API_URL',
   'GIGAAM_API_KEY',
   'GIGAAM_MODEL_VARIANT',
+  'ASR_MAX_CONCURRENT',
 
   // Yandex Object Storage (SpeechKit async audio)
   'YC_STORAGE_BUCKET',

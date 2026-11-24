@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { S3Client, GetObjectCommand, PutObjectCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
+import * as fs from 'fs';
+import path from 'path';
+import { S3Client, GetObjectCommand, PutObjectCommand, HeadBucketCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { encrypt, decrypt } from '../store/crypto-store.js';
 import { readStore, writeStore, readStoreSync } from '../store/store.js';
@@ -391,5 +393,166 @@ export async function listS3Archives(): Promise<S3ArchiveBatch[]> {
     return Array.isArray(list) ? list : [];
   } catch {
     return [];
+  }
+}
+
+export interface PendingAsrAudioMeta {
+  storage: 's3' | 'local';
+  s3Key?: string;
+  localPath?: string;
+  isWav: boolean;
+  mimeType: string;
+  sizeBytes: number;
+}
+
+function getPendingAsrLocalDir(): string {
+  const dataPath = process.env.DATA_PATH || '/app/data/data-store.json';
+  const baseDir = path.dirname(dataPath);
+  return path.join(baseDir, 'pending-asr');
+}
+
+function sanitizePendingAsrId(callId: string): string {
+  return String(callId || 'call').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'call';
+}
+
+function inferExtForPendingAudio(isWav: boolean, mimeType?: string): { ext: string; mime: string } {
+  if (isWav) return { ext: 'wav', mime: 'audio/wav' };
+  const m = (mimeType || '').toLowerCase();
+  if (m.includes('wav')) return { ext: 'wav', mime: 'audio/wav' };
+  if (m.includes('ogg') || m.includes('opus')) return { ext: 'ogg', mime: 'audio/ogg' };
+  if (m.includes('webm')) return { ext: 'webm', mime: 'audio/webm' };
+  if (m.includes('mp4') || m.includes('m4a')) return { ext: 'm4a', mime: 'audio/mp4' };
+  return { ext: 'mp3', mime: mimeType || 'audio/mpeg' };
+}
+
+/**
+ * Сохраняет аудио (или уже подготовленный WAV 16кГц моно) в S3 для отложенной
+ * автоматической повторной расшифровки без потери звонка и без повторной конвертации.
+ * Если S3 не настроен или недоступен, сохраняет локально в `/app/data/pending-asr/`.
+ */
+export async function savePendingTranscriptionAudio(
+  callId: string,
+  audioBuffer: Buffer,
+  options: { isWav: boolean; mimeType?: string }
+): Promise<PendingAsrAudioMeta> {
+  const safeId = sanitizePendingAsrId(callId);
+  const { ext, mime } = inferExtForPendingAudio(options.isWav, options.mimeType);
+  const clientInfo = getArchiveS3Client();
+
+  let s3Key: string | undefined;
+  if (clientInfo) {
+    const key = `${clientInfo.keyPrefix}pending-asr/${safeId}.${ext}`;
+    try {
+      await clientInfo.s3.send(
+        new PutObjectCommand({
+          Bucket: clientInfo.bucket,
+          Key: key,
+          Body: audioBuffer,
+          ContentType: mime,
+          Metadata: {
+            call_id: safeId,
+            wav_ready: options.isWav ? '1' : '0',
+          },
+        })
+      );
+      s3Key = key;
+    } catch (err: any) {
+      console.warn(
+        `[S3 Pending ASR] Не удалось сохранить аудио звонка ${callId} в S3 (${err?.message || err}), используется локальный резерв.`
+      );
+    }
+  }
+
+  let localPath: string | undefined;
+  if (!s3Key) {
+    try {
+      const dir = getPendingAsrLocalDir();
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      localPath = path.join(dir, `${safeId}.${ext}`);
+      fs.writeFileSync(localPath, audioBuffer);
+    } catch (fsErr: any) {
+      console.warn(`[Pending ASR Local] Не удалось записать локальный файл для ${callId}: ${fsErr?.message || fsErr}`);
+    }
+  }
+
+  return {
+    storage: s3Key ? 's3' : 'local',
+    s3Key,
+    localPath,
+    isWav: options.isWav,
+    mimeType: mime,
+    sizeBytes: audioBuffer.length,
+  };
+}
+
+/**
+ * Загружает ранее сохранённый аудиофайл/WAV для отложенного повтора расшифровки.
+ */
+export async function loadPendingTranscriptionAudio(meta: {
+  s3Key?: string;
+  localPath?: string;
+}): Promise<Buffer | null> {
+  if (meta.s3Key) {
+    const clientInfo = getArchiveS3Client();
+    if (clientInfo) {
+      try {
+        const res = await clientInfo.s3.send(
+          new GetObjectCommand({
+            Bucket: clientInfo.bucket,
+            Key: meta.s3Key,
+          })
+        );
+        if (res.Body) {
+          const bytes = await res.Body.transformToByteArray();
+          return Buffer.from(bytes);
+        }
+      } catch (err: any) {
+        console.warn(`[S3 Pending ASR] Ошибка чтения ${meta.s3Key} из S3: ${err?.message || err}`);
+      }
+    }
+  }
+
+  if (meta.localPath && fs.existsSync(meta.localPath)) {
+    try {
+      return fs.readFileSync(meta.localPath);
+    } catch (err: any) {
+      console.warn(`[Pending ASR Local] Ошибка чтения ${meta.localPath}: ${err?.message || err}`);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Удаляет временный файл отложенной расшифровки из S3 / локального диска после успешного распознавания.
+ */
+export async function deletePendingTranscriptionAudio(meta: {
+  s3Key?: string;
+  localPath?: string;
+}): Promise<void> {
+  if (meta.s3Key) {
+    const clientInfo = getArchiveS3Client();
+    if (clientInfo) {
+      try {
+        await clientInfo.s3.send(
+          new DeleteObjectCommand({
+            Bucket: clientInfo.bucket,
+            Key: meta.s3Key,
+          })
+        );
+      } catch {
+        // ignore cleanup failure
+      }
+    }
+  }
+
+  if (meta.localPath && fs.existsSync(meta.localPath)) {
+    try {
+      fs.unlinkSync(meta.localPath);
+    } catch {
+      // ignore cleanup failure
+    }
   }
 }

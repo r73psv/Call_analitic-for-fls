@@ -234,7 +234,8 @@ export interface CallRecord {
   client_name?: string;
   operator_name?: string;
   audio_url?: string;
-  status: 'processing' | 'completed' | 'failed' | 'Success' | 'missed' | 'Cancel' | 'Busy' | 'NotAvailable' | 'NotAllowed' | 'NotFound' | 'transcription_failed' | 'analysis_failed';
+  status: 'processing' | 'completed' | 'failed' | 'needs_transcription' | 'Success' | 'missed' | 'Cancel' | 'Busy' | 'NotAvailable' | 'NotAllowed' | 'NotFound' | 'transcription_failed' | 'analysis_failed';
+  transcription_status?: string;
   error_message?: string;
 
   // Connection type details
@@ -256,6 +257,13 @@ export interface CallRecord {
   retry_count?: number;
   last_retry_at?: string;
   auto_retry_count?: number;
+  pending_asr_s3_key?: string;
+  pending_asr_local_path?: string;
+  pending_asr_wav_ready?: boolean;
+  pending_asr_mime_type?: string;
+  pending_asr_retry_after?: string;
+  pending_asr_attempts?: number;
+  pending_asr_last_error?: string;
   
   // TTL & S3 Archive Data (152-ФЗ)
   audio_deleted?: boolean;

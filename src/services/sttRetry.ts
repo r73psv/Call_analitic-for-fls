@@ -59,7 +59,7 @@ const NON_RETRYABLE_CONFIG_MESSAGE_RE =
 const TRANSIENT_MESSAGE_RE =
   /fetch failed|network error|socket hang up|econnreset|etimedout|econnrefused|enotfound|eai_again|epipe|ehostunreach|enetunreach|econnaborted|connection reset|connection closed|client network socket disconnected|tls connection|other side closed|terminated|timeout|timed out|too many requests|rate limit|service unavailable|bad gateway|gateway timeout|temporarily unavailable|upstream|aborted/i;
 
-const MAX_RETRY_AFTER_MS = 60_000;
+const MAX_RETRY_AFTER_MS = 180_000;
 
 export interface SttRetryInfo {
   attempt: number;
@@ -77,6 +77,14 @@ export interface SttRetryOptions {
   maxDelayMs?: number;
   jitterRatio?: number;
   shouldRetry?: (error: unknown, attempt: number) => boolean;
+  getDelayMs?: (
+    attempt: number,
+    error: unknown,
+    defaultDelayMs: number,
+    retryAfterMs: number | null
+  ) => number;
+  onAttempt?: (attempt: number) => void;
+  wrapAttempt?: <R>(fn: () => Promise<R>, attempt: number) => Promise<R>;
   onRetry?: (info: SttRetryInfo) => void;
   sleepFn?: (ms: number) => Promise<void>;
   randomFn?: () => number;
@@ -361,6 +369,10 @@ export async function withSttRetry<T>(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
+      options.onAttempt?.(attempt);
+      if (options.wrapAttempt) {
+        return await options.wrapAttempt(() => fn(attempt), attempt);
+      }
       return await fn(attempt);
     } catch (error: unknown) {
       lastError = error;
@@ -379,13 +391,16 @@ export async function withSttRetry<T>(
       }
 
       const retryAfterMs = extractRetryAfterMs(error);
-      const delayMs = computeBackoffDelayMs(attempt, {
+      const defaultDelayMs = computeBackoffDelayMs(attempt, {
         baseDelayMs,
         maxDelayMs,
         jitterRatio,
         retryAfterMs,
         randomFn,
       });
+      const delayMs = options.getDelayMs
+        ? Math.max(0, Math.round(options.getDelayMs(attempt, error, defaultDelayMs, retryAfterMs)))
+        : defaultDelayMs;
 
       if (!options.silent) {
         console.warn(

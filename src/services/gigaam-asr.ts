@@ -24,6 +24,7 @@ import {
   fetchWithSttRetry,
   isTransientSttError,
   formatSttNetworkError,
+  extractHttpStatus,
 } from './sttRetry.js';
 
 export const CLOUDRU_GIGAASR_TRANSCRIPTIONS_URL =
@@ -31,6 +32,248 @@ export const CLOUDRU_GIGAASR_TRANSCRIPTIONS_URL =
 
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 2000;
+
+/**
+ * Экспоненциальный бэкофф для HTTP 429 (rate_limit_exceeded): 30 → 60 → 120 сек.
+ */
+export const ASR_RATE_LIMIT_BACKOFF_MS = [30_000, 60_000, 120_000] as const;
+
+export interface GigaAmTranscribeOptions {
+  callId?: string;
+  isPreparedWav?: boolean;
+  onPreparedWav?: (wavBuffer: Buffer) => void;
+  onAttemptCount?: (attempts: number) => void;
+  /** Логировать сводную строку [GigaASR] Звонок <id>: ... внутри сервиса (по умолчанию true для успеха, false при передаче в server.ts). */
+  emitIncidentSummary?: boolean;
+  fetchImpl?: typeof fetch;
+  sleepFn?: (ms: number) => Promise<void>;
+}
+
+interface AsrRequestContext {
+  callId?: string;
+  isPreparedWav?: boolean;
+  onPreparedWav?: (wavBuffer: Buffer) => void;
+  attempts: number;
+  fetchImpl?: typeof fetch;
+  sleepFn?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Возвращает лимит одновременных запросов к ASR из переменной окружения ASR_MAX_CONCURRENT.
+ * По умолчанию — 1 (строгий FIFO-семафор, как для GigaChat).
+ */
+export function getAsrMaxConcurrent(): number {
+  const raw = (process.env.ASR_MAX_CONCURRENT || '').trim();
+  if (!raw) return 1;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return 1;
+  return parsed;
+}
+
+/**
+ * Определяет, является ли ошибка ограничением частоты запросов (HTTP 429 / rate_limit_exceeded).
+ */
+export function isAsrRateLimitError(error: unknown, statusOverride?: number, rawBody?: string): boolean {
+  const status = statusOverride ?? extractHttpStatus(error);
+  if (status === 429) return true;
+  const msg = `${typeof (error as any)?.message === 'string' ? (error as any).message : ''} ${rawBody || ''}`;
+  return /rate[_ ]?limit|too many requests|\b429\b/i.test(msg);
+}
+
+/**
+ * Рассчитывает паузу ретрая по классу ошибки:
+ * - HTTP 429 (rate_limit_exceeded): 30 → 60 → 120 сек (или Retry-After, если он больше)
+ * - HTTP 504 / fetch failed / прочие 5xx: стандартный бэкофф (или Retry-After)
+ */
+export function computeAsrErrorClassBackoff(
+  attempt: number,
+  error: unknown,
+  defaultDelayMs: number,
+  retryAfterMs: number | null
+): { delayMs: number; isRateLimit: boolean } {
+  const isRateLimit = isAsrRateLimitError(error);
+  if (isRateLimit) {
+    const idx = Math.min(Math.max(0, attempt - 1), ASR_RATE_LIMIT_BACKOFF_MS.length - 1);
+    const floorMs = ASR_RATE_LIMIT_BACKOFF_MS[idx];
+    const delayMs =
+      typeof retryAfterMs === 'number' && Number.isFinite(retryAfterMs) && retryAfterMs > 0
+        ? Math.max(floorMs, retryAfterMs)
+        : floorMs;
+    return { delayMs, isRateLimit: true };
+  }
+  const delayMs =
+    typeof retryAfterMs === 'number' && Number.isFinite(retryAfterMs) && retryAfterMs > 0
+      ? Math.max(defaultDelayMs, retryAfterMs)
+      : defaultDelayMs;
+  return { delayMs, isRateLimit: false };
+}
+
+/**
+ * Глобальный FIFO-семафор для всех обращений к ASR (прямые запросы, сегменты WAV,
+ * каналы стерео, ретраи). Поддерживает глобальную паузу очереди при получении 429.
+ */
+interface AsrQueueEntry {
+  grant: () => void;
+  sleepFn?: (ms: number) => Promise<void>;
+}
+
+let asrActiveCount = 0;
+let asrPausedUntil = 0;
+let asrPauseTimer: ReturnType<typeof setTimeout> | null = null;
+let asrPauseWaitInFlight = false;
+const asrWaitQueue: AsrQueueEntry[] = [];
+let asrQueueTotalDispatched = 0;
+let asrQueuePeakConcurrent = 0;
+let asrLastPauseMs = 0;
+let asrGlobalSleepOverride: ((ms: number) => Promise<void>) | null = null;
+
+function scheduleAsrQueueResume(remainingMs: number, preferredSleepFn?: (ms: number) => Promise<void>): void {
+  const customSleep = preferredSleepFn || asrGlobalSleepOverride;
+  if (customSleep) {
+    if (asrPauseWaitInFlight) return;
+    asrPauseWaitInFlight = true;
+    Promise.resolve(customSleep(remainingMs))
+      .catch(() => {})
+      .finally(() => {
+        asrPauseWaitInFlight = false;
+        asrPausedUntil = 0;
+        drainAsrQueue();
+      });
+    return;
+  }
+
+  if (asrPauseTimer) return;
+  asrPauseTimer = setTimeout(() => {
+    asrPauseTimer = null;
+    drainAsrQueue();
+  }, Math.max(10, remainingMs));
+  if (typeof (asrPauseTimer as any).unref === 'function') {
+    (asrPauseTimer as any).unref();
+  }
+}
+
+function drainAsrQueue(): void {
+  const limit = getAsrMaxConcurrent();
+  while (asrActiveCount < limit && asrWaitQueue.length > 0) {
+    const now = Date.now();
+    if (asrPausedUntil > now) {
+      const remainingMs = asrPausedUntil - now;
+      const headSleepFn = asrWaitQueue[0]?.sleepFn;
+      scheduleAsrQueueResume(remainingMs, headSleepFn);
+      return;
+    }
+    const next = asrWaitQueue.shift();
+    if (!next) return;
+    asrActiveCount++;
+    asrQueueTotalDispatched++;
+    if (asrActiveCount > asrQueuePeakConcurrent) {
+      asrQueuePeakConcurrent = asrActiveCount;
+    }
+    next.grant();
+  }
+}
+
+/**
+ * Приостанавливает отправку всех новых ASR-сегментов и запросов на время паузы (429 cooldown).
+ */
+export function pauseAsrQueue(delayMs: number, reason?: string): void {
+  if (!Number.isFinite(delayMs) || delayMs <= 0) return;
+  const targetUntil = Date.now() + Math.round(delayMs);
+  if (targetUntil > asrPausedUntil) {
+    asrPausedUntil = targetUntil;
+    asrLastPauseMs = Math.round(delayMs);
+    if (asrPauseTimer) {
+      clearTimeout(asrPauseTimer);
+      asrPauseTimer = null;
+    }
+    console.warn(
+      `[GigaASR Queue] Глобальная пауза очереди ASR на ${(delayMs / 1000).toFixed(1)}с${reason ? ` (${reason})` : ''}. В очереди: ${asrWaitQueue.length}, активных: ${asrActiveCount}.`
+    );
+  }
+}
+
+/**
+ * Выполняет один сетевой запрос к ASR строго через глобальный FIFO-семафор
+ * с учётом лимита ASR_MAX_CONCURRENT и глобальной паузы после 429.
+ */
+export async function runWithAsrSemaphore<T>(
+  task: () => Promise<T>,
+  opts?: { sleepFn?: (ms: number) => Promise<void> }
+): Promise<T> {
+  await new Promise<void>((resolve) => {
+    asrWaitQueue.push({ grant: resolve, sleepFn: opts?.sleepFn });
+    drainAsrQueue();
+  });
+  try {
+    return await task();
+  } finally {
+    asrActiveCount = Math.max(0, asrActiveCount - 1);
+    drainAsrQueue();
+  }
+}
+
+export function getAsrQueueStatus(): {
+  maxConcurrent: number;
+  active: number;
+  queued: number;
+  pausedForMs: number;
+  peakConcurrent: number;
+  totalDispatched: number;
+  lastPauseMs: number;
+} {
+  return {
+    maxConcurrent: getAsrMaxConcurrent(),
+    active: asrActiveCount,
+    queued: asrWaitQueue.length,
+    pausedForMs: Math.max(0, asrPausedUntil - Date.now()),
+    peakConcurrent: asrQueuePeakConcurrent,
+    totalDispatched: asrQueueTotalDispatched,
+    lastPauseMs: asrLastPauseMs,
+  };
+}
+
+/**
+ * Сбрасывает состояние очереди ASR (используется исключительно в юнит-тестах).
+ */
+export function resetAsrQueueForTest(options?: { sleepFn?: ((ms: number) => Promise<void>) | null }): void {
+  if (asrPauseTimer) {
+    clearTimeout(asrPauseTimer);
+    asrPauseTimer = null;
+  }
+  asrActiveCount = 0;
+  asrPausedUntil = 0;
+  asrPauseWaitInFlight = false;
+  asrWaitQueue.length = 0;
+  asrQueueTotalDispatched = 0;
+  asrQueuePeakConcurrent = 0;
+  asrLastPauseMs = 0;
+  asrGlobalSleepOverride = options?.sleepFn ?? null;
+  cloudRuModelsCache.clear();
+  cloudRuWorkingModelOverrides.clear();
+  chatCompletionsFallbackUrls.clear();
+  transcriptionsFallbackUrls.clear();
+}
+
+/**
+ * Формирует единую итоговую строку инцидента по звонку:
+ * [GigaASR] Звонок <id>: расшифровка завершена после N попыток / отложена на повтор / не удалась (причина).
+ */
+export function formatGigaAsrIncidentSummary(
+  callId: string | undefined,
+  outcome: 'completed' | 'deferred' | 'failed',
+  details: { attempts?: number; reason?: string } = {}
+): string {
+  const idLabel = (callId || '').trim() || 'unknown';
+  if (outcome === 'completed') {
+    const n = Math.max(1, Math.round(details.attempts ?? 1));
+    return `[GigaASR] Звонок ${idLabel}: расшифровка завершена после ${n} попыток`;
+  }
+  const cleanReason = (details.reason || 'неизвестная ошибка').replace(/\s+/g, ' ').trim();
+  if (outcome === 'deferred') {
+    return `[GigaASR] Звонок ${idLabel}: отложена на повтор (${cleanReason})`;
+  }
+  return `[GigaASR] Звонок ${idLabel}: не удалась (${cleanReason})`;
+}
 const VALID_VARIANTS: GigaamModelVariant[] = [
   'GigaChat/GigaASR',
   'GigaChat/SaluteSpeech',
@@ -551,7 +794,8 @@ async function sendMultipartOnce(
   meta: { ext: string; mime: string },
   config: GigaAmConfig,
   fieldName: 'file' | 'audio',
-  cloudRuOpts?: CloudRuAttemptOpts
+  cloudRuOpts?: CloudRuAttemptOpts,
+  ctx?: AsrRequestContext
 ): Promise<{ status: number; ok: boolean; statusText: string; rawBody: string }> {
   const modelParam = getModelParamForRequest(config);
   const headers: Record<string, string> = {};
@@ -593,10 +837,27 @@ async function sendMultipartOnce(
       maxAttempts: 4,
       baseDelayMs: 1000,
       maxDelayMs: 12000,
-    }
+      sleepFn: ctx?.sleepFn,
+      onAttempt: () => {
+        if (ctx) ctx.attempts++;
+      },
+      wrapAttempt: (fn) => runWithAsrSemaphore(fn, { sleepFn: ctx?.sleepFn }),
+      getDelayMs: (attempt, err, defaultDelayMs, retryAfterMs) => {
+        const calc = computeAsrErrorClassBackoff(attempt, err, defaultDelayMs, retryAfterMs);
+        if (calc.isRateLimit) {
+          pauseAsrQueue(calc.delayMs, `HTTP 429 попытка ${attempt}`);
+        }
+        return calc.delayMs;
+      },
+    },
+    ctx?.fetchImpl ?? fetch
   );
 
   const rawBody = await response.text().catch(() => '');
+  if (!response.ok && isAsrRateLimitError(null, response.status, rawBody)) {
+    const finalPause = ASR_RATE_LIMIT_BACKOFF_MS[ASR_RATE_LIMIT_BACKOFF_MS.length - 1];
+    pauseAsrQueue(finalPause, 'HTTP 429 после исчерпания попыток');
+  }
   return {
     status: response.status,
     ok: response.ok,
@@ -630,7 +891,8 @@ async function sendChatAudioOnce(
   meta: { ext: string; mime: string },
   config: GigaAmConfig,
   mode: 'input_audio' | 'audio_url',
-  includeTextPrompt: boolean = true
+  includeTextPrompt: boolean = true,
+  ctx?: AsrRequestContext
 ): Promise<{ status: number; ok: boolean; statusText: string; rawBody: string }> {
   const chatUrl = getChatCompletionsUrlFromConfig(config.apiUrl);
   const modelParam = getModelParamForRequest(config);
@@ -697,10 +959,27 @@ async function sendChatAudioOnce(
       maxAttempts: 4,
       baseDelayMs: 1000,
       maxDelayMs: 12000,
-    }
+      sleepFn: ctx?.sleepFn,
+      onAttempt: () => {
+        if (ctx) ctx.attempts++;
+      },
+      wrapAttempt: (fn) => runWithAsrSemaphore(fn, { sleepFn: ctx?.sleepFn }),
+      getDelayMs: (attempt, err, defaultDelayMs, retryAfterMs) => {
+        const calc = computeAsrErrorClassBackoff(attempt, err, defaultDelayMs, retryAfterMs);
+        if (calc.isRateLimit) {
+          pauseAsrQueue(calc.delayMs, `HTTP 429 chat/completions попытка ${attempt}`);
+        }
+        return calc.delayMs;
+      },
+    },
+    ctx?.fetchImpl ?? fetch
   );
 
   const rawBody = await response.text().catch(() => '');
+  if (!response.ok && isAsrRateLimitError(null, response.status, rawBody)) {
+    const finalPause = ASR_RATE_LIMIT_BACKOFF_MS[ASR_RATE_LIMIT_BACKOFF_MS.length - 1];
+    pauseAsrQueue(finalPause, 'HTTP 429 chat/completions после исчерпания попыток');
+  }
   return {
     status: response.status,
     ok: response.ok,
@@ -713,19 +992,21 @@ async function tryChatAudioFallback(
   audioBuffer: Buffer,
   meta: { ext: string; mime: string },
   config: GigaAmConfig,
-  label: string
+  label: string,
+  ctx?: AsrRequestContext
 ): Promise<{ ok: boolean; status: number; statusText: string; rawBody: string; text: string }> {
   // Для Cloud.ru сразу перекодируем MP3/OGG и любые не-WAV контейнеры в чистый WAV 16кГц моно PCM,
-  // чтобы не получать HTTP 400 на первой отправке.
+  // чтобы не получать HTTP 400 на первой отправке (пропускаем если WAV уже подготовлен).
   let effectiveBuf = audioBuffer;
   let effectiveMeta = meta;
-  let wasConvertedToWav = false;
-  if ((config.isCloudRu && meta.ext !== 'wav') || (meta.ext !== 'wav' && meta.ext !== 'mp3')) {
+  let wasConvertedToWav = Boolean(ctx?.isPreparedWav);
+  if (!wasConvertedToWav && ((config.isCloudRu && meta.ext !== 'wav') || (meta.ext !== 'wav' && meta.ext !== 'mp3'))) {
     const wavBuf = convertToWav16kMono(audioBuffer);
     if (wavBuf && wavBuf.length > 44) {
       effectiveBuf = wavBuf;
       effectiveMeta = { ext: 'wav', mime: 'audio/wav' };
       wasConvertedToWav = true;
+      ctx?.onPreparedWav?.(wavBuf);
     }
   }
 
@@ -743,7 +1024,8 @@ async function tryChatAudioFallback(
       effectiveMeta,
       config,
       attempt.mode,
-      attempt.includeText
+      attempt.includeText,
+      ctx
     );
     lastRes = res;
     if (res.ok) {
@@ -752,7 +1034,7 @@ async function tryChatAudioFallback(
         text: parseTranscriptionBody(res.rawBody, label),
       };
     }
-    if (res.status === 401 || res.status === 403 || res.status === 404) {
+    if (res.status === 401 || res.status === 403 || res.status === 404 || res.status === 429) {
       break;
     }
   }
@@ -765,13 +1047,15 @@ async function tryChatAudioFallback(
   ) {
     const wavBuf = convertToWav16kMono(audioBuffer);
     if (wavBuf && wavBuf.length > 44) {
+      ctx?.onPreparedWav?.(wavBuf);
       for (const attempt of attempts.slice(0, 2)) {
         const res = await sendChatAudioOnce(
           wavBuf,
           { ext: 'wav', mime: 'audio/wav' },
           config,
           attempt.mode,
-          attempt.includeText
+          attempt.includeText,
+          ctx
         );
         lastRes = res;
         if (res.ok) {
@@ -780,7 +1064,7 @@ async function tryChatAudioFallback(
             text: parseTranscriptionBody(res.rawBody, label),
           };
         }
-        if (res.status === 401 || res.status === 403 || res.status === 404) {
+        if (res.status === 401 || res.status === 403 || res.status === 404 || res.status === 429) {
           break;
         }
       }
@@ -817,19 +1101,21 @@ async function postAudioToGigaAm(
   fieldName: 'file' | 'audio' = 'file',
   allowWavFallback: boolean = true,
   preferVerboseJson: boolean = false,
-  onRawSegments?: (segs: TimedUtterance[]) => void
+  onRawSegments?: (segs: TimedUtterance[]) => void,
+  ctx?: AsrRequestContext
 ): Promise<string> {
-  const format = detectAudioFormat(audioBuffer);
-  const meta = getFileMeta(format, mimeType);
+  const meta = ctx?.isPreparedWav
+    ? { ext: 'wav', mime: 'audio/wav' }
+    : getFileMeta(detectAudioFormat(audioBuffer), mimeType);
   const label = config.isCloudRu ? 'GigaASR (Cloud.ru)' : 'GigaAM v3';
 
   if (config.isCloudRu) {
     // Cloud.ru GigaASR стабильно отклоняет MP3/OGG с HTTP 400 — сразу конвертируем в WAV 16кГц моно PCM
-    // перед первым запросом, чтобы не тратить время на лишние 400-ответы.
+    // перед первым запросом (пропускаем конвертацию, если WAV уже подготовлен заранее).
     let cloudBuffer = audioBuffer;
     let cloudMeta = meta;
-    let cloudAllowWavFallback = allowWavFallback;
-    if (meta.ext !== 'wav') {
+    let cloudAllowWavFallback = ctx?.isPreparedWav ? false : allowWavFallback;
+    if (!ctx?.isPreparedWav && meta.ext !== 'wav') {
       const wavBuf = convertToWav16kMono(audioBuffer);
       if (wavBuf && wavBuf.length > 44) {
         console.log(
@@ -838,7 +1124,10 @@ async function postAudioToGigaAm(
         cloudBuffer = wavBuf;
         cloudMeta = { ext: 'wav', mime: 'audio/wav' };
         cloudAllowWavFallback = false;
+        ctx?.onPreparedWav?.(wavBuf);
       }
+    } else if (meta.ext === 'wav') {
+      ctx?.onPreparedWav?.(audioBuffer);
     }
 
     const {
@@ -854,7 +1143,7 @@ async function postAudioToGigaAm(
       (isDirectChatUrl || chatCompletionsFallbackUrls.has(resolvedConfig.apiUrl)) &&
       !transcriptionsFallbackUrls.has(resolvedConfig.apiUrl)
     ) {
-      const chatRes = await tryChatAudioFallback(cloudBuffer, cloudMeta, resolvedConfig, label);
+      const chatRes = await tryChatAudioFallback(cloudBuffer, cloudMeta, resolvedConfig, label, ctx);
       if (chatRes.ok) {
         if (onRawSegments && chatRes.text) {
           onRawSegments([{ text: chatRes.text }]);
@@ -870,7 +1159,8 @@ async function postAudioToGigaAm(
           cloudMeta,
           { ...resolvedConfig, apiUrl: txUrl },
           fieldName,
-          { responseFormat: preferVerboseJson ? 'verbose_json' : 'json', includeLanguage: true }
+          { responseFormat: preferVerboseJson ? 'verbose_json' : 'json', includeLanguage: true },
+          ctx
         );
         if (txRes.ok) {
           transcriptionsFallbackUrls.add(resolvedConfig.apiUrl);
@@ -880,13 +1170,14 @@ async function postAudioToGigaAm(
             return parsedText;
           }
         }
-        const txMinimalRes = !txRes.ok && txRes.status !== 401 && txRes.status !== 403 && txRes.status !== 404
+        const txMinimalRes = !txRes.ok && txRes.status !== 401 && txRes.status !== 403 && txRes.status !== 404 && txRes.status !== 429
           ? await sendMultipartOnce(
               cloudBuffer,
               cloudMeta,
               { ...resolvedConfig, apiUrl: txUrl },
               fieldName,
-              { includeLanguage: false }
+              { includeLanguage: false },
+              ctx
             )
           : txRes;
         if (txMinimalRes.ok) {
@@ -902,6 +1193,10 @@ async function postAudioToGigaAm(
         }`
       );
       err.status = chatRes.status;
+      if (isAsrRateLimitError(err, chatRes.status, chatRes.rawBody)) {
+        err.rateLimited = true;
+        err.asrAttemptsExhausted = true;
+      }
       throw err;
     }
 
@@ -923,7 +1218,7 @@ async function postAudioToGigaAm(
 
     let lastRes: { status: number; ok: boolean; statusText: string; rawBody: string } | null = null;
     for (const profile of paramProfiles) {
-      const res = await sendMultipartOnce(cloudBuffer, cloudMeta, effectiveTxConfig, fieldName, profile);
+      const res = await sendMultipartOnce(cloudBuffer, cloudMeta, effectiveTxConfig, fieldName, profile, ctx);
       lastRes = res;
 
       if (res.ok) {
@@ -936,7 +1231,7 @@ async function postAudioToGigaAm(
         continue;
       }
 
-      // Ошибки авторизации, лимитов или отсутствия маршрута (404/405) не исправятся сменой полей multipart
+      // Ошибки авторизации, лимитов или отсутствия маршрута (404/405/429) не исправятся сменой полей multipart
       if (res.status === 401 || res.status === 403 || res.status === 404 || res.status === 405 || res.status === 429) {
         break;
       }
@@ -962,7 +1257,7 @@ async function postAudioToGigaAm(
         );
         const altCfg: GigaAmConfig = { ...effectiveTxConfig, variant: altModel };
         for (const profile of [{ responseFormat: 'json', includeLanguage: true }, { includeLanguage: false }] as CloudRuAttemptOpts[]) {
-          const altRes = await sendMultipartOnce(cloudBuffer, cloudMeta, altCfg, fieldName, profile);
+          const altRes = await sendMultipartOnce(cloudBuffer, cloudMeta, altCfg, fieldName, profile, ctx);
           if (altRes.ok) {
             const parsedText = parseTranscriptionBody(altRes.rawBody, label);
             if (parsedText) {
@@ -973,7 +1268,7 @@ async function postAudioToGigaAm(
               return parsedText;
             }
           }
-          if (altRes.status === 401 || altRes.status === 403 || altRes.status === 404 || altRes.status === 405) {
+          if (altRes.status === 401 || altRes.status === 403 || altRes.status === 404 || altRes.status === 405 || altRes.status === 429) {
             break;
           }
         }
@@ -985,7 +1280,7 @@ async function postAudioToGigaAm(
         console.warn(
           `[${label}] ${effectiveTxConfig.apiUrl} вернул HTTP ${lastRes.status}, переключение на ${getChatCompletionsUrlFromConfig(effectiveTxConfig.apiUrl)}...`
         );
-        const chatRes = await tryChatAudioFallback(cloudBuffer, cloudMeta, effectiveTxConfig, label);
+        const chatRes = await tryChatAudioFallback(cloudBuffer, cloudMeta, effectiveTxConfig, label, ctx);
         if (chatRes.ok) {
           chatCompletionsFallbackUrls.add(resolvedConfig.apiUrl);
           return chatRes.text;
@@ -996,6 +1291,10 @@ async function postAudioToGigaAm(
           }`
         );
         err.status = chatRes.status;
+        if (isAsrRateLimitError(err, chatRes.status, chatRes.rawBody)) {
+          err.rateLimited = true;
+          err.asrAttemptsExhausted = true;
+        }
         throw err;
       }
 
@@ -1014,7 +1313,8 @@ async function postAudioToGigaAm(
         const wavBuf = convertToWav16kMono(cloudBuffer);
         if (wavBuf && wavBuf.length > 44) {
           console.log(`[${label}] Повторная отправка в универсальном формате WAV 16кГц моно...`);
-          return postAudioToGigaAm(wavBuf, 'audio/wav', config, fieldName, false);
+          ctx?.onPreparedWav?.(wavBuf);
+          return postAudioToGigaAm(wavBuf, 'audio/wav', config, fieldName, false, preferVerboseJson, onRawSegments, ctx);
         }
       }
       return '';
@@ -1031,7 +1331,8 @@ async function postAudioToGigaAm(
         console.warn(
           `[${label}] Ответ HTTP ${lastRes.status} для ${cloudMeta.ext}. Конвертация в стандартный WAV 16кГц моно и повтор...`
         );
-        return postAudioToGigaAm(wavBuf, 'audio/wav', config, fieldName, false);
+        ctx?.onPreparedWav?.(wavBuf);
+        return postAudioToGigaAm(wavBuf, 'audio/wav', config, fieldName, false, preferVerboseJson, onRawSegments, ctx);
       }
     }
 
@@ -1041,14 +1342,20 @@ async function postAudioToGigaAm(
       }`
     );
     err.status = lastRes?.status || 500;
+    if (isAsrRateLimitError(err, lastRes?.status, lastRes?.rawBody)) {
+      err.rateLimited = true;
+      err.asrAttemptsExhausted = true;
+    } else if (lastRes?.status === 504 || lastRes?.status === 502 || lastRes?.status === 503) {
+      err.asrAttemptsExhausted = true;
+    }
     throw err;
   }
 
   // Self-hosted GigaAM v3
-  const res = await sendMultipartOnce(audioBuffer, meta, config, fieldName);
+  const res = await sendMultipartOnce(audioBuffer, meta, config, fieldName, undefined, ctx);
 
   if (res.status === 422 && fieldName === 'file') {
-    return postAudioToGigaAm(audioBuffer, mimeType, config, 'audio', allowWavFallback);
+    return postAudioToGigaAm(audioBuffer, mimeType, config, 'audio', allowWavFallback, preferVerboseJson, onRawSegments, ctx);
   }
 
   if (res.status === 415) {
@@ -1071,22 +1378,41 @@ async function postAudioToGigaAm(
         maxAttempts: 4,
         baseDelayMs: 1000,
         maxDelayMs: 12000,
+        sleepFn: ctx?.sleepFn,
+        onAttempt: () => {
+          if (ctx) ctx.attempts++;
+        },
+        wrapAttempt: (fn) => runWithAsrSemaphore(fn, { sleepFn: ctx?.sleepFn }),
+        getDelayMs: (attempt, err, defaultDelayMs, retryAfterMs) => {
+          const calc = computeAsrErrorClassBackoff(attempt, err, defaultDelayMs, retryAfterMs);
+          if (calc.isRateLimit) {
+            pauseAsrQueue(calc.delayMs, `HTTP 429 json-fallback попытка ${attempt}`);
+          }
+          return calc.delayMs;
+        },
       }
     );
     return extractTextFromGigaAmResponse(jsonRes.data);
   }
 
   if (!res.ok) {
-    if (allowWavFallback && meta.ext !== 'wav' && (res.status === 400 || res.status === 422 || res.status === 500)) {
+    if (allowWavFallback && !ctx?.isPreparedWav && meta.ext !== 'wav' && (res.status === 400 || res.status === 422 || res.status === 500)) {
       const wavBuf = convertToWav16kMono(audioBuffer);
       if (wavBuf && wavBuf.length > 44) {
-        return postAudioToGigaAm(wavBuf, 'audio/wav', config, fieldName, false);
+        ctx?.onPreparedWav?.(wavBuf);
+        return postAudioToGigaAm(wavBuf, 'audio/wav', config, fieldName, false, preferVerboseJson, onRawSegments, ctx);
       }
     }
     const err: any = new Error(
       `${label} HTTP ${res.status}: ${res.rawBody.slice(0, 300) || res.statusText}`
     );
     err.status = res.status;
+    if (isAsrRateLimitError(err, res.status, res.rawBody)) {
+      err.rateLimited = true;
+      err.asrAttemptsExhausted = true;
+    } else if (res.status === 504 || res.status === 502 || res.status === 503) {
+      err.asrAttemptsExhausted = true;
+    }
     throw err;
   }
 
@@ -1098,7 +1424,8 @@ async function transcribeMonoAudioSegmentsWithGigaAm(
   mimeType: string,
   cfg: GigaAmConfig,
   label: string,
-  preferVerboseJson: boolean = false
+  preferVerboseJson: boolean = false,
+  ctx?: AsrRequestContext
 ): Promise<TimedUtterance[]> {
   const duration = getAudioDuration(audioBuffer);
   let directError: Error | null = null;
@@ -1110,11 +1437,12 @@ async function transcribeMonoAudioSegmentsWithGigaAm(
       mimeType,
       cfg,
       'file',
-      true,
+      !ctx?.isPreparedWav,
       preferVerboseJson,
       (segs) => {
         capturedSegments = segs;
-      }
+      },
+      ctx
     );
     if (capturedSegments.length > 0) {
       return capturedSegments;
@@ -1124,8 +1452,13 @@ async function transcribeMonoAudioSegmentsWithGigaAm(
     }
   } catch (err: any) {
     directError = err;
-    const isAuthOrQuotaError = err.status === 401 || err.status === 403 || err.status === 404;
-    if (isAuthOrQuotaError) {
+    const isAuthOrRateLimitError =
+      err.status === 401 ||
+      err.status === 403 ||
+      err.status === 404 ||
+      err.status === 429 ||
+      Boolean(err.rateLimited);
+    if (isAuthOrRateLimitError) {
       throw err;
     }
     const canTryChunking =
@@ -1140,7 +1473,7 @@ async function transcribeMonoAudioSegmentsWithGigaAm(
     if (!canTryChunking) {
       throw err;
     }
-    console.warn(`[${label}] Прямая отправка не принята (${err.message}), переключение на сегментацию WAV 16кГц...`);
+    console.warn(`[${label}] Прямая отправка не принята (${err.message}), переключение на последовательную сегментацию WAV 16кГц...`);
   }
 
   const shouldChunk = duration >= 20 || (duration === 0 && audioBuffer.length > 256 * 1024) || Boolean(directError);
@@ -1156,10 +1489,19 @@ async function transcribeMonoAudioSegmentsWithGigaAm(
       const allSegments: TimedUtterance[] = [];
       let lastChunkErr: Error | null = null;
       let offsetSec = 0;
+      // Строго последовательная отправка сегментов: следующий запускается ТОЛЬКО после завершения предыдущего
       for (let i = 0; i < chunks.length; i++) {
         const chunkDur = getAudioDuration(chunks[i]) || 22;
         try {
           let captured: TimedUtterance[] = [];
+          const chunkCtx: AsrRequestContext | undefined = ctx
+            ? {
+                ...ctx,
+                isPreparedWav: chunkMime === 'audio/wav',
+                // не перетираем целый подготовленный WAV отдельным фрагментом
+                onPreparedWav: undefined,
+              }
+            : undefined;
           const text = await postAudioToGigaAm(
             chunks[i],
             chunkMime,
@@ -1173,8 +1515,12 @@ async function transcribeMonoAudioSegmentsWithGigaAm(
                 start: typeof s.start === 'number' ? s.start + offsetSec : offsetSec,
                 end: typeof s.end === 'number' ? s.end + offsetSec : undefined,
               }));
-            }
+            },
+            chunkCtx
           );
+          if (ctx && chunkCtx) {
+            ctx.attempts = chunkCtx.attempts;
+          }
           if (captured.length > 0) {
             allSegments.push(...captured);
           } else if (text && text.trim()) {
@@ -1183,6 +1529,15 @@ async function transcribeMonoAudioSegmentsWithGigaAm(
         } catch (chunkErr: any) {
           lastChunkErr = chunkErr;
           console.warn(`[${label}] Ошибка сегмента ${i + 1}/${chunks.length}:`, chunkErr.message);
+          if (
+            chunkErr.status === 429 ||
+            chunkErr.rateLimited ||
+            chunkErr.status === 401 ||
+            chunkErr.status === 403 ||
+            chunkErr.status === 404
+          ) {
+            throw chunkErr;
+          }
         }
         offsetSec += chunkDur;
       }
@@ -1205,7 +1560,8 @@ async function transcribeMonoAudioSegmentsWithGigaAm(
 export async function transcribeWithGigaAm(
   audioBuffer: Buffer,
   mimeType: string = 'audio/mpeg',
-  variantOverride?: GigaamModelVariant
+  variantOverride?: GigaamModelVariant,
+  options?: GigaAmTranscribeOptions
 ): Promise<string> {
   const cfg = getGigaAmConfig(undefined, undefined, variantOverride);
   if (!cfg.apiUrl) {
@@ -1219,58 +1575,114 @@ export async function transcribeWithGigaAm(
     );
   }
 
+  const ctx: AsrRequestContext = {
+    callId: options?.callId,
+    isPreparedWav: Boolean(options?.isPreparedWav),
+    onPreparedWav: options?.onPreparedWav,
+    attempts: 0,
+    fetchImpl: options?.fetchImpl,
+    sleepFn: options?.sleepFn,
+  };
+
   const duration = getAudioDuration(audioBuffer);
   const label = cfg.isCloudRu ? 'GigaASR Cloud.ru' : 'GigaAM v3';
-  const channels = probeAudioChannels(audioBuffer);
+  const channels = ctx.isPreparedWav ? 1 : probeAudioChannels(audioBuffer);
   console.log(
-    `[${label}] Отправка аудио (${Math.round(audioBuffer.length / 1024)} КБ, ${duration.toFixed(1)} сек., каналов: ${channels}, модель: ${cfg.variant}) -> ${cfg.apiUrl}`
+    `[${label}] Отправка аудио${ctx.callId ? ` (звонок ${ctx.callId})` : ''} (${Math.round(audioBuffer.length / 1024)} КБ, ${duration.toFixed(1)} сек., каналов: ${channels}, WAV готов: ${ctx.isPreparedWav ? 'да' : 'нет'}, модель: ${cfg.variant}, лимит ASR_MAX_CONCURRENT=${getAsrMaxConcurrent()}) -> ${cfg.apiUrl}`
   );
 
-  // П. 2: Если запись стерео (Мегафон) — разделяем на два моно-канала, распознаём по отдельности и склеиваем по ролям
-  if (channels >= 2) {
-    const split = splitStereoToMonoWavChannels(audioBuffer);
-    if (split && !split.isDualMono) {
-      console.log(`[${label}] Истинное стерео: разделение на 2 моно-канала для раздельного распознавания...`);
-      const [ch0Segs, ch1Segs] = await Promise.all([
-        transcribeMonoAudioSegmentsWithGigaAm(split.ch0, 'audio/wav', cfg, `${label} [CH0]`, true),
-        transcribeMonoAudioSegmentsWithGigaAm(split.ch1, 'audio/wav', cfg, `${label} [CH1]`, true),
-      ]);
-      const merged = mergeDualChannelTranscripts(ch0Segs, ch1Segs);
-      if (merged.trim()) {
-        return merged;
+  try {
+    // П. 2: Если запись стерео (Мегафон) — разделяем на два моно-канала, распознаём СТРОГО ПОСЛЕДОВАТЕЛЬНО (не параллельно) через общий семафор
+    if (channels >= 2) {
+      const split = splitStereoToMonoWavChannels(audioBuffer);
+      if (split && !split.isDualMono) {
+        console.log(`[${label}] Истинное стерео: последовательное распознавание 2 моно-каналов (CH0 → CH1) через общий семафор ASR...`);
+        const ch0Segs = await transcribeMonoAudioSegmentsWithGigaAm(split.ch0, 'audio/wav', cfg, `${label} [CH0]`, true, ctx);
+        const ch1Segs = await transcribeMonoAudioSegmentsWithGigaAm(split.ch1, 'audio/wav', cfg, `${label} [CH1]`, true, ctx);
+        const merged = mergeDualChannelTranscripts(ch0Segs, ch1Segs);
+        if (merged.trim()) {
+          return merged;
+        }
+      } else if (split?.isDualMono) {
+        console.log(`[${label}] Обнаружен dual-mono (одинаковые каналы) — используем стандартную моно-схему с разметкой ролей по смыслу.`);
       }
-    } else if (split?.isDualMono) {
-      console.log(`[${label}] Обнаружен dual-mono (одинаковые каналы) — используем стандартную моно-схему с разметкой ролей по смыслу.`);
     }
-  }
 
-  // Моно-режим (или dual-mono): стандартный пайплайн, роли разметит модель по смыслу
-  const segs = await transcribeMonoAudioSegmentsWithGigaAm(audioBuffer, mimeType, cfg, label, false);
-  const joined = segs.map((s) => s.text).filter(Boolean).join('\n').trim();
-  return joined ? fixDuplicatedTranscript(refineTranscriptRoles(joined)) : '';
+    // Моно-режим (или dual-mono / заранее подготовленный WAV): стандартный пайплайн, роли разметит модель по смыслу
+    const segs = await transcribeMonoAudioSegmentsWithGigaAm(audioBuffer, mimeType, cfg, label, false, ctx);
+    const joined = segs.map((s) => s.text).filter(Boolean).join('\n').trim();
+    return joined ? fixDuplicatedTranscript(refineTranscriptRoles(joined)) : '';
+  } finally {
+    options?.onAttemptCount?.(Math.max(1, ctx.attempts));
+  }
 }
 
 export async function transcribeWithGigaAmRetry(
   audioBuffer: Buffer,
   mimeType: string = 'audio/mpeg',
-  variantOverride?: GigaamModelVariant
+  variantOverride?: GigaamModelVariant,
+  options?: GigaAmTranscribeOptions
 ): Promise<string> {
+  let totalAttempts = 0;
   try {
-    return await withSttRetry(
-      () => transcribeWithGigaAm(audioBuffer, mimeType, variantOverride),
+    const text = await withSttRetry(
+      () =>
+        transcribeWithGigaAm(audioBuffer, mimeType, variantOverride, {
+          ...options,
+          onAttemptCount: (n) => {
+            totalAttempts += n;
+            options?.onAttemptCount?.(totalAttempts);
+          },
+        }),
       {
         providerName: 'GigaASR / GigaAM v3',
         operationName: 'transcribe',
         maxAttempts: MAX_RETRIES,
         baseDelayMs: BASE_DELAY_MS,
         maxDelayMs: 16000,
-        shouldRetry: (err) => isTransientSttError(err),
+        sleepFn: options?.sleepFn,
+        shouldRetry: (err: any) => {
+          // Если внутренний sendMultipartOnce уже исчерпал все попытки по 429/504 с глобальным бэкоффом,
+          // не запускаем вложенный цикл повторных штурмов эндпоинта.
+          if (err?.asrAttemptsExhausted || err?.rateLimited) {
+            return false;
+          }
+          return isTransientSttError(err);
+        },
+        getDelayMs: (attempt, err, defaultDelayMs, retryAfterMs) => {
+          const calc = computeAsrErrorClassBackoff(attempt, err, defaultDelayMs, retryAfterMs);
+          if (calc.isRateLimit) {
+            pauseAsrQueue(calc.delayMs, `внешний ретрай HTTP 429 попытка ${attempt}`);
+          }
+          return calc.delayMs;
+        },
       }
     );
+    if (options?.emitIncidentSummary !== false) {
+      console.log(
+        formatGigaAsrIncidentSummary(options?.callId, 'completed', {
+          attempts: Math.max(1, totalAttempts),
+        })
+      );
+    }
+    return text;
   } catch (error: any) {
     const detail = formatSttNetworkError(error);
-    const attempts = typeof error?.sttAttempts === 'number' ? error.sttAttempts : MAX_RETRIES;
-    console.error(`[GigaASR / GigaAM v3] Транскрибация завершилась ошибкой (попыток: ${attempts}):`, detail);
+    const attempts = Math.max(
+      1,
+      totalAttempts || (typeof error?.sttAttempts === 'number' ? error.sttAttempts : MAX_RETRIES)
+    );
+    options?.onAttemptCount?.(attempts);
+    if (options?.emitIncidentSummary === true) {
+      console.error(
+        formatGigaAsrIncidentSummary(options?.callId, 'failed', {
+          attempts,
+          reason: detail,
+        })
+      );
+    } else {
+      console.error(`[GigaASR / GigaAM v3] Транскрибация завершилась ошибкой (попыток: ${attempts}):`, detail);
+    }
     const wrapped: any = new Error(
       attempts > 1
         ? `GigaASR / GigaAM v3 недоступен после ${attempts} попыток: ${detail}`
@@ -1279,6 +1691,8 @@ export async function transcribeWithGigaAmRetry(
     if (error?.status) wrapped.status = error.status;
     if (error?.response?.status) wrapped.status = error.response.status;
     if (error?.code) wrapped.code = error.code;
+    wrapped.sttAttempts = attempts;
+    wrapped.rateLimited = Boolean(error?.rateLimited || isAsrRateLimitError(error));
     wrapped.cause = error;
     throw wrapped;
   }

@@ -17,6 +17,16 @@ export interface TranscriptionResult {
   engine: TranscriptionEngine;
   attemptedProvider: SttProvider;
   error?: string;
+  attempts?: number;
+  preparedWav?: Buffer;
+  rateLimited?: boolean;
+  httpStatus?: number;
+}
+
+export interface TranscribeAudioOptions {
+  callId?: string;
+  isPreparedWav?: boolean;
+  emitIncidentSummary?: boolean;
 }
 
 export function normalizeSttProvider(raw?: string | null): SttProvider {
@@ -67,7 +77,8 @@ export async function transcribeAudio(
   mimeType: string = 'audio/mp3',
   onLog?: (type: 'info' | 'success' | 'warning' | 'error', msg: string) => void,
   providerOverride?: SttProvider | string,
-  gigaamVariantOverride?: GigaamModelVariant
+  gigaamVariantOverride?: GigaamModelVariant,
+  options?: TranscribeAudioOptions
 ): Promise<TranscriptionResult> {
   const log = (type: 'info' | 'success' | 'warning' | 'error', msg: string) => {
     if (onLog) {
@@ -112,21 +123,56 @@ export async function transcribeAudio(
       return { text: '', engine: 'none', attemptedProvider: provider, error: errorMsg };
     }
 
+    let preparedWav: Buffer | undefined = options?.isPreparedWav ? audioBuffer : undefined;
+    let attempts = 0;
+
     try {
       log('info', `[STT] Запуск распознавания аудиозаписи через ${providerLabel}...`);
-      const rawText = await transcribeWithGigaAmRetry(audioBuffer, mimeType, gigaamVariantOverride);
+      const rawText = await transcribeWithGigaAmRetry(audioBuffer, mimeType, gigaamVariantOverride, {
+        callId: options?.callId,
+        isPreparedWav: options?.isPreparedWav,
+        emitIncidentSummary: options?.emitIncidentSummary ?? false,
+        onPreparedWav: (wavBuf) => {
+          preparedWav = wavBuf;
+        },
+        onAttemptCount: (n) => {
+          attempts = n;
+        },
+      });
       if (rawText && rawText.trim().length > 0) {
         const cleaned = fixDuplicatedTranscript(refineTranscriptRoles(rawText.trim()));
         log('success', `[STT] Речь успешно расшифрована ${providerLabel} (${cleaned.length} симв.)`);
-        return { text: cleaned, engine: 'gigaam_v3', attemptedProvider: provider };
+        return {
+          text: cleaned,
+          engine: 'gigaam_v3',
+          attemptedProvider: provider,
+          attempts: Math.max(1, attempts),
+          preparedWav,
+        };
       }
       const emptyMsg = 'Аудиозапись не содержит разборчивой речи (тишина или звуковой сигнал).';
       log('info', `[STT] ${providerLabel}: ${emptyMsg}`);
-      return { text: '', engine: 'gigaam_v3', attemptedProvider: provider, error: emptyMsg };
+      return {
+        text: '',
+        engine: 'gigaam_v3',
+        attemptedProvider: provider,
+        error: emptyMsg,
+        attempts: Math.max(1, attempts),
+        preparedWav,
+      };
     } catch (err: any) {
       const errMsg = err.message || String(err);
       log('error', `[STT] Ошибка распознавания речи ${providerLabel}: ${errMsg}`);
-      return { text: '', engine: 'none', attemptedProvider: provider, error: errMsg };
+      return {
+        text: '',
+        engine: 'none',
+        attemptedProvider: provider,
+        error: errMsg,
+        attempts: Math.max(1, attempts || (typeof err?.sttAttempts === 'number' ? err.sttAttempts : 1)),
+        preparedWav,
+        rateLimited: Boolean(err?.rateLimited || err?.status === 429),
+        httpStatus: typeof err?.status === 'number' ? err.status : undefined,
+      };
     }
   }
 

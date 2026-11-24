@@ -179,4 +179,98 @@ describe('applyVerdicts suspected false positive', () => {
     assert.equal(updatedCrit?.score, 9);
     assert.equal(result.operator_score, 9);
   });
+
+  it('синтез-поля (booking_done, booking_status_text, short_summary) подтверждаются при confirmed составных фактах (booking_markers, дата/время, мастер)', () => {
+    const transcript =
+      'Менеджер: Добрый день, Ольга, салон ЛИК 28, меня зовут Кристина. Перенесём вашу запись на завтра в 12:00 к мастеру Дарье Прибытковой?\n' +
+      'Клиент: Да, конечно, подойду.\n' +
+      'Менеджер: Отлично, перенесла запись на завтра в 12:00 к Дарье Прибытковой.';
+
+    const draft: any = {
+      transcript_summary: 'Запись перенесена к другому мастеру без изменения времени: завтра в 12:00 к Дарье Прибытковой.',
+      formatted_transcript: transcript,
+      booking_status: 'согласие',
+      structured_summary: {
+        call_purpose: 'Перенос записи',
+        requested_service: 'не озвучено',
+        offered_master: 'Дарья Прибыткова',
+        offered_price: 'не озвучено',
+        offered_date_time: 'завтра в 12:00',
+        booking_status_text: 'Запись перенесена к другому мастеру без изменения времени',
+        unbooked_reason: 'не применимо',
+        manager_next_steps: [],
+      },
+      key_facts: {
+        is_dispute: false,
+        dispute_reason: null,
+        promises: [],
+        tone_client: 'позитивный',
+        tone_manager: 'дружелюбный',
+        call_outcome: 'запись',
+        booking_status: 'согласие',
+        booking_markers_quotes: ['Отлично, перенесла запись на завтра в 12:00 к Дарье Прибытковой.'],
+        date_time_offered_quote: 'на завтра в 12:00',
+      },
+      operator_score: 10,
+      operator_mistakes: [],
+      operator_comment: 'Отлично',
+      recommendations: [],
+    };
+
+    const result = applyVerdicts(
+      draft,
+      [
+        {
+          field: 'offered_date_time',
+          draft_value: 'завтра в 12:00',
+          verdict: 'confirmed',
+          quote: 'на завтра в 12:00',
+          corrected_value: null,
+        },
+        {
+          field: 'offered_master',
+          draft_value: 'Дарья Прибыткова',
+          verdict: 'confirmed',
+          quote: 'к мастеру Дарье Прибытковой',
+          corrected_value: null,
+        },
+        {
+          field: 'booking_done',
+          draft_value: 'Запись перенесена к другому мастеру без изменения времени',
+          verdict: 'unconfirmed',
+          quote: null,
+          corrected_value: null,
+        },
+        {
+          field: 'booking_status_text',
+          draft_value: 'Запись перенесена к другому мастеру без изменения времени',
+          verdict: 'unconfirmed',
+          quote: null,
+          corrected_value: null,
+        },
+        {
+          field: 'short_summary',
+          draft_value: 'Запись перенесена к другому мастеру без изменения времени: завтра в 12:00 к Дарье Прибытковой.',
+          verdict: 'unconfirmed',
+          quote: null,
+          corrected_value: null,
+        },
+      ],
+      [],
+      0,
+      transcript
+    );
+
+    for (const synthField of ['booking_done', 'booking_status_text', 'short_summary']) {
+      const f = result.verification_report?.fields.find((x) => x.field === synthField);
+      assert.equal(f?.verdict, 'confirmed', `Синтез-поле ${synthField} должно стать confirmed при подтверждённых составных фактах`);
+      assert.ok(f?.quote, `Синтез-поле ${synthField} должно получить подтверждающую цитату составного факта`);
+    }
+    assert.equal(result.verification_report?.summary_verdict, 'ок');
+    assert.deepEqual(result.verification_flags, []);
+    assert.equal(
+      result.structured_summary?.booking_status_text,
+      'Запись перенесена к другому мастеру без изменения времени'
+    );
+  });
 });

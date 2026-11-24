@@ -27,6 +27,7 @@ export const VERIFIER_PROMPT = `Ты — строгий проверяющий �
 5. Имена мастеров, цены, даты и время проверяй особенно строго: сравнивай посимвольно.
 6. Метки ролей (Клиент/Менеджер) в стенограмме могут быть неточными — опирайся на смысл реплик, а не на метку.
 7. Поля booking_status и call_outcome — это служебные метки словаря («согласие», «запись», «отказ», «консультация», «перезвон», «отмена»), НЕ проверяй их на дословное вхождение слова «согласие»/«запись» в текст: подтверждай их цитатой из стенограммы о записи, дате/времени или закрытии на визит.
+8. Синтез-поля booking_done, booking_status_text и short_summary — это сводные формулировки, НЕ проверяй их на дословное вхождение всей фразы целиком в стенограмму: проверяй подтверждённость их составных фактов (booking_markers, даты/времени, мастера). Если составные факты подтверждены стенограммой — ставь синтез-полю verdict: "confirmed" и указывай подтверждающую цитату одного из составных фактов.
 
 Верни строго JSON без markdown:
 {
@@ -85,6 +86,16 @@ export function isAbsenceValue(val: unknown): boolean {
 }
 
 const DICTIONARY_STATUS_FIELDS = new Set(['booking_status', 'call_outcome']);
+export const SYNTHESIS_FIELDS = new Set(['booking_done', 'booking_status_text', 'short_summary']);
+const CONSTITUENT_FACT_FIELDS = new Set([
+  'booking_markers',
+  'date_time_offered',
+  'offered_date_time',
+  'date',
+  'time',
+  'offered_master',
+  'master',
+]);
 
 function normalizeWhitespaceLower(s: string): string {
   return s
@@ -388,6 +399,7 @@ export function buildConciseDraftForVerifier(draft: AnalysisResult): Record<stri
     booking_done: bookingDoneValue,
     booking_markers: bookingMarkersValue,
     booking_status_text: bookingDoneValue,
+    short_summary: draft.transcript_summary ?? 'не озвучено',
     unbooked_reason: struct.unbooked_reason ?? kf.unbooked_reason ?? 'не озвучено',
     service: kf.service ?? 'не озвучено',
     date: kf.date ?? 'не озвучено',
@@ -490,14 +502,15 @@ export async function verifySummary(
   let hallucinatedQuotesCaught = 0;
 
   // Программная проверка цитат БЕЗ повторного запроса к LLM + детекция suspected false positive
-  // Поля booking_status и call_outcome (словарные метки) не проверяем дословной цитатой их значения
+  // Поля booking_status и call_outcome (словарные метки) и синтез-поля (booking_done, booking_status_text, short_summary)
+  // не требуют дословного вхождения всей синтетической формулировки — проверяются через составные факты.
   const preliminaryFields: VerifierField[] = parsed.fields.map((f) => {
     const fieldName = f.field.trim();
-    if (DICTIONARY_STATUS_FIELDS.has(fieldName)) {
+    if (DICTIONARY_STATUS_FIELDS.has(fieldName) || SYNTHESIS_FIELDS.has(fieldName)) {
       if (f.quote && isQuotePresentInTranscript(transcript, f.quote)) {
         return { ...f, verdict: f.verdict === 'contradicts' ? 'contradicts' : 'confirmed' };
       }
-      // Окончательный статус для booking_status / call_outcome определим ниже по цитатам booking_markers, date_time_offered и критерия 9
+      // Окончательный статус определим ниже по подтверждённости составных фактов (booking_markers, дата/время, мастер)
       return {
         ...f,
         quote: f.quote && isQuotePresentInTranscript(transcript, f.quote) ? f.quote : null,
@@ -547,17 +560,13 @@ export async function verifySummary(
     return f;
   });
 
-  // Подтверждение словарных полей booking_status / call_outcome через цитаты booking_markers, date_time_offered и смежных полей
-  const statusSupportQuote = (() => {
+  // Подтверждение словарных полей (booking_status / call_outcome) и синтез-полей (booking_done / booking_status_text / short_summary)
+  // через подтверждённые составные факты: booking_markers, дата/время (date_time_offered / offered_date_time / date / time), мастер (offered_master / master)
+  const constituentSupportQuote = (() => {
     const candidateQuotes: string[] = [];
     for (const pf of preliminaryFields) {
-      if (
-        pf.verdict === 'confirmed' &&
-        pf.quote &&
-        ['booking_done', 'booking_markers', 'booking_status_text', 'date_time_offered', 'offered_date_time', 'date', 'time'].includes(
-          pf.field.trim()
-        )
-      ) {
+      const fn = pf.field.trim();
+      if (pf.verdict === 'confirmed' && pf.quote && CONSTITUENT_FACT_FIELDS.has(fn)) {
         candidateQuotes.push(pf.quote);
       }
     }
@@ -573,12 +582,33 @@ export async function verifySummary(
     return candidateQuotes.find((q) => isQuotePresentInTranscript(transcript, q)) || null;
   })();
 
+  const hasContradictingConstituentFact = preliminaryFields.some(
+    (pf) => CONSTITUENT_FACT_FIELDS.has(pf.field.trim()) && pf.verdict === 'contradicts'
+  );
+
+  const statusSupportQuote = constituentSupportQuote;
+
   const verifiedFields: VerifierField[] = preliminaryFields.map((f) => {
-    if (DICTIONARY_STATUS_FIELDS.has(f.field.trim()) && f.verdict !== 'contradicts' && statusSupportQuote) {
+    const fn = f.field.trim();
+    if (DICTIONARY_STATUS_FIELDS.has(fn) && f.verdict !== 'contradicts' && statusSupportQuote) {
       return {
         ...f,
         verdict: 'confirmed',
         quote: f.quote || statusSupportQuote,
+        hallucinated_quote: false,
+      };
+    }
+    if (
+      SYNTHESIS_FIELDS.has(fn) &&
+      f.verdict !== 'contradicts' &&
+      !hasContradictingConstituentFact &&
+      constituentSupportQuote
+    ) {
+      return {
+        ...f,
+        verdict: 'confirmed',
+        quote: f.quote || constituentSupportQuote,
+        rejected_quote: null,
         hallucinated_quote: false,
       };
     }
@@ -589,7 +619,8 @@ export async function verifySummary(
     (f) =>
       f.verdict !== 'confirmed' &&
       !isAbsenceValue(f.draft_value) &&
-      !(DICTIONARY_STATUS_FIELDS.has(f.field.trim()) && statusSupportQuote)
+      !(DICTIONARY_STATUS_FIELDS.has(f.field.trim()) && statusSupportQuote) &&
+      !(SYNTHESIS_FIELDS.has(f.field.trim()) && !hasContradictingConstituentFact && constituentSupportQuote)
   );
   return {
     summary: draftSummary,
@@ -731,28 +762,35 @@ export function applyVerdicts(
   const keyFacts = { ...(draft.key_facts || {}) } as AnalysisResult['key_facts'];
   const effectiveTranscript = transcriptForCheck || draft.formatted_transcript || '';
 
-  // Сбор подтверждающих цитат для словарных полей booking_status и call_outcome:
-  // цитаты booking_markers, date_time_offered (offered_date_time/date/time) и критерия 9 (closing).
+  // Сбор подтверждающих цитат из составных фактов (booking_markers, дата/время, мастер) и критерия 9 (closing):
+  // используется как для словарных полей (booking_status, call_outcome), так и для синтез-полей (booking_done, booking_status_text, short_summary).
   const sourceCriteriaForStatus =
     draft.criteria_scores ||
     draft.evaluation?.criteria ||
     draft.key_facts?.criteria_scores ||
     [];
   const statusSupportCandidates: string[] = [];
+  const constituentSupportCandidates: string[] = [];
   if (Array.isArray(keyFacts.booking_markers_quotes)) {
-    statusSupportCandidates.push(...keyFacts.booking_markers_quotes.filter(Boolean));
+    const bmQuotes = keyFacts.booking_markers_quotes.filter(Boolean);
+    statusSupportCandidates.push(...bmQuotes);
+    constituentSupportCandidates.push(...bmQuotes);
   }
   if (keyFacts.date_time_offered_quote) {
     statusSupportCandidates.push(keyFacts.date_time_offered_quote);
+    constituentSupportCandidates.push(keyFacts.date_time_offered_quote);
   }
   for (const rf of report) {
     const fn = rf.field.trim();
-    if (
-      rf.verdict === 'confirmed' &&
-      rf.quote &&
-      ['booking_done', 'booking_markers', 'booking_status_text', 'date_time_offered', 'offered_date_time', 'date', 'time'].includes(fn)
-    ) {
-      statusSupportCandidates.push(rf.quote);
+    if (rf.verdict === 'confirmed' && rf.quote) {
+      if (CONSTITUENT_FACT_FIELDS.has(fn)) {
+        constituentSupportCandidates.push(rf.quote);
+      }
+      if (
+        ['booking_done', 'booking_markers', 'booking_status_text', 'date_time_offered', 'offered_date_time', 'date', 'time'].includes(fn)
+      ) {
+        statusSupportCandidates.push(rf.quote);
+      }
     }
   }
   const crit9Ver = criteriaReport.find((c) => c.id === 'closing');
@@ -764,14 +802,22 @@ export function applyVerdicts(
     statusSupportCandidates.push(crit9Pass1.evidence_quote);
   }
 
-  const verifiedStatusQuote = statusSupportCandidates.find((q) =>
+  const verifiedConstituentQuote = constituentSupportCandidates.find((q) =>
     effectiveTranscript ? isQuotePresentInTranscript(effectiveTranscript, q) : Boolean(q && q.trim().length >= 2)
   ) || null;
+  const verifiedStatusQuote = statusSupportCandidates.find((q) =>
+    effectiveTranscript ? isQuotePresentInTranscript(effectiveTranscript, q) : Boolean(q && q.trim().length >= 2)
+  ) || verifiedConstituentQuote;
+
+  const hasContradictingConstituent = report.some(
+    (rf) => CONSTITUENT_FACT_FIELDS.has(rf.field.trim()) && rf.verdict === 'contradicts' && Boolean(rf.quote && String(rf.quote).trim())
+  );
 
   // Нормализуем отчёт:
   // - contradicts без опровергающей цитаты понижаем до unconfirmed;
-  // - booking_status и call_outcome не требуют дословной цитаты слова «согласие»/«запись» —
-  //   если есть подтверждающая цитата из booking_markers, date_time_offered, booking_done или критерия 9, считаем confirmed.
+  // - booking_status и call_outcome не требуют дословной цитаты слова «согласие»/«запись»;
+  // - синтез-поля booking_done, booking_status_text, short_summary проверяются по подтверждённости составных фактов
+  //   (booking_markers, даты/времени, мастера) — если составные факты confirmed, синтез-поле confirmed.
   const normalizedReport: VerifierField[] = report.map((item) => {
     const hasFieldQuote = Boolean(item.quote && String(item.quote).trim());
     let normalizedItem: VerifierField =
@@ -780,6 +826,20 @@ export function applyVerdicts(
         : item;
 
     const fn = normalizedItem.field.trim();
+
+    if (SYNTHESIS_FIELDS.has(fn)) {
+      if (normalizedItem.verdict !== 'contradicts' && !hasContradictingConstituent && verifiedConstituentQuote) {
+        return {
+          ...normalizedItem,
+          verdict: 'confirmed',
+          quote: normalizedItem.quote || verifiedConstituentQuote,
+          rejected_quote: null,
+          hallucinated_quote: false,
+        };
+      }
+      return normalizedItem;
+    }
+
     if (
       normalizedItem.verdict === 'unconfirmed' &&
       !DICTIONARY_STATUS_FIELDS.has(fn) &&

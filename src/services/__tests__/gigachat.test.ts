@@ -148,25 +148,96 @@ describe('Промпт, ПРИМЕР 8, авто-ремонт критериев
     }
     assert.ok(FEW_SHOT_EXAMPLES.includes('ПРИМЕР 1'));
     const ex8Idx = FEW_SHOT_EDGE_CASES.indexOf('ПРИМЕР 8');
+    const ex9Idx = FEW_SHOT_EDGE_CASES.indexOf('ПРИМЕР 9');
     assert.ok(ex8Idx >= 0, 'ПРИМЕР 8 должен присутствовать в FEW_SHOT_EDGE_CASES');
-    const ex8Chunk = FEW_SHOT_EDGE_CASES.slice(ex8Idx);
-    const jsonStart = ex8Chunk.indexOf('{');
-    const jsonEnd = ex8Chunk.lastIndexOf('}');
-    assert.ok(jsonStart >= 0 && jsonEnd > jsonStart);
-    const parsedEx8 = JSON.parse(ex8Chunk.slice(jsonStart, jsonEnd + 1));
+    assert.ok(ex9Idx > ex8Idx, 'ПРИМЕР 9 должен располагаться рядом с ПРИМЕР 8 в FEW_SHOT_EDGE_CASES');
+
+    const ex8Chunk = FEW_SHOT_EDGE_CASES.slice(ex8Idx, ex9Idx);
+    const jsonStart8 = ex8Chunk.indexOf('{');
+    const jsonEnd8 = ex8Chunk.lastIndexOf('}');
+    assert.ok(jsonStart8 >= 0 && jsonEnd8 > jsonStart8);
+    const parsedEx8 = JSON.parse(ex8Chunk.slice(jsonStart8, jsonEnd8 + 1));
 
     assert.equal(parsedEx8.is_conversation, true);
     assert.equal(parsedEx8.booking_status, 'Запись состоялась');
-    assert.match(parsedEx8.formatted_transcript, /Менеджер:/);
-    assert.match(parsedEx8.formatted_transcript, /Клиент:/);
+    assert.match(parsedEx8.formatted_transcript, /Менеджер:.*Алло, Динара.*Меня зовут Алёна/);
+    assert.match(parsedEx8.formatted_transcript, /Клиент:\s*Да, я буду/);
     assert.equal(parsedEx8.summary.booking_done, 'Подтверждение ранее сделанной записи');
 
+    const crit1 = parsedEx8.audit.criteria.find((c: any) => /приветствие/i.test(c.name));
     const crit8 = parsedEx8.audit.criteria.find((c: any) => /альтернатив/i.test(c.name));
     const crit9 = parsedEx8.audit.criteria.find((c: any) => /закрытие на запись/i.test(c.name));
+    assert.equal(crit1?.applicable, true);
+    assert.ok(crit1?.score >= 9);
     assert.equal(crit8?.applicable, false);
     assert.equal(crit8?.score, null);
     assert.equal(crit9?.applicable, true);
     assert.ok(crit9?.score >= 9);
+
+    // Проверка ПРИМЕР 9 (перенос записи к другому мастеру без изменения времени)
+    const ex9Chunk = FEW_SHOT_EDGE_CASES.slice(ex9Idx);
+    const jsonStart9 = ex9Chunk.indexOf('{');
+    const jsonEnd9 = ex9Chunk.lastIndexOf('}');
+    assert.ok(jsonStart9 >= 0 && jsonEnd9 > jsonStart9);
+    const parsedEx9 = JSON.parse(ex9Chunk.slice(jsonStart9, jsonEnd9 + 1));
+
+    assert.equal(parsedEx9.is_conversation, true);
+    assert.equal(parsedEx9.booking_status, 'Запись состоялась');
+    assert.match(parsedEx9.summary.booking_done, /перенес/i);
+    assert.match(parsedEx9.summary.booking_done, /другому мастеру без изменения времени/i);
+  });
+
+  it('getSystemPrompt содержит правила Этапа 1 для исходящих ролей, ASR-искажений названия салона («От, а, 28» → «от ЛИК 28») и класса «перенос записи»', () => {
+    const prompt = getSystemPrompt('ЛИК 28');
+    assert.match(prompt, /Алло, Динара/i);
+    assert.match(prompt, /Меня зовут Алёна/i);
+    assert.match(prompt, /От, а, 28/i);
+    assert.match(prompt, /от ЛИК 28/i);
+    assert.match(prompt, /НЕ штрафуй менеджера за отсутствие названия салона/i);
+    assert.match(prompt, /перенос записи/i);
+    assert.match(prompt, /независимо от балла|независимо от выставленного балла/i);
+  });
+
+  it('validateResult удаляет запрещённые формулировки Критерия 9 независимо от выставленного балла (даже при 9–10)', () => {
+    const confirmTranscript =
+      'Менеджер: Добрый день, салон ЛИК 28, меня зовут Алёна. Вы к нам записаны на завтра в 15:00, подтверждаете?\n' +
+      'Клиент: Да, я буду. Спасибо, до свидания.';
+
+    const criteria: any[] = [
+      { id: 'greeting_intro', name: 'Приветствие и представление', is_applicable: true, score: 10, explanation: 'Полное приветствие.' },
+      { id: 'closing', name: 'Закрытие на запись', is_applicable: true, score: 9, explanation: 'Бронь не оформлена, попытка закрытия отсутствовала, но клиент подтвердил визит.' },
+      { id: 'communication', name: 'Качество коммуникации и завершение разговора', is_applicable: true, score: 10, explanation: 'Вежливо.' },
+    ];
+
+    const mockResult: any = {
+      is_conversation: true,
+      booking_status: 'согласие',
+      transcript_summary: 'Разбор работы менеджера (оценка 10/10):\n- Ошибки и недочеты: бронь не оформлена\n- Советы по оптимизации: не требуются',
+      formatted_transcript: confirmTranscript,
+      operator_score: 10,
+      operator_mistakes: ['бронь не оформлена'],
+      operator_comment: 'Ок',
+      recommendations: [],
+      criteria_scores: criteria,
+      evaluation: { overall_score: 10, max_score: 10, applicable_count: 3, total_criteria_count: 10, criteria },
+      key_facts: {
+        is_dispute: false,
+        dispute_reason: null,
+        tone_client: 'позитивный',
+        tone_manager: 'позитивный',
+        call_outcome: 'запись',
+        booking_status: 'согласие',
+        criteria_scores: criteria,
+        evaluation: { overall_score: 10, max_score: 10, applicable_count: 3, total_criteria_count: 10, criteria },
+      },
+    };
+
+    const check = validateResult(mockResult, confirmTranscript);
+    assert.equal(check.valid, true, `Неожиданные ошибки: ${check.errors.join('; ')}`);
+    const c9 = mockResult.criteria_scores.find((c: any) => c.id === 'closing');
+    assert.ok(c9.score >= 9);
+    assert.doesNotMatch(c9.explanation, /бронь не оформлена|попытка закрытия отсутствовала/i);
+    assert.deepEqual(mockResult.operator_mistakes, []);
   });
 
   it('validateResult автоматически переводит Критерий 8 в applicable: false, если в стенограмме нет отказа или несогласия клиента', () => {

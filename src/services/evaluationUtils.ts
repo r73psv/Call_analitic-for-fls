@@ -355,7 +355,7 @@ export function extractCallEvaluation(
     const hasGreeting = /(?:добрый день|здравствуйте|доброе утро|добрый вечер|приветствую|алло)/iu.test(openingManagerText);
     const hasManagerNameIntro = /(?:меня зовут|администратор(?:\s+салона[^.!?]{0,40})?\s+[А-ЯЁа-яё]+|это\s+[А-ЯЁа-яё]+)/iu.test(openingManagerText);
     const hasClientNameGreeting = /(?:[Дд]обр(?:ый\s+(?:день|вечер)|ое\s+утро)|[Зз]дравствуйте)[,\s]+(?!(?:Салон|Студ|Лик|Фэшн|Фешен|Fashion))[А-ЯЁ][а-яё]+/u.test(openingManagerText);
-    const hasSalonName = /(?:студи|салон|fashion|фешен|фэшн|лук\s*студ|лик)/iu.test(openingManagerText);
+    const hasSalonName = /(?:студи|салон|fashion|фешен|фэшн|лук\s*студ|лик(?:\s*28)?|от[,\s]+а[,\s]+28)/iu.test(openingManagerText);
   const isClippedIntroInStt =
     !hasGreeting &&
     !hasManagerNameIntro &&
