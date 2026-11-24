@@ -3,14 +3,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Phone, AlertTriangle, Star, CheckCircle, TrendingUp, TrendingDown,
   Clock, Flame, Activity, BarChart2, Grid3X3, Info, 
   Users, ChevronDown, ChevronUp, Zap, Sparkles,
   Smile, Frown, HeartHandshake, ShieldCheck, Calendar, LineChart as LineChartIcon,
-  Award, FileDown, ArrowUpDown, ChevronRight, SlidersHorizontal, ArrowUpRight, 
+  Award, FileDown, FileSpreadsheet, ArrowUpDown, ChevronRight, SlidersHorizontal, ArrowUpRight, 
   ArrowDownRight, Minus, RefreshCcw, FileText, Check, Loader2, ArrowRight
 } from 'lucide-react';
 import { 
@@ -67,6 +67,8 @@ export interface PeriodStatsReportData {
     prevAvgScore?: number | null;
     prevConversionRate?: number;
   }>;
+  startDate?: string;
+  endDate?: string;
   hourlyPeakHours?: string;
   userRole?: string;
 }
@@ -109,13 +111,36 @@ export function StatsGrid({ stats, calls = [], authToken, userRole, salonName }:
     return { minDateStr: sorted[0], maxDateStr: sorted[sorted.length - 1] };
   }, [calls]);
 
+  const isAdmin = userRole === 'admin';
   const [periodType, setPeriodType] = useState<'week' | 'month' | 'year' | 'custom' | 'all'>('all');
   const [startDate, setStartDate] = useState<string>(() => minDateStr);
   const [endDate, setEndDate] = useState<string>(() => maxDateStr);
   const [isComparative, setIsComparative] = useState(false);
-  const [exportingPdf, setExportingPdf] = useState(false);
-  const [exportSuccess, setExportSuccess] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [exportingFormat, setExportingFormat] = useState<'pdf' | 'csv' | null>(null);
+  const [exportSuccessFormat, setExportSuccessFormat] = useState<'pdf' | 'csv' | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  const exportMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
+        setExportMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setExportMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [exportMenuOpen]);
 
   // Sync dates when min/max dates change initially if in 'all' mode
   React.useEffect(() => {
@@ -316,64 +341,7 @@ export function StatsGrid({ stats, calls = [], authToken, userRole, salonName }:
     }).sort((a, b) => b.totalCalls - a.totalCalls);
   }, [currentCalls, previousCalls, isComparative]);
 
-  // Export PDF Handler
-  const handleExportPeriodPdf = async () => {
-    setExportingPdf(true);
-    setExportError(null);
-    setExportSuccess(false);
-    try {
-      const periodTitles: Record<string, string> = {
-        week: 'Неделя',
-        month: 'Месяц',
-        year: 'Год (2026)',
-        all: 'Все время',
-        custom: 'Произвольный период'
-      };
-
-      const reportData: PeriodStatsReportData = {
-        periodTitle: periodTitles[periodType] || 'Выбранный период',
-        periodDates: `${startDate} — ${endDate}`,
-        isComparative,
-        comparePeriodTitle: isComparative ? 'Предыдущий аналогичный период' : undefined,
-        compareDates: isComparative ? `${prevStartDate} — ${prevEndDate}` : undefined,
-        currentStats: curStats,
-        previousStats: prevStats,
-        operators: operatorsData,
-        hourlyPeakHours: '11:00 — 16:00',
-        userRole
-      };
-
-      const res = await fetch('/api/reports/period-stats-pdf', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {})
-        },
-        body: JSON.stringify(reportData)
-      });
-
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.error || `Ошибка сервера (${res.status})`);
-      }
-
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `Otchet_Lik28_${periodType}_${startDate}_${endDate}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
-      setExportSuccess(true);
-      setTimeout(() => setExportSuccess(false), 4000);
-    } catch (err: any) {
-      setExportError(err.message || 'Сбой при формировании PDF отчета');
-    } finally {
-      setExportingPdf(false);
-    }
-  };
+  // Export handler is defined below once peakHour is computed
 
   // Heatmap states
   const [viewMode, setViewMode] = useState<'heatmap' | 'chart'>('heatmap');
@@ -835,9 +803,81 @@ export function StatsGrid({ stats, calls = [], authToken, userRole, salonName }:
     return chartData.length > 0 ? Math.round(total / chartData.length) : 0;
   }, [chartData]);
 
+  const handleExportReport = async (format: 'pdf' | 'csv') => {
+    if (!isAdmin) return;
+    setExportMenuOpen(false);
+    setExportingFormat(format);
+    setExportError(null);
+    setExportSuccessFormat(null);
+    try {
+      const periodTitles: Record<string, string> = {
+        week: 'Неделя',
+        month: 'Месяц',
+        year: 'Год (2026)',
+        all: 'Все время',
+        custom: 'Произвольный период'
+      };
+
+      const reportData: PeriodStatsReportData = {
+        periodTitle: periodTitles[periodType] || 'Выбранный период',
+        periodDates: `${startDate} — ${endDate}`,
+        startDate: periodType === 'all' ? undefined : startDate,
+        endDate: periodType === 'all' ? undefined : endDate,
+        isComparative,
+        comparePeriodTitle: isComparative ? 'Предыдущий аналогичный период' : undefined,
+        compareDates: isComparative ? `${prevStartDate} — ${prevEndDate}` : undefined,
+        currentStats: curStats,
+        previousStats: prevStats,
+        operators: operatorsData,
+        hourlyPeakHours: peakHour?.calls > 0 ? peakHour.label : '11:00 — 16:00',
+        userRole
+      };
+
+      const endpoint = format === 'pdf'
+        ? '/api/reports/period-stats-pdf'
+        : '/api/reports/period-stats-csv';
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'x-user-role': userRole || '',
+      };
+      if (authToken) {
+        headers['Authorization'] = `Bearer ${authToken}`;
+      }
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(reportData)
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || `Ошибка сервера (${res.status})`);
+      }
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const safeSalon = effectiveSalonName.replace(/[^a-zA-Zа-яА-Я0-9_-]/g, '_');
+      a.download = `Otchet_${safeSalon}_${periodType}_${startDate}_${endDate}_152FZ.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+      setExportSuccessFormat(format);
+      setTimeout(() => setExportSuccessFormat(null), 4000);
+    } catch (err: any) {
+      setExportError(err.message || `Сбой при формировании ${format.toUpperCase()}-отчета`);
+    } finally {
+      setExportingFormat(null);
+    }
+  };
+
   return (
     <div className="space-y-4" id="stats-grid-wrapper">
-      {/* 0. Period Selector, Comparative Analysis & PDF Export Header Panel */}
+      {/* 0. Period Selector, Comparative Analysis & Anonymized Report Export Header Panel */}
       <div className="bg-white border border-slate-200/90 rounded-2xl p-4 sm:p-5 shadow-xs" id="period-selector-panel">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div className="space-y-1">
@@ -853,36 +893,106 @@ export function StatsGrid({ stats, calls = [], authToken, userRole, salonName }:
               </span>
             </div>
             <p className="text-xs text-slate-500">
-              Выборка звонков салона «{effectiveSalonName}» по периодам (неделя, месяц, год, произвольный период) со сравнительным анализом и выгрузкой в PDF.
+              Выборка звонков салона «{effectiveSalonName}» по периодам (неделя, месяц, год, произвольный период) со сравнительным анализом и экспортом обезличенных отчетов в CSV и PDF (152-ФЗ).
             </p>
           </div>
 
-          {/* PDF Export Button */}
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleExportPeriodPdf}
-              disabled={exportingPdf}
-              id="btn-export-period-pdf"
-              className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors"
-            >
-              {exportingPdf ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  <span>Формирование PDF...</span>
-                </>
-              ) : exportSuccess ? (
-                <>
-                  <Check className="w-3.5 h-3.5 text-white" />
-                  <span>Отчет скачан!</span>
-                </>
-              ) : (
-                <>
-                  <FileDown className="w-3.5 h-3.5" />
-                  <span>Выгрузить отчет в PDF</span>
-                </>
-              )}
-            </button>
-          </div>
+          {/* Admin-only Anonymized Report Export (CSV / PDF, 152-ФЗ) */}
+          {isAdmin && (
+            <div className="relative flex items-center gap-2" ref={exportMenuRef}>
+              <button
+                type="button"
+                onClick={() => setExportMenuOpen((prev) => !prev)}
+                disabled={exportingFormat !== null}
+                id="btn-export-report"
+                aria-haspopup="menu"
+                aria-expanded={exportMenuOpen}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
+                title="Скачать обезличенный аналитический отчет в CSV или PDF (152-ФЗ, только для администраторов)"
+              >
+                {exportingFormat !== null ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Формирование {exportingFormat.toUpperCase()}...</span>
+                  </>
+                ) : exportSuccessFormat !== null ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-white" />
+                    <span>{exportSuccessFormat.toUpperCase()} скачан!</span>
+                  </>
+                ) : (
+                  <>
+                    <FileDown className="w-3.5 h-3.5" />
+                    <span>Экспорт отчета</span>
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${exportMenuOpen ? 'rotate-180' : ''}`} />
+                  </>
+                )}
+              </button>
+
+              <AnimatePresence>
+                {exportMenuOpen && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 6, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 4, scale: 0.98 }}
+                    transition={{ duration: 0.14 }}
+                    role="menu"
+                    id="export-report-menu"
+                    className="absolute right-0 top-full mt-2 w-72 bg-white border border-slate-200 rounded-xl shadow-lg z-30 overflow-hidden"
+                  >
+                    <div className="px-3.5 py-2.5 bg-slate-50 border-b border-slate-100 flex items-center gap-2">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      <span className="text-[11px] font-semibold text-slate-700">
+                        Обезличенная выгрузка (152-ФЗ)
+                      </span>
+                    </div>
+
+                    <div className="p-1.5 space-y-1">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        id="btn-export-period-pdf"
+                        onClick={() => handleExportReport('pdf')}
+                        className="w-full flex items-start gap-2.5 px-3 py-2 rounded-lg text-left hover:bg-slate-50 transition-colors cursor-pointer"
+                      >
+                        <div className="p-1.5 rounded-lg bg-rose-50 text-rose-600 border border-rose-100 shrink-0 mt-0.5">
+                          <FileText className="w-3.5 h-3.5" />
+                        </div>
+                        <div>
+                          <div className="text-xs font-bold text-slate-800">Скачать в PDF</div>
+                          <div className="text-[11px] text-slate-500 leading-snug">
+                            Сводный отчет А4: KPI, операторы и обезличенная сводка
+                          </div>
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        role="menuitem"
+                        id="btn-export-period-csv"
+                        onClick={() => handleExportReport('csv')}
+                        className="w-full flex items-start gap-2.5 px-3 py-2 rounded-lg text-left hover:bg-slate-50 transition-colors cursor-pointer"
+                      >
+                        <div className="p-1.5 rounded-lg bg-emerald-50 text-emerald-600 border border-emerald-100 shrink-0 mt-0.5">
+                          <FileSpreadsheet className="w-3.5 h-3.5" />
+                        </div>
+                        <div>
+                          <div className="text-xs font-bold text-slate-800">Скачать в CSV (Excel)</div>
+                          <div className="text-[11px] text-slate-500 leading-snug">
+                            Табличные KPI, рейтинг операторов и реестр звонков без ПДн
+                          </div>
+                        </div>
+                      </button>
+                    </div>
+
+                    <div className="px-3.5 py-2 bg-slate-50/70 border-t border-slate-100 text-[10px] text-slate-500 leading-relaxed">
+                      ФИО, полные номера телефонов и стенограммы исключены. Доступно только администраторам.
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          )}
         </div>
 
         {exportError && (

@@ -1,9 +1,32 @@
 import { CallRecord } from '../types.js';
 import { anonymizeTranscript, maskPhone } from './anonymize.js';
+import type { PeriodStatsReportData } from './pdfReport.js';
+
+function sanitizeFormulaCell(raw: string): string {
+  // Нейтрализация CSV Formula Injection (=, +, @, \t, \r, а также '-' если это не обычное число/дефис)
+  if (!raw) return raw;
+  const first = raw[0];
+  if (first === '=' || first === '@' || first === '\t' || first === '\r') {
+    return `'${raw}`;
+  }
+  if (first === '+') {
+    // Разрешаем безопасные дельты вида "+5" / "+12.5%" / "+3 (+20%)", но экранируем формулы вроде "+1+1" или "+CMD"
+    if (!/^\+\d+(?:[.,]\d+)?%?(?:\s*\([+-]\d+(?:[.,]\d+)?%?\))?$/.test(raw.trim())) {
+      return `'${raw}`;
+    }
+  }
+  if (first === '-') {
+    if (!/^-\d+(?:[.,]\d+)?%?(?:\s*\([+-]\d+(?:[.,]\d+)?%?\))?$/.test(raw.trim()) && raw.trim() !== '-') {
+      return `'${raw}`;
+    }
+  }
+  return raw;
+}
 
 function escapeCsv(val: any): string {
   if (val === null || val === undefined) return '""';
-  const str = String(val).replace(/"/g, '""');
+  const sanitized = sanitizeFormulaCell(String(val));
+  const str = sanitized.replace(/"/g, '""');
   return `"${str}"`;
 }
 
@@ -374,4 +397,292 @@ export function generateCallsTableCsv(
 
   return '\uFEFF' + rows.join('\r\n');
 }
+
+/**
+ * Генерация обезличенного сводного аналитического отчета за период в формате CSV (152-ФЗ РФ)
+ * для подготовки внутренней отчетности администраторами.
+ * Строго обезличивает все персональные данные клиентов: телефоны всегда маскированы (****XXXXXX),
+ * имена клиентов и стенограммы не выгружаются, текстовые поля очищены от ПДн.
+ */
+export function generatePeriodStatsCsv(
+  data: PeriodStatsReportData,
+  calls: CallRecord[] = [],
+  customSalonName?: string
+): string {
+  const salonName = (customSalonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
+  const rows: string[] = [];
+
+  const nowSamara = new Date().toLocaleString('ru-RU', {
+    timeZone: 'Europe/Samara',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+
+  const formatDur = (sec?: number): string => {
+    const s = Math.max(0, Math.round(sec || 0));
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return m > 0 ? `${m} мин. ${rem} сек.` : `${rem} сек.`;
+  };
+
+  const calcDeltaText = (curVal: number, prevVal?: number, isPercent = false): string => {
+    if (prevVal === undefined || prevVal === null || (prevVal === 0 && curVal === 0)) return '—';
+    const diff = curVal - prevVal;
+    const sign = diff > 0 ? '+' : '';
+    let text = isPercent ? `${sign}${diff.toFixed(1)}%` : `${sign}${Number.isInteger(diff) ? diff : diff.toFixed(1)}`;
+    if (!isPercent && prevVal > 0) {
+      const pct = ((diff / prevVal) * 100).toFixed(1);
+      text += ` (${sign}${pct}%)`;
+    }
+    return text;
+  };
+
+  const cur = data.currentStats;
+  const prev = data.isComparative ? data.previousStats : undefined;
+
+  // Блок 1: Паспорт отчета (152-ФЗ)
+  rows.push([`# САЛОН КРАСОТЫ «${salonName.toUpperCase()}» — ОБЕЗЛИЧЕННЫЙ АНАЛИТИЧЕСКИЙ ОТЧЕТ (152-ФЗ)`, '', '', ''].map(escapeCsv).join(';'));
+  rows.push(['# Режим соответствия 152-ФЗ: ВСЕ ПЕРСОНАЛЬНЫЕ ДАННЫЕ КЛИЕНТОВ ОБЕЗЛИЧЕНЫ (БЕЗ ФИО, ПОЛНЫХ НОМЕРОВ И СТЕНОГРАММ)', '', '', ''].map(escapeCsv).join(';'));
+  rows.push(['# Анализируемый период', `${data.periodTitle} (${data.periodDates})`, '', ''].map(escapeCsv).join(';'));
+  if (data.isComparative && data.compareDates) {
+    rows.push(['# Период сравнения', `${data.comparePeriodTitle || 'Предыдущий период'} (${data.compareDates})`, '', ''].map(escapeCsv).join(';'));
+  }
+  rows.push(['# Пиковые часы обращений', data.hourlyPeakHours || '—', '', ''].map(escapeCsv).join(';'));
+  rows.push(['# Сформирован', `${nowSamara} (Самара, UTC+4)`, '', ''].map(escapeCsv).join(';'));
+  rows.push(['', '', '', ''].join(';'));
+
+  // Блок 2: Ключевые показатели эффективности (KPI)
+  rows.push(['# 1. КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ ЭФФЕКТИВНОСТИ (KPI)', '', '', ''].map(escapeCsv).join(';'));
+  if (prev) {
+    rows.push(['Показатель / Метрика', 'Текущий период', 'Предыдущий период', 'Динамика (Δ)'].map(escapeCsv).join(';'));
+  } else {
+    rows.push(['Показатель / Метрика', 'Значение за период', 'Примечание', ''].map(escapeCsv).join(';'));
+  }
+
+  const kpiEntries: Array<[string, string, string, string, string]> = [
+    [
+      'Всего звонков',
+      String(cur.totalCalls),
+      prev ? String(prev.totalCalls) : '',
+      prev ? calcDeltaText(cur.totalCalls, prev.totalCalls) : '',
+      'Общее количество обращений за период',
+    ],
+    [
+      'Входящие вызовы',
+      String(cur.incomingCalls),
+      prev ? String(prev.incomingCalls) : '',
+      prev ? calcDeltaText(cur.incomingCalls, prev.incomingCalls) : '',
+      `${cur.totalCalls > 0 ? Math.round((cur.incomingCalls / cur.totalCalls) * 100) : 0}% от общего объема`,
+    ],
+    [
+      'Исходящие вызовы',
+      String(cur.outgoingCalls),
+      prev ? String(prev.outgoingCalls) : '',
+      prev ? calcDeltaText(cur.outgoingCalls, prev.outgoingCalls) : '',
+      `${cur.totalCalls > 0 ? Math.round((cur.outgoingCalls / cur.totalCalls) * 100) : 0}% от общего объема`,
+    ],
+    [
+      'Завершенные / отвеченные',
+      String(cur.completedCalls),
+      prev ? String(prev.completedCalls) : '',
+      prev ? calcDeltaText(cur.completedCalls, prev.completedCalls) : '',
+      'Успешно обработанные звонки',
+    ],
+    [
+      'Пропущенные / неотвеченные',
+      String(cur.missedCalls),
+      prev ? String(prev.missedCalls) : '',
+      prev ? calcDeltaText(cur.missedCalls, prev.missedCalls) : '',
+      `${cur.totalCalls > 0 ? Math.round((cur.missedCalls / cur.totalCalls) * 100) : 0}% от общего объема`,
+    ],
+    [
+      'Успешные записи (согласие)',
+      String(cur.bookedCount),
+      prev ? String(prev.bookedCount) : '',
+      prev ? calcDeltaText(cur.bookedCount, prev.bookedCount) : '',
+      'Подтвержденные записи клиентов',
+    ],
+    [
+      'Отказы от записи',
+      String(cur.declinedCount),
+      prev ? String(prev.declinedCount) : '',
+      prev ? calcDeltaText(cur.declinedCount, prev.declinedCount) : '',
+      'Клиент отказался от визита',
+    ],
+    [
+      'Консультации / справка',
+      String(cur.consultationCount),
+      prev ? String(prev.consultationCount) : '',
+      prev ? calcDeltaText(cur.consultationCount, prev.consultationCount) : '',
+      'Информационные обращения без записи',
+    ],
+    [
+      'Конверсия в запись (%)',
+      `${cur.conversionRate}%`,
+      prev ? `${prev.conversionRate}%` : '',
+      prev ? calcDeltaText(cur.conversionRate, prev.conversionRate, true) : '',
+      'Доля обращений, завершившихся записью',
+    ],
+    [
+      'Средний балл операторов (из 10)',
+      String(cur.averageScore),
+      prev ? String(prev.averageScore) : '',
+      prev ? calcDeltaText(cur.averageScore, prev.averageScore) : '',
+      'Средняя оценка качества обслуживания ИИ',
+    ],
+    [
+      'Спорные / конфликтные звонки',
+      `${cur.disputeCount} (${cur.disputeRate}%)`,
+      prev ? `${prev.disputeCount} (${prev.disputeRate}%)` : '',
+      prev ? calcDeltaText(cur.disputeRate, prev.disputeRate, true) : '',
+      'Доля звонков с маркерами спора/недовольства',
+    ],
+    [
+      'Средняя длительность диалога',
+      formatDur(cur.avgDurationSec),
+      prev ? formatDur(prev.avgDurationSec) : '',
+      prev ? calcDeltaText(cur.avgDurationSec, prev.avgDurationSec) : '',
+      `${cur.avgDurationSec} сек.`,
+    ],
+  ];
+
+  kpiEntries.forEach(([label, curVal, prevVal, deltaVal, note]) => {
+    if (prev) {
+      rows.push([label, curVal, prevVal, deltaVal].map(escapeCsv).join(';'));
+    } else {
+      rows.push([label, curVal, note, ''].map(escapeCsv).join(';'));
+    }
+  });
+
+  rows.push(['', '', '', ''].join(';'));
+
+  // Блок 3: Рейтинг операторов
+  rows.push(['# 2. РЕЙТИНГ И РЕЗУЛЬТАТИВНОСТЬ ОПЕРАТОРОВ', '', '', ''].map(escapeCsv).join(';'));
+  const opHeaders = data.isComparative
+    ? ['Оператор / Администратор', 'Звонков', 'Средний балл', 'Записей', 'Конверсия (%)', 'Конфликты', 'Пред. ср. балл', 'Пред. конверсия (%)']
+    : ['Оператор / Администратор', 'Звонков', 'Средний балл', 'Записей', 'Конверсия (%)', 'Конфликты'];
+  rows.push(opHeaders.map(escapeCsv).join(';'));
+
+  if (!data.operators || data.operators.length === 0) {
+    rows.push(['За выбранный период данные по операторам отсутствуют'].map(escapeCsv).join(';'));
+  } else {
+    data.operators.forEach((op) => {
+      const base = [
+        op.name || 'Дежурный администратор',
+        op.totalCalls,
+        op.avgScore !== null && op.avgScore !== undefined ? op.avgScore : '—',
+        op.bookedCount,
+        `${op.conversionRate}%`,
+        op.disputes,
+      ];
+      if (data.isComparative) {
+        base.push(
+          op.prevAvgScore !== null && op.prevAvgScore !== undefined ? op.prevAvgScore : '—',
+          op.prevConversionRate !== undefined ? `${op.prevConversionRate}%` : '—'
+        );
+      }
+      rows.push(base.map(escapeCsv).join(';'));
+    });
+  }
+
+  rows.push(['', '', '', ''].join(';'));
+
+  // Блок 4: Обезличенный реестр звонков за период (152-ФЗ)
+  rows.push(['# 3. ОБЕЗЛИЧЕННЫЙ РЕЕСТР ЗВОНКОВ ЗА ПЕРИОД (152-ФЗ — БЕЗ ПЕРСОНАЛЬНЫХ ДАННЫХ)', '', '', ''].map(escapeCsv).join(';'));
+  const callHeaders = [
+    '№',
+    'ID звонка',
+    'Дата и время (Самара)',
+    'Длительность (сек)',
+    'Направление',
+    'Статус соединения',
+    'Оператор / Администратор',
+    'Абонент (обезличено 152-ФЗ)',
+    'Статус записи',
+    'Услуга',
+    'Мастер',
+    'Оценка ИИ (1-10)',
+    'Тональность клиента',
+    'Тональность оператора',
+    'Конфликт / Спор',
+    'Причина спора (обезличено)',
+    'Итог звонка',
+    'Краткое резюме (обезличено)',
+    'Ошибки менеджера (обезличено)',
+    'Теги',
+    'Модель ИИ',
+  ];
+  rows.push(callHeaders.map(escapeCsv).join(';'));
+
+  calls.forEach((call, index) => {
+    const rawPhone = call.client_phone || (call as any).full_phone || '';
+    // Строго 152-ФЗ: всегда маскируем телефон независимо от роли (даже для администратора)
+    const maskedPhone = maskPhone(rawPhone || call.client_phone_masked || '');
+
+    let dateFormatted = call.timestamp || '';
+    try {
+      dateFormatted = new Date(call.timestamp).toLocaleString('ru-RU', {
+        timeZone: 'Europe/Samara',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    } catch {}
+
+    const rawStatus = (call.booking_status || call.key_facts?.booking_status || '').toLowerCase().trim();
+    let bookingStatus = 'консультация';
+    if (rawStatus === 'согласие' || rawStatus.includes('соглас') || call.key_facts?.call_outcome === 'запись') {
+      bookingStatus = 'согласие';
+    } else if (rawStatus === 'отказ' || rawStatus.includes('отказ') || call.key_facts?.call_outcome === 'отказ') {
+      bookingStatus = 'отказ';
+    } else if (rawStatus === 'не применимо' || call.key_facts?.call_outcome === 'автоответчик') {
+      bookingStatus = 'не применимо';
+    }
+
+    const mistakesText = Array.isArray(call.operator_mistakes)
+      ? call.operator_mistakes.join('; ')
+      : (call.operator_mistakes || '');
+    const tagsText = Array.isArray(call.tags) ? call.tags.join(', ') : '';
+
+    const safeSummary = anonymizeTranscript(call.summary || '');
+    const safeDisputeReason = anonymizeTranscript(call.key_facts?.dispute_reason || '');
+    const safeMistakes = anonymizeTranscript(mistakesText || 'Грубых ошибок не допущено');
+    const safeService = anonymizeTranscript(call.key_facts?.service || '');
+
+    const row = [
+      index + 1,
+      call.call_id,
+      dateFormatted,
+      call.duration_seconds || 0,
+      call.type === 'outgoing' ? 'Исходящий' : 'Входящий',
+      call.status || 'completed',
+      call.operator_name || 'Дежурный администратор',
+      `Клиент (${maskedPhone})`,
+      bookingStatus,
+      safeService,
+      call.key_facts?.master || '',
+      call.operator_score !== null && call.operator_score !== undefined ? call.operator_score : '',
+      call.key_facts?.tone_client || '',
+      call.key_facts?.tone_manager || '',
+      call.key_facts?.is_dispute ? 'ДА' : 'НЕТ',
+      safeDisputeReason,
+      call.key_facts?.call_outcome || '',
+      safeSummary,
+      safeMistakes,
+      tagsText,
+      call.model_used || '',
+    ];
+
+    rows.push(row.map(escapeCsv).join(';'));
+  });
+
+  return '\uFEFF' + rows.join('\r\n');
+}
+
 

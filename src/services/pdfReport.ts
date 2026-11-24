@@ -462,8 +462,22 @@ export interface PeriodStatsReportData {
     prevAvgScore?: number | null;
     prevConversionRate?: number;
   }>;
+  startDate?: string;
+  endDate?: string;
   hourlyPeakHours?: string;
   userRole?: string;
+  anonymizedCalls?: Array<{
+    call_id: string;
+    timestamp: string;
+    duration_seconds: number;
+    type: string;
+    operator_name: string;
+    client_masked: string;
+    booking_status: string;
+    service: string;
+    operator_score: number | null;
+    is_dispute: boolean;
+  }>;
 }
 
 /**
@@ -535,7 +549,7 @@ export function generatePeriodStatsPdf(data: PeriodStatsReportData, customSalonN
   }
 
   doc.font('AppFont').fontSize(7.5).fillColor('#64748b').text(
-    `Сформирован: ${nowSamara} (Самара, UTC+4) • 152-ФЗ РФ`,
+    `Сформирован: ${nowSamara} (Самара, UTC+4) • Режим 152-ФЗ РФ: обезличенные данные (без ПДн клиентов)`,
     margin + 10,
     data.isComparative ? infoY + 33 : infoY + 20
   );
@@ -751,6 +765,92 @@ export function generatePeriodStatsPdf(data: PeriodStatsReportData, customSalonN
   });
 
   doc.y = concY + 72;
+
+  // 5.5. Anonymized Calls Breakdown Table (152-ФЗ — без ПДн клиентов)
+  if (Array.isArray(data.anonymizedCalls) && data.anonymizedCalls.length > 0) {
+    doc.moveDown(0.7);
+    ensureSpace(80);
+    doc.font('AppFontBold').fontSize(11).fillColor('#0f172a').text(
+      `4. Обезличенная сводка звонков за период (152-ФЗ, всего: ${data.anonymizedCalls.length})`
+    );
+    doc.moveDown(0.2);
+    doc.font('AppFont').fontSize(7.5).fillColor('#64748b').text(
+      'Персональные данные клиентов (ФИО, полные номера телефонов, стенограммы) исключены в соответствии с 152-ФЗ РФ.'
+    );
+    doc.moveDown(0.3);
+
+    const cHeaderY = doc.y;
+    doc.rect(margin, cHeaderY, contentWidth, 18).fill('#e2e8f0');
+
+    const cColDate = 86;
+    const cColClient = 84;
+    const cColOp = 104;
+    const cColStatus = 78;
+    const cColService = 95;
+    const cColScore = 40;
+    const cColDisp = 36;
+
+    doc.font('AppFontBold').fontSize(7.3).fillColor('#1e293b');
+    let cx = margin + 5;
+    doc.text('Дата (Самара)', cx, cHeaderY + 5, { width: cColDate - 4 }); cx += cColDate;
+    doc.text('Абонент (152-ФЗ)', cx, cHeaderY + 5, { width: cColClient - 4 }); cx += cColClient;
+    doc.text('Оператор', cx, cHeaderY + 5, { width: cColOp - 4 }); cx += cColOp;
+    doc.text('Статус записи', cx, cHeaderY + 5, { width: cColStatus - 4 }); cx += cColStatus;
+    doc.text('Услуга', cx, cHeaderY + 5, { width: cColService - 4 }); cx += cColService;
+    doc.text('Балл', cx, cHeaderY + 5, { width: cColScore - 4 }); cx += cColScore;
+    doc.text('Спор', cx, cHeaderY + 5, { width: cColDisp - 4 });
+
+    doc.y = cHeaderY + 18;
+
+    const maxPdfRows = 100;
+    const rowsToRender = data.anonymizedCalls.slice(0, maxPdfRows);
+
+    rowsToRender.forEach((item, idx) => {
+      ensureSpace(18);
+      const rowY = doc.y;
+      const bg = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
+      doc.rect(margin, rowY, contentWidth, 17).fillAndStroke(bg, '#f1f5f9');
+
+      let dtShort = item.timestamp || '—';
+      try {
+        dtShort = new Date(item.timestamp).toLocaleString('ru-RU', {
+          timeZone: 'Europe/Samara',
+          day: '2-digit',
+          month: '2-digit',
+          year: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+      } catch {}
+
+      let rx = margin + 5;
+      doc.font('AppFont').fontSize(7.2).fillColor('#334155');
+      doc.text(dtShort, rx, rowY + 4.5, { width: cColDate - 6, ellipsis: true, lineBreak: false }); rx += cColDate;
+      doc.text(item.client_masked || '****000000', rx, rowY + 4.5, { width: cColClient - 6, ellipsis: true, lineBreak: false }); rx += cColClient;
+      doc.text(item.operator_name || 'Администратор', rx, rowY + 4.5, { width: cColOp - 6, ellipsis: true, lineBreak: false }); rx += cColOp;
+      doc.text(item.booking_status || 'консультация', rx, rowY + 4.5, { width: cColStatus - 6, ellipsis: true, lineBreak: false }); rx += cColStatus;
+      doc.text(anonymizeTranscript(item.service || '—'), rx, rowY + 4.5, { width: cColService - 6, ellipsis: true, lineBreak: false }); rx += cColService;
+
+      const scoreStr = item.operator_score !== null && item.operator_score !== undefined ? `${item.operator_score}/10` : '—';
+      doc.font('AppFontBold').fillColor((item.operator_score || 0) >= 8 ? '#15803d' : (item.operator_score || 0) >= 5 ? '#b45309' : '#64748b');
+      doc.text(scoreStr, rx, rowY + 4.5, { width: cColScore - 4, lineBreak: false }); rx += cColScore;
+
+      doc.font('AppFontBold').fillColor(item.is_dispute ? '#dc2626' : '#64748b');
+      doc.text(item.is_dispute ? 'ДА' : 'Нет', rx, rowY + 4.5, { width: cColDisp - 4, lineBreak: false });
+
+      doc.y = rowY + 17;
+    });
+
+    if (data.anonymizedCalls.length > maxPdfRows) {
+      ensureSpace(16);
+      doc.font('AppFont').fontSize(7.5).fillColor('#64748b').text(
+        `Показаны первые ${maxPdfRows} из ${data.anonymizedCalls.length} звонков. Полный обезличенный реестр доступен при выгрузке в CSV.`,
+        margin,
+        doc.y + 4
+      );
+      doc.moveDown(0.5);
+    }
+  }
 
   // 6. Signatures Block
   ensureSpace(50);

@@ -34,7 +34,7 @@ import { isYandexAuthConfigured } from './src/services/yandex-auth.js';
 import { isGigaChatConfigured, getGigaChatConfigStatus } from './src/services/gigachat-auth.js';
 import { hydrateFromS3, scheduleSyncToS3, manualSync, getSyncStatus } from './src/services/s3-sync.js';
 import { generateCallAuditPdf, generatePeriodStatsPdf, generateCallsTablePdf, PeriodStatsReportData } from './src/services/pdfReport.js';
-import { generateCallCsv, generateCallsTableCsv } from './src/services/csvExport.js';
+import { generateCallCsv, generateCallsTableCsv, generatePeriodStatsCsv } from './src/services/csvExport.js';
 import { deduplicateCalls } from './src/services/callUtils.js';
 import {
   getWcgpAccounts,
@@ -4435,22 +4435,98 @@ app.get('/api/calls/:id/export-pdf', (req, res) => {
   }
 });
 
-// 2.065. EXPORT PERIOD STATS REPORT TO PDF (Сводный отчет за период со сравнительным анализом)
-app.post('/api/reports/period-stats-pdf', (req, res) => {
+function getAnonymizedPeriodCalls(db: any, startDate?: string, endDate?: string): CallRecord[] {
+  let list: CallRecord[] = deduplicateCalls(Array.isArray(db.calls) ? db.calls : []);
+  const sDate = typeof startDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(startDate.trim()) ? startDate.trim() : '';
+  const eDate = typeof endDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(endDate.trim()) ? endDate.trim() : '';
+
+  if (sDate || eDate) {
+    list = list.filter((c: any) => {
+      const d = typeof c.timestamp === 'string' ? c.timestamp.slice(0, 10) : '';
+      if (!d) return false;
+      if (sDate && d < sDate) return false;
+      if (eDate && d > eDate) return false;
+      return true;
+    });
+  }
+
+  // Строгое обезличивание 152-ФЗ РФ: удаляем ФИО, полные номера телефонов и стенограммы
+  return list.map((call: any) => {
+    const rawPhone = call.client_phone || call.full_phone || '';
+    const masked = maskPhone(rawPhone || call.client_phone_masked || '');
+    const bookingStatus = resolveCallBookingStatus(call);
+    return {
+      ...call,
+      client_name: 'Обезличено (152-ФЗ)',
+      client_phone: masked,
+      full_phone: undefined,
+      client_phone_masked: masked,
+      booking_status: bookingStatus,
+      transcript: '',
+      summary: anonymizeTranscript(call.summary || ''),
+      operator_comment: anonymizeTranscript(call.operator_comment || ''),
+      operator_mistakes: Array.isArray(call.operator_mistakes)
+        ? call.operator_mistakes.map((m: string) => anonymizeTranscript(String(m)))
+        : [],
+      recommendations: Array.isArray(call.recommendations)
+        ? call.recommendations.map((r: string) => anonymizeTranscript(String(r)))
+        : [],
+      key_facts: call.key_facts
+        ? {
+            ...call.key_facts,
+            client_issue: anonymizeTranscript(call.key_facts.client_issue || ''),
+            dispute_reason: anonymizeTranscript(call.key_facts.dispute_reason || ''),
+            service: anonymizeTranscript(call.key_facts.service || ''),
+          }
+        : call.key_facts,
+    };
+  });
+}
+
+// 2.065. EXPORT PERIOD STATS REPORT TO PDF (Только для администраторов, обезличенные данные по 152-ФЗ)
+app.post('/api/reports/period-stats-pdf', async (req, res) => {
   const userRole = getCurrentUserRole(req);
+  if (userRole !== 'admin') {
+    return res.status(403).json({ error: 'Экспорт аналитического отчета доступен только администраторам' });
+  }
   try {
-    const reportData: PeriodStatsReportData = req.body;
-    if (!reportData || !reportData.currentStats) {
+    const body = req.body || {};
+    if (!body.currentStats) {
       return res.status(400).json({ error: 'Не переданы данные статистики для формирования отчета' });
     }
-    reportData.userRole = userRole;
 
     const db = readDb();
     const salonName = getEffectiveSalonName(db.config);
+    const anonymizedCalls = getAnonymizedPeriodCalls(db, body.startDate, body.endDate);
+
+    const reportData: PeriodStatsReportData = {
+      ...body,
+      userRole,
+      anonymizedCalls: anonymizedCalls.map((c: any) => ({
+        call_id: c.call_id,
+        timestamp: c.timestamp,
+        duration_seconds: c.duration_seconds || 0,
+        type: c.type || 'incoming',
+        operator_name: c.operator_name || 'Дежурный администратор',
+        client_masked: c.client_phone_masked || '****000000',
+        booking_status: c.booking_status || 'консультация',
+        service: c.key_facts?.service || '',
+        operator_score: typeof c.operator_score === 'number' ? c.operator_score : null,
+        is_dispute: Boolean(c.key_facts?.is_dispute),
+      })),
+    };
+
     const doc = generatePeriodStatsPdf(reportData, salonName);
     const sanitizedTitle = (reportData.periodTitle || 'period').replace(/[^a-zA-Zа-яА-Я0-9_-]/g, '_');
     const safeSalonFile = salonName.replace(/[^a-zA-Zа-яА-Я0-9_-]/g, '_');
-    const filename = `Otchet_${safeSalonFile}_${sanitizedTitle}.pdf`;
+    const filename = `Otchet_${safeSalonFile}_${sanitizedTitle}_152FZ.pdf`;
+
+    await logAccess(
+      getCurrentUser(req)?.name || 'Администратор',
+      'export',
+      `Экспорт обезличенного аналитического отчета в PDF (152-ФЗ, период: ${reportData.periodDates || 'все время'}, звонков: ${anonymizedCalls.length})`,
+      req.ip || '127.0.0.1'
+    );
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
@@ -4460,6 +4536,48 @@ app.post('/api/reports/period-stats-pdf', (req, res) => {
   } catch (error: any) {
     console.error('Ошибка при генерации PDF отчета за период:', error);
     res.status(500).json({ error: `Ошибка формирования PDF: ${error.message || error}` });
+  }
+});
+
+// 2.066. EXPORT PERIOD STATS REPORT TO CSV (Только для администраторов, обезличенные данные по 152-ФЗ)
+app.post('/api/reports/period-stats-csv', async (req, res) => {
+  const userRole = getCurrentUserRole(req);
+  if (userRole !== 'admin') {
+    return res.status(403).json({ error: 'Экспорт аналитического отчета доступен только администраторам' });
+  }
+  try {
+    const body = req.body || {};
+    if (!body.currentStats) {
+      return res.status(400).json({ error: 'Не переданы данные статистики для формирования отчета' });
+    }
+
+    const db = readDb();
+    const salonName = getEffectiveSalonName(db.config);
+    const anonymizedCalls = getAnonymizedPeriodCalls(db, body.startDate, body.endDate);
+
+    const reportData: PeriodStatsReportData = {
+      ...body,
+      userRole,
+    };
+
+    const csvContent = generatePeriodStatsCsv(reportData, anonymizedCalls, salonName);
+    const sanitizedTitle = (reportData.periodTitle || 'period').replace(/[^a-zA-Zа-яА-Я0-9_-]/g, '_');
+    const safeSalonFile = salonName.replace(/[^a-zA-Zа-яА-Я0-9_-]/g, '_');
+    const filename = `Otchet_${safeSalonFile}_${sanitizedTitle}_152FZ.csv`;
+
+    await logAccess(
+      getCurrentUser(req)?.name || 'Администратор',
+      'export',
+      `Экспорт обезличенного аналитического отчета в CSV (152-ФЗ, период: ${reportData.periodDates || 'все время'}, звонков: ${anonymizedCalls.length})`,
+      req.ip || '127.0.0.1'
+    );
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+    res.send(csvContent);
+  } catch (error: any) {
+    console.error('Ошибка при генерации CSV отчета за период:', error);
+    res.status(500).json({ error: `Ошибка формирования CSV: ${error.message || error}` });
   }
 });
 
