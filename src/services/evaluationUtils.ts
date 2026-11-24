@@ -498,7 +498,7 @@ export function extractCallEvaluation(
   const isDispute = ctx.isDispute;
   const isRescheduleOrCheck = ctx.isRescheduleOrCheck;
   const isBookingConfirmationCall =
-    /(?:запись\s+подтверд|подтверд[а-яё]*\s+запис|подойд[её]те|обратный\s+звонок|будем\s+ожидать)/iu.test(ctx.cleanTranscript) &&
+    /(?:запись\s+подтверд|подтверд[а-яё]*\s+запис|подойд[её]те|обратный\s+звонок|будем\s+ожидать|вы\s+(?:к\s+нам\s+)?записаны(?:\s+(?:на|к))?|ваша\s+запись\s+(?:на|к)|напомина(?:ем|ю)\s+о\s+(?:вашей\s+)?записи)/iu.test(ctx.cleanTranscript) &&
     !/(?:сколько\s+стоит|хочу\s+записаться|какую\s+услугу|цен[ауы]|прайс)/iu.test(ctx.cleanTranscript);
 
   // 2. Выявление потребности гостя
@@ -559,7 +559,15 @@ export function extractCallEvaluation(
 
   // 9. Закрытие на запись
   const hasBookingAttempt = /(?:записываю\s+вас|записала\s+вас|записали\s+вас|запись\s+на\s+консультацию|могли\s+бы\s+предложить\s+запись|подойд[её]т|записать\s+вас|подберем\s+время|жд[её]м\s+вас|запись\s+подтверждаем|оставляем|зафиксировала|записывать\s+на\s+ваш\s+номер)/iu.test(managerEffective);
-  const isBookingAgreed = ctx.isConfirmedBooking || (isRescheduleOrCheck && /оставляем|подтверждаем/iu.test(managerEffective));
+  const isOutboundConfirmationAgreed =
+    isBookingConfirmationCall &&
+    !ctx.isDeclined &&
+    !/(?:отмен[а-яё]*\s+запис|не\s+смогу\s+прийти|не\s+приду|не\s+подойду)/iu.test(ctx.cleanTranscript) &&
+    /(?:^|[\s,!.?«»"])(?:да|буду|подойду|хорошо|подтверждаю|спасибо|до\s+свидания|угу|ага|конечно)(?:$|[\s,!.?«»"])/iu.test(ctx.cleanTranscript);
+  const isBookingAgreed =
+    ctx.isConfirmedBooking ||
+    isOutboundConfirmationAgreed ||
+    (isRescheduleOrCheck && /оставляем|подтверждаем/iu.test(managerEffective));
 
   // 10. Качество коммуникации и завершение
   const hasPoliteClosing = /(?:до свидания|всего доброго|хорошего дня|ждем вас|спасибо|до встречи|комфортно)/iu.test(managerEffective);
@@ -592,7 +600,7 @@ export function extractCallEvaluation(
         ? null
         : ctx.isUnavailableServiceRefusal
         ? (hasNeedsQuestions && hasMasterPresented ? 8 : 6)
-        : (hasMasterPresented ? 9 : 6),
+        : (hasMasterPresented ? 9 : 7),
       explanation: isBookingConfirmationCall
         ? 'Услуга и мастер в коротком подтверждении визита не требовали отдельной презентации (не снижает оценку).'
         : ctx.isUnavailableServiceRefusal
@@ -643,7 +651,7 @@ export function extractCallEvaluation(
       id: 'upsell',
       name: 'Предложение дополнительных услуг',
       is_applicable: isCrossSellApplicable,
-      score: !isCrossSellApplicable ? null : (managerOfferedCrossSell ? 10 : 6),
+      score: !isCrossSellApplicable ? null : (managerOfferedCrossSell ? 10 : 7),
       explanation: !isCrossSellApplicable
         ? (isDispute
             ? 'Звонок посвящен урегулированию претензии, предложение сопутствующих услуг не требовалось (не снижает оценку).'
@@ -694,9 +702,13 @@ export function extractCallEvaluation(
       id: 'closing',
       name: 'Закрытие на запись',
       is_applicable: true,
-      score: isBookingAgreed ? 10 : (hasBookingAttempt ? 5 : 4),
-      explanation: isBookingAgreed
+      score: isBookingAgreed ? 10 : (isBookingConfirmationCall && !ctx.isDeclined ? 9 : (hasBookingAttempt ? 5 : 4)),
+      explanation: isOutboundConfirmationAgreed || (isBookingConfirmationCall && isBookingAgreed)
+        ? 'Существующая запись успешно подтверждена клиентом в ходе исходящего звонка-напоминания (бронь существовала до звонка).'
+        : isBookingAgreed
         ? 'Запись успешно подтверждена и зафиксирована с согласованием условий визита.'
+        : isBookingConfirmationCall && !ctx.isDeclined
+        ? 'Менеджер напомнил о ранее оформленной записи (бронь существовала до звонка).'
         : ctx.isUnavailableServiceRefusal
         ? 'Администратор предложил запись на консультацию, но бронь не состоялась из-за отказа клиента от альтернативной услуги.'
         : hasBookingAttempt
@@ -1056,47 +1068,36 @@ export function harmonizeMistakesAndEvaluation(
     };
   }
 
-  // Если список ошибок опустел или был не заполнен — выводим строго на основе применимых критериев с оценкой < 8
+  // Если список ошибок пуст — НЕ подставляем шаблонный набор («не назвал имя / не задал вопросы / не презентовал / не предложил сопутствующие»).
+  // Выводим замечания только при реально критичных провалах критериев (score <= 5) или явном отсутствии приветствия (score <= 4).
   if (filteredMistakes.length === 0 && overall !== null && overall < 10) {
     const derivedMistakes: string[] = [];
     const derivedAdvice: string[] = [];
 
     (evaluation.criteria || []).forEach(c => {
-      if (c.is_applicable !== false && typeof c.score === 'number' && c.score < 8) {
+      if (c.is_applicable !== false && typeof c.score === 'number' && c.score <= 5) {
         switch (normalizeCriterionId(c.id)) {
           case 'greeting_intro':
-            derivedMistakes.push('Администратор не назвал собственное имя и/или название салона при приветствии.');
-            derivedAdvice.push('Представляться по полному корпоративному стандарту (название салона + имя администратора).');
-            break;
-          case 'needs_identification':
-            derivedMistakes.push('Не заданы уточняющие вопросы для выявления потребностей гостя.');
-            derivedAdvice.push('Проявлять активное слушание и уточнять пожелания гостя по результату, срокам и деталям.');
-            break;
-          case 'service_presentation':
-            derivedMistakes.push(c.explanation || 'Особенности услуги и квалификация мастера не раскрыты.');
-            derivedAdvice.push('Кратко презентовать особенности методики и квалификацию мастера салона.');
+            if (c.score <= 4) {
+              derivedMistakes.push(c.explanation || 'Приветствие не зафиксировано в начале разговора.');
+              derivedAdvice.push('Начинать диалог с вежливого приветствия по стандарту салона.');
+            }
             break;
           case 'price_presentation':
-            derivedMistakes.push('Стоимость процедуры не была озвучена в ходе диалога.');
+            derivedMistakes.push(c.explanation || 'Стоимость процедуры не была озвучена в ходе диалога.');
             derivedAdvice.push('Четко и уверенно озвучивать стоимость и условия оказания услуги.');
             break;
           case 'objections':
             derivedMistakes.push(c.explanation || 'Недостаточная аргументация при возражении/сомнении гостя.');
             derivedAdvice.push('Аргументировать преимущества доступных методик и предлагать комфортные решения.');
             break;
-          case 'upsell':
-            derivedMistakes.push('Администратор не предложил сопутствующие процедуры к основной услуге.');
-            derivedAdvice.push('Предлагать сопутствующие процедуры при оформлении основной записи.');
-            break;
           case 'parallel_booking':
-            derivedMistakes.push('При бронировании комплекса услуг не была предложена опция параллельной записи в 4 руки.');
+            derivedMistakes.push(c.explanation || 'При бронировании комплекса услуг не была предложена опция параллельной записи в 4 руки.');
             derivedAdvice.push('Предлагать гостям параллельную запись в 4 руки для экономии времени.');
             break;
           case 'alternatives':
-            if (typeof c.score === 'number' && c.score <= 5) {
-              derivedMistakes.push(c.explanation || 'Не предложены альтернативные варианты времени, дат или мастеров.');
-              derivedAdvice.push('Предлагать несколько альтернативных вариантов по времени, мастерам или смежным услугам.');
-            }
+            derivedMistakes.push(c.explanation || 'Не предложены альтернативные варианты времени, дат или мастеров.');
+            derivedAdvice.push('Предлагать несколько альтернативных вариантов по времени, мастерам или смежным услугам.');
             break;
           case 'closing':
             derivedMistakes.push(c.explanation || 'Запись в рамках диалога не состоялась.');

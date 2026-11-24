@@ -3695,6 +3695,7 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
     : [callCopy.recommendations].filter(Boolean) as string[];
   const isModelCallCopy = Boolean(
     callCopy.mistakes_source === 'model' ||
+      callCopy.mistakes_source === 'модель → fallback' ||
       callCopy.summary_source === 'model' ||
       callCopy.feedback_source === 'model' ||
       callCopy.verification_report

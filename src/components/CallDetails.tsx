@@ -569,7 +569,7 @@ export function CallDetails({
     );
     const isModelMistakesCall = Boolean(
       call.booking_status !== 'не применимо' &&
-        (call.mistakes_source === 'model' || isModelSourcedCall)
+        (call.mistakes_source === 'model' || call.mistakes_source === 'модель → fallback' || isModelSourcedCall)
     );
     const visitDateContext =
       call.structured_summary?.offered_date_time ||

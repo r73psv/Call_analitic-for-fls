@@ -288,7 +288,7 @@ export interface CallRecord {
   verification_flags?: string[];
   missed_opportunities?: { type: string; evidence: string; what_to_say: string }[];
   summary_source?: 'model' | 'template';
-  mistakes_source?: 'model' | 'template';
+  mistakes_source?: 'model' | 'template' | 'модель → fallback';
   feedback_source?: 'model' | 'template';
   fallback_reason?: string;
 }
@@ -561,7 +561,7 @@ export interface AnalysisResult {
   verification_report?: CallVerificationReport;
   verification_flags?: string[];
   summary_source?: 'model' | 'template';
-  mistakes_source?: 'model' | 'template';
+  mistakes_source?: 'model' | 'template' | 'модель → fallback';
   feedback_source?: 'model' | 'template';
   fallback_reason?: string;
 }

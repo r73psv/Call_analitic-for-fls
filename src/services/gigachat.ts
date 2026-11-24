@@ -195,6 +195,7 @@ ${metadataBlock}
 - Вопросы об услуге, стоимости, окошках и фразы подтверждения/отказа клиента — реплики Клиента.
 - Фразы автоинформатора АТС («разговор может быть записан», «вы позвонили в салон») выноси как «Автоинформатор: ...» и не принимай за согласие клиента на запись.
 - Фразы очереди и автоответчика ("оставайтесь на линии", "оставьте сообщение после гудка") — это Автоинформатор, даже если в стенограмме они с меткой "Менеджер". Если живой менеджер не произнёс ни одной реплики — статус "Не применимо", аудит не проводится.
+- Роли в SpeechKit-стенограммах одной строкой без меток ролей: если стенограмма пришла сплошным текстом одной строкой без меток «Менеджер:» / «Клиент:», восстанови роли по смыслу диалога: приветствие с названием салона, «меня зовут <имя>», «вы к нам записаны на…» («вы записаны на…», напоминание о дате, времени и мастере) — это реплики Менеджера (в исходящем подтверждающем звонке менеджер является инициатором разговора); короткие ответы подтверждения и прощания («да», «буду», «спасибо», «до свидания», «хорошо», «подойду») — реплики Клиента. В формируемом поле formatted_transcript обязательно размечай роли явно («Менеджер: ...\\nКлиент: ...»).
 
 === ЭТАП 3. РЕЗЮМЕ ===
 Составляется ИСКЛЮЧИТЕЛЬНО из фактов ЭТАПА 1.
@@ -227,6 +228,7 @@ ${metadataBlock}
 Правило по возражениям и альтернативам: если не было отказа или несогласия по времени/цене, критерии 5 и 8 имеют applicable: false, score: null.
 Критерий 8 (альтернативы) применим ТОЛЬКО если в диалоге был отказ или несогласие клиента по времени/цене/услуге. Если клиент подтвердил или согласился — критерий 8 не применим.
 Критерий 9 (закрытие на запись): если запись подтверждена — оценка 9–10, а не 5; формулировка "визит не согласован" при подтверждённой записи запрещена.
+Критерий 9 для исходящих подтверждающих звонков: если менеджер напоминает о существующей записи («вы к нам записаны на…», «вы записаны на…») и клиент подтверждает визит — оценка 9–10; формулировки «бронь не оформлена» и «попытка закрытия отсутствовала» ЗАПРЕЩЕНЫ, так как бронь уже существует до звонка.
 Критерий 10 (качество коммуникации и завершение разговора): утверждение о качестве концовки обязательно подкрепляй дословной цитатой последней реплики менеджера или клиента из стенограммы.
 Контекст опоздания: если клиент предупреждает об опоздании на уже существующую запись — менеджер действует корректно (уточняет время прибытия, подтверждает ожидание). Не снижать оценки за «отсутствие альтернатив» или «незакрытую запись»: цель звонка — уведомление, и она достигнута.
 
@@ -234,6 +236,7 @@ ${metadataBlock}
 - Писать "не представился", если в приветствии звучали приветствие + имя клиента или название салона.
 - Писать "менеджер не переспросил про...", если клиент сам завершил тему.
 - Ставить оценку 5 или формулировку "визит не согласован" по критерию 9 (закрытие на запись), если запись подтверждена — в этом случае оценка должна быть 9–10.
+- Использовать формулировки «бронь не оформлена» и «попытка закрытия отсутствовала» в исходящих подтверждающих звонках (где менеджер напоминает «вы к нам записаны на…» и клиент подтверждает визит) — бронь существует до звонка, оценка по критерию 9 должна быть 9–10.
 - Снижать оценки за «отсутствие альтернатив» или «незакрытую запись», если клиент предупреждает об опоздании на уже существующую запись и менеджер подтвердил ожидание.
 - Признавать критерий 8 (альтернативы) применимым, если клиент подтвердил или согласился и не было отказа/несогласия по времени/цене/услуге.
 - Придумывать ошибки и советы про SMS/автоподтверждения или допродажи, если диалог короткий/подтверждающий или для этого не было основания в стенограмме.
@@ -613,6 +616,58 @@ export const FEW_SHOT_EDGE_CASES = `
   "recommendations": ["При ответе на звонок желательно сразу называть салон и имя администратора даже при коротких статусных вызовах."],
   "missed_opportunities": []
 }
+
+ПРИМЕР 8 (исходящий звонок-подтверждение менеджера, стенограмма SpeechKit одной строкой без меток ролей)
+Транскрипт: "Добрый день, салон красоты Fashion Look Studio, меня зовут Анна. Вы к нам записаны на завтра в 14:00 на маникюр к мастеру Арине Егоровой, подтверждаете визит? Да, буду. Отлично, будем ждать вас завтра в 14:00. Спасибо, до свидания." (длительность 22 сек)
+Ответ:
+{
+  "is_conversation": true,
+  "formatted_transcript": "Менеджер: Добрый день, салон красоты Fashion Look Studio, меня зовут Анна. Вы к нам записаны на завтра в 14:00 на маникюр к мастеру Арине Егоровой, подтверждаете визит?\\nКлиент: Да, буду.\\nМенеджер: Отлично, будем ждать вас завтра в 14:00.\\nКлиент: Спасибо, до свидания.",
+  "facts": {
+    "client_name": {"value": "не озвучено", "quote": null},
+    "desired_service": {"value": "маникюр", "quote": "на маникюр к мастеру Арине Егоровой"},
+    "master": {"value": "Арина Егорова", "quote": "к мастеру Арине Егоровой", "note": ""},
+    "prices_mentioned": [],
+    "date_time_offered": {"value": "завтра в 14:00", "quote": "на завтра в 14:00"},
+    "booking_markers": [
+      {"value": "Вы к нам записаны на завтра в 14:00 на маникюр к мастеру Арине Егоровой, подтверждаете визит?", "quote": "Вы к нам записаны на завтра в 14:00 на маникюр к мастеру Арине Егоровой, подтверждаете визит?"},
+      {"value": "Да, буду.", "quote": "Да, буду."},
+      {"value": "Отлично, будем ждать вас завтра в 14:00.", "quote": "Отлично, будем ждать вас завтра в 14:00."}
+    ],
+    "greeting_check": {"greeted": true, "addressed_client_by_name": false, "named_salon": true, "named_self": true, "quote": "Добрый день, салон красоты Fashion Look Studio, меня зовут Анна."}
+  },
+  "booking_status": "Запись состоялась",
+  "summary": {
+    "goal": "Исходящий звонок менеджера для подтверждения существующей записи на маникюр",
+    "service": "маникюр",
+    "master": "Арина Егорова",
+    "price": "не озвучено",
+    "date_time": "завтра в 14:00",
+    "booking_done": "Подтверждение ранее сделанной записи",
+    "reason_if_not": "не применимо",
+    "manager_next_steps": ["Отметить в CRM подтверждение существующей записи на завтра в 14:00 к мастеру Арине Егоровой."],
+    "short_summary": "Суть обращения: услуга — маникюр, дата — завтра, время — 14:00, мастер — Арина Егорова. Пересказ диалога: Менеджер Анна позвонила из салона Fashion Look Studio, чтобы напомнить о записи на маникюр к мастеру Арине Егоровой на завтра в 14:00 и уточнить подтверждение визита. Клиент подтвердил, что придёт. Менеджер подтвердила ожидание, клиент поблагодарил и попрощался. Вывод: Подтверждение ранее сделанной записи.",
+    "quotes_support": ["Вы к нам записаны на завтра в 14:00 на маникюр к мастеру Арине Егоровой, подтверждаете визит?", "Да, буду.", "Отлично, будем ждать вас завтра в 14:00."]
+  },
+  "audit": {
+    "criteria": [
+      {"name": "Приветствие и представление", "score": 10, "applicable": true, "reasoning": "Полное приветствие по стандарту: названы салон и имя менеджера.", "quote": "Добрый день, салон красоты Fashion Look Studio, меня зовут Анна."},
+      {"name": "Выявление потребности гостя", "score": null, "applicable": false, "reasoning": "Исходящий звонок для подтверждения уже существующей записи.", "quote": "не применимо"},
+      {"name": "Презентация услуги и мастера", "score": null, "applicable": false, "reasoning": "Услуга и мастер были согласованы до звонка.", "quote": "не применимо"},
+      {"name": "Корректная презентация стоимости", "score": null, "applicable": false, "reasoning": "Стоимость не обсуждалась в подтверждающем звонке.", "quote": "не применимо"},
+      {"name": "Работа с возражениями", "score": null, "applicable": false, "reasoning": "Возражений со стороны клиента не было.", "quote": "не применимо"},
+      {"name": "Предложение дополнительных услуг", "score": null, "applicable": false, "reasoning": "Короткий исходящий звонок-подтверждение, допродажа не требовалась.", "quote": "не применимо"},
+      {"name": "Предложение параллельной записи", "score": null, "applicable": false, "reasoning": "Одиночная подтверждаемая услуга.", "quote": "не применимо"},
+      {"name": "Предложение альтернативных вариантов", "score": null, "applicable": false, "reasoning": "Отказа или несогласия клиента не было — визит подтверждён.", "quote": "не применимо"},
+      {"name": "Закрытие на запись", "score": 10, "applicable": true, "reasoning": "Менеджер напомнил о существующей записи и получил чёткое подтверждение визита от клиента (бронь существовала до звонка).", "quote": "Да, буду."},
+      {"name": "Качество коммуникации и завершение разговора", "score": 10, "applicable": true, "reasoning": "Вежливое, чёткое подтверждение визита и доброжелательное прощание.", "quote": "Спасибо, до свидания."}
+    ],
+    "overall_score": 10,
+    "mistakes": []
+  },
+  "recommendations": [],
+  "missed_opportunities": []
+}
 `;
 
 
@@ -863,6 +918,178 @@ export function validateResult(result: AnalysisResult, transcript?: string): { v
     const allowed = outcomeBookingMap[result.key_facts.call_outcome];
     if (allowed && result.booking_status && !allowed.includes(result.booking_status)) {
       errors.push(`call_outcome «${result.key_facts.call_outcome}» не согласован с booking_status «${result.booking_status}»`);
+    }
+  }
+
+  // A.1.5: Авто-ремонт критериев 8 (альтернативы) и 9 (исходящее подтверждение) до проверки среднего балла и противоречий аудита
+  if (!notHappened) {
+    const repairCtx = effectiveTranscript ? classifyCallContext(effectiveTranscript) : null;
+    const cleanTextForRepair = repairCtx?.cleanTranscript || effectiveTranscript;
+
+    const collectCriteriaLists = (): any[][] => {
+      const lists: any[][] = [];
+      if (Array.isArray(result.criteria_scores)) lists.push(result.criteria_scores);
+      if (result.evaluation && Array.isArray(result.evaluation.criteria) && result.evaluation.criteria !== result.criteria_scores) {
+        lists.push(result.evaluation.criteria);
+      }
+      const kfObj = result.key_facts as any;
+      if (kfObj && Array.isArray(kfObj.criteria_scores) && !lists.includes(kfObj.criteria_scores)) {
+        lists.push(kfObj.criteria_scores);
+      }
+      if (kfObj?.evaluation && Array.isArray(kfObj.evaluation.criteria) && !lists.includes(kfObj.evaluation.criteria)) {
+        lists.push(kfObj.evaluation.criteria);
+      }
+      return lists;
+    };
+
+    const criteriaLists = collectCriteriaLists();
+    let criteriaMutated = false;
+
+    // Авто-ремонт Критерия 8 («Предложение альтернативных вариантов»):
+    // если критерий 8 применим с низким баллом, а в стенограмме нет отказа или несогласия клиента — переводим в applicable: false
+    const CLIENT_REFUSAL_OR_DISAGREEMENT_RE =
+      /(?:не\s+подходит|не\s+удобно|неудобно|не\s+смогу|не\s+получится|не\s+получается|не\s+успею|не\s+успева[юе]|не\s+приду|не\s+подойду|не\s+интерес|не\s+нужно|не\s+надо|дорого|слишком\s+дорого|дороговато|передумал|отмен[а-яё]*\s+запис|отказываюсь|отказ|подумаю|перезвоню\s+позже|не\s+будет\s+в\s+городе|нет,\s*спасибо|пораньше\s+нельзя|нет\s+свободн|нет\s+мест|занят[аоы]?|не\s+работает|мы\s+не\s+(?:делаем|выполняем)|такой\s+услуги\s+нет|нет\s+такой\s+услуги|(?:^|[^\p{L}])нет,\s+[^\n.!?]{1,50}(?:надо|нужно|хотелось|друго[йе]|позже|раньше|не\s+))/iu;
+    const hasClientRefusalOrDisagreement = Boolean(
+      repairCtx?.isDeclined ||
+        repairCtx?.isUnavailableServiceRefusal ||
+        repairCtx?.isDispute ||
+        (cleanTextForRepair && CLIENT_REFUSAL_OR_DISAGREEMENT_RE.test(cleanTextForRepair))
+    );
+
+    if (!hasClientRefusalOrDisagreement && criteriaLists.length > 0) {
+      let c8Repaired = false;
+      for (const list of criteriaLists) {
+        for (const c of list) {
+          if (!c) continue;
+          const isCrit8 = c.id === 'alternatives' || /альтернатив/i.test(String(c.name || ''));
+          const isApplicable = c.is_applicable === true || (c as any).applicable === true;
+          const hasLowScore = typeof c.score === 'number' && !isNaN(c.score) && c.score < 8;
+          if (isCrit8 && isApplicable && hasLowScore) {
+            c.is_applicable = false;
+            if ('applicable' in c) {
+              (c as any).applicable = false;
+            }
+            c.score = null;
+            c.explanation = 'Не применимо: в стенограмме отсутствует отказ или несогласие клиента.';
+            if ('evidence_quote' in c) {
+              c.evidence_quote = undefined;
+            }
+            c8Repaired = true;
+            criteriaMutated = true;
+          }
+        }
+      }
+      if (c8Repaired) {
+        console.warn(
+          '[GigaChat Repair] Критерий 8 («Предложение альтернативных вариантов») переведён в applicable: false (score: null) — в стенограмме нет отказа или несогласия клиента.'
+        );
+        if (Array.isArray(result.operator_mistakes)) {
+          const filtered = result.operator_mistakes.filter(
+            (m: string) => !/(?:альтернативн|предложение альтернатив|лист ожидания)/i.test(String(m || ''))
+          );
+          if (filtered.length !== result.operator_mistakes.length) {
+            result.operator_mistakes = filtered;
+            if (result.transcript_summary) {
+              const nextMistakesText = filtered.length > 0 ? filtered.join('; ') : 'не выявлены';
+              result.transcript_summary = result.transcript_summary.replace(
+                /(-\s*Ошибки и недочеты:\s*)[^\n]*/i,
+                `$1${nextMistakesText}`
+              );
+            }
+          }
+        }
+      }
+    }
+
+    // Авто-ремонт Критерия 9 для исходящих подтверждающих звонков:
+    // при напоминании «вы к нам записаны на…» и подтверждении клиента оценка 9–10;
+    // формулировки «бронь не оформлена» и «попытка закрытия отсутствовала» запрещены.
+    const isOutboundConfirmWithAgreement = Boolean(
+      cleanTextForRepair &&
+        /(?:вы\s+(?:к\s+нам\s+)?записаны(?:\s+(?:на|к))?|ваша\s+запись\s+(?:на|к)|напомина(?:ем|ю)\s+о\s+(?:вашей\s+)?записи)/iu.test(
+          cleanTextForRepair
+        ) &&
+        !/(?:отмен[а-яё]*\s+запис|не\s+смогу\s+прийти|не\s+приду|не\s+подойду)/iu.test(cleanTextForRepair) &&
+        !repairCtx?.isDeclined &&
+        /(?:^|[\s,!.?«»"])(?:да|буду|подойду|хорошо|подтверждаю|спасибо|до\s+свидания|угу|ага|конечно)(?:$|[\s,!.?«»"])/iu.test(
+          cleanTextForRepair
+        )
+    );
+    const FORBIDDEN_CONFIRM_CLOSING_RE = /(?:бронь\s+не\s+оформлена|попытка\s+закрытия(?:\s+диалога)?(?:\s+на\s+запись)?\s+отсутствовала)/iu;
+
+    if (isOutboundConfirmWithAgreement) {
+      let c9Repaired = false;
+      for (const list of criteriaLists) {
+        for (const c of list) {
+          if (!c) continue;
+          const isCrit9 = c.id === 'closing' || /закрытие\s+на\s+запись/i.test(String(c.name || ''));
+          if (!isCrit9) continue;
+          const hasForbiddenText = FORBIDDEN_CONFIRM_CLOSING_RE.test(String(c.explanation || ''));
+          const isLowOrInvalid =
+            c.is_applicable !== false &&
+            (typeof c.score !== 'number' || isNaN(c.score) || c.score < 9);
+          if (hasForbiddenText || isLowOrInvalid) {
+            c.is_applicable = true;
+            if ('applicable' in c) {
+              (c as any).applicable = true;
+            }
+            c.score = typeof c.score === 'number' && c.score >= 9 ? c.score : 10;
+            c.explanation =
+              'Существующая запись успешно подтверждена клиентом в ходе исходящего звонка-напоминания (бронь существовала до звонка).';
+            c9Repaired = true;
+            criteriaMutated = true;
+          }
+        }
+      }
+      if (Array.isArray(result.operator_mistakes)) {
+        const cleanedC9Mistakes = result.operator_mistakes.filter(
+          (m: string) => !FORBIDDEN_CONFIRM_CLOSING_RE.test(String(m || ''))
+        );
+        if (cleanedC9Mistakes.length !== result.operator_mistakes.length) {
+          result.operator_mistakes = cleanedC9Mistakes;
+          c9Repaired = true;
+          if (result.transcript_summary) {
+            const nextMistakesText = cleanedC9Mistakes.length > 0 ? cleanedC9Mistakes.join('; ') : 'не выявлены';
+            result.transcript_summary = result.transcript_summary.replace(
+              /(-\s*Ошибки и недочеты:\s*)[^\n]*/i,
+              `$1${nextMistakesText}`
+            );
+          }
+        }
+      }
+      if (c9Repaired) {
+        console.warn(
+          '[GigaChat Repair] Критерий 9 исправлен для исходящего подтверждающего звонка (оценка 9–10, удалены запрещённые формулировки «бронь не оформлена» / «попытка закрытия отсутствовала»).'
+        );
+      }
+    }
+
+    if (criteriaMutated) {
+      const primaryCriteria = criteriaLists[0] || [];
+      const recalculatedScores = primaryCriteria
+        .filter((c: any) => c && c.is_applicable === true && typeof c.score === 'number' && !isNaN(c.score))
+        .map((c: any) => c.score as number);
+      if (recalculatedScores.length > 0) {
+        const recalculatedOverall = Math.round(
+          recalculatedScores.reduce((s, v) => s + v, 0) / recalculatedScores.length
+        );
+        result.operator_score = recalculatedOverall;
+        if (result.evaluation) {
+          result.evaluation.applicable_count = recalculatedScores.length;
+          result.evaluation.overall_score = recalculatedOverall;
+        }
+        const kfObj = result.key_facts as any;
+        if (kfObj?.evaluation) {
+          kfObj.evaluation.applicable_count = recalculatedScores.length;
+          kfObj.evaluation.overall_score = recalculatedOverall;
+        }
+        if (result.transcript_summary) {
+          result.transcript_summary = result.transcript_summary.replace(
+            /(оценка\s*)\d{1,2}(\s*\/\s*10)/i,
+            `$1${recalculatedOverall}$2`
+          );
+        }
+      }
     }
   }
 
@@ -1931,8 +2158,8 @@ export function formatSummaryWithEssence(
   mistakesList = harmonized.mistakes;
   adviceList = harmonized.advice;
 
-  const mistakesFormatted = mistakesList.join('; ');
-  const adviceFormatted = adviceList.join('; ');
+  const mistakesFormatted = mistakesList.length > 0 ? mistakesList.join('; ') : 'не выявлены';
+  const adviceFormatted = adviceList.length > 0 ? adviceList.join('; ') : 'не требуются';
   const managerEvaluationBlock = `Разбор работы менеджера (оценка ${resolvedScore}/10):\n- Ошибки и недочеты: ${mistakesFormatted}\n- Советы по оптимизации: ${adviceFormatted}`;
 
   const formattedSummary = `${essencePrefix} Пересказ диалога: ${retellingText} Вывод: ${conclusionText}\n${managerEvaluationBlock}`;
@@ -2441,7 +2668,11 @@ export function parseGigaChatJson(
     };
 
     const summarySrc: 'model' | 'template' = modelShortSummary ? 'model' : 'template';
-    console.log(`[Summary source: ${summarySrc}] [Mistakes source: template] [Feedback source: template]`);
+    const notHappenedMistakesSrc: 'model' | 'template' | 'модель → fallback' =
+      parsed.operator_mistakes !== undefined || (parsed.audit && parsed.audit.mistakes !== undefined)
+        ? 'model'
+        : 'модель → fallback';
+    console.log(`[Summary source: ${summarySrc}] [Mistakes source: ${notHappenedMistakesSrc}] [Feedback source: template]`);
     return {
       is_conversation: false,
       transcript_summary:
@@ -2482,7 +2713,7 @@ export function parseGigaChatJson(
       recommendations: [nextStepText],
       missed_opportunities: [],
       summary_source: summarySrc,
-      mistakes_source: 'template',
+      mistakes_source: notHappenedMistakesSrc,
       feedback_source: 'template',
     };
   }
@@ -2545,9 +2776,9 @@ export function parseGigaChatJson(
     outcomeFromStage2 = BOOKING_STATUS_DICT['консультация'].call_outcome;
   }
 
-  // Если менеджер подтверждает существующую запись («вы записаны на/к...») и клиент подтверждает визит или предупреждает об опоздании — это «Запись состоялась»
+  // Если менеджер подтверждает существующую запись («вы к нам записаны на/к...», «вы записаны на/к...») и клиент подтверждает визит или предупреждает об опоздании — это «Запись состоялась»
   const isExistingBookingConfirmation =
-    /(?:вы\s+записаны\s+(?:на|к)|ваша\s+запись\s+(?:на|к)|напомина(?:ем|ю)\s+о\s+(?:вашей\s+)?записи)/iu.test(dialogueCtx.cleanTranscript) &&
+    /(?:вы\s+(?:к\s+нам\s+)?записаны\s+(?:на|к)|ваша\s+запись\s+(?:на|к)|напомина(?:ем|ю)\s+о\s+(?:вашей\s+)?записи)/iu.test(dialogueCtx.cleanTranscript) &&
     !/(?:отмен[а-яё]*\s+запис|не\s+смогу\s+прийти|не\s+приду)/iu.test(dialogueCtx.cleanTranscript);
 
   const hasVerifiedModelBookingMarker =
@@ -2873,7 +3104,7 @@ export function parseGigaChatJson(
   let finalStructuredSummary: StructuredCallSummary;
   let finalMistakes: string[];
   let finalAdvice: string[];
-  let mistakesSource: 'model' | 'template' = 'template';
+  let mistakesSource: 'model' | 'template' | 'модель → fallback' = 'модель → fallback';
   let feedbackSource: 'model' | 'template' = 'template';
 
   if (hasValidModelSummary) {
@@ -2935,7 +3166,7 @@ export function parseGigaChatJson(
       finalAdvice = getLazyHarmonized().advice;
     }
 
-    mistakesSource = usedModelMistakes ? 'model' : 'template';
+    mistakesSource = usedModelMistakes ? 'model' : 'модель → fallback';
     feedbackSource = usedModelMistakes || usedModelRecommendations ? 'model' : 'template';
 
     const serviceStr = essence.service || 'не указана';
@@ -3062,6 +3293,7 @@ export function parseGigaChatJson(
       visitDateContext,
       fullTranscript
     ).mistakes;
+    mistakesSource = hasModelMistakesField ? 'model' : 'модель → fallback';
     finalAdvice =
       templateFormatted.advice && templateFormatted.advice.length > 0
         ? templateFormatted.advice
@@ -3392,11 +3624,19 @@ export function generateLocalFallbackAnalysis(
     callTimestamp
   );
 
+  const CANNED_FALLBACK_MISTAKE_RE =
+    /^(?:администратор\s+не\s+назвал\s+собственное\s+имя|не\s+заданы\s+уточняющие\s+вопросы\s+для\s+выявления\s+потребностей|особенности\s+услуги\s+и\s+квалификация\s+мастера\s+не\s+раскрыты|в\s+ходе\s+диалога\s+специалист\s+и\s+особенности\s+услуги\s+подробно\s+не\s+презентовались|администратор\s+не\s+предложил\s+сопутствующие\s+процедуры|сопутствующие\s+процедуры\s+к\s+основной\s+услуге\s+администратором\s+не\s+предлагались)/i;
+
   const finalMistakes = filterOutdatedReminderMistakes(
     mistakes && mistakes.length > 0 ? mistakes : [],
     callTimestamp,
     essence.date,
     formattedTranscript
+  ).filter((m) => !CANNED_FALLBACK_MISTAKE_RE.test(String(m || '').trim()));
+
+  const finalFormattedSummary = formattedSummary.replace(
+    /(-\s*Ошибки и недочеты:\s*)[^\n]*/i,
+    `$1${finalMistakes.length > 0 ? finalMistakes.join('; ') : 'не выявлены'}`
   );
   const finalAdvice = advice && advice.length > 0 ? advice : [`Соблюдать стандарты сервиса салона «${salon}».`];
 
@@ -3430,7 +3670,7 @@ export function generateLocalFallbackAnalysis(
   console.log('[Summary source: template] [Mistakes source: template] [Feedback source: template]');
   return {
     is_conversation: true,
-    transcript_summary: formattedSummary,
+    transcript_summary: finalFormattedSummary,
     booking_status: bookingStatus,
     formatted_transcript: formattedTranscript,
     structured_summary: structuredSummary,
