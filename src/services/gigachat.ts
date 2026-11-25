@@ -31,6 +31,13 @@ import {
   buildConciseDraftForVerifier,
   runTwoPassVerification,
 } from './callVerifier.js';
+import {
+  enforceSummaryQuoteRoleControl,
+  extractRoleUtterances,
+  extractAttributedQuotes,
+  doesRoleUtterancesContainQuote,
+  NEEDS_VERIFICATION_LABEL,
+} from './quoteRoleGuard.js';
 
 export {
   VERIFIER_PROMPT,
@@ -41,6 +48,11 @@ export {
   isQuotePresentInTranscript,
   buildConciseDraftForVerifier,
   runTwoPassVerification,
+  enforceSummaryQuoteRoleControl,
+  extractRoleUtterances,
+  extractAttributedQuotes,
+  doesRoleUtterancesContainQuote,
+  NEEDS_VERIFICATION_LABEL,
 };
 
 export const FALLBACK_SALON_MASTERS = [
@@ -189,7 +201,7 @@ ASR-искажение названия салона/бренда: наприм�
 - "Отсрочка" — клиент просит подумать / перезвонит / проверить расписание.
 - "Отказ" — клиент отказался от услуги, цены или времени.
 - "Консультация" — только если записи не существует и клиент не собирается приходить.
-- "Не применимо" — ТОЛЬКО при отсутствии живых реплик сторон (тишина, гудки, сброс, автоответчик без живого диалога). Если обе стороны что-то сказали — звонок состоялся, каким бы коротким он ни был.
+- "Не применимо" — при отсутствии живого содержательного диалога (тишина, гудки, сброс, автоответчик) ИЛИ если звонок не дошёл до менеджера: стенограмма состоит из автоинформатора/очереди/гудков и одной-двух коротких реплик без содержательного диалога («Алло?», «Здравствуйте?», «Не слышно» и т.п.). В этом случае статус строго "Не применимо", is_conversation = false, аудит не проводится (audit.criteria = [], audit.overall_score = null, audit.mistakes = []). Если обе стороны провели содержательный диалог — звонок состоялся, каким бы коротким он ни был.
 - Короткие и несостоявшиеся звонки: Если диалог отсутствует или короче ~10 секунд без содержательной реплики — строго следуй ПРИМЕРУ 1: is_conversation = false, все аудио-поля null (audit.criteria = [], audit.overall_score = null, audit.mistakes = []), ошибок менеджеру не выставлять.
 
 ВАЖНЫЕ ПРАВИЛА РАЗБОРА РОЛЕЙ И СТАТУСА:
@@ -197,12 +209,13 @@ ASR-искажение названия салона/бренда: наприм�
 - Приветствие салона («Добрый день, салон ...», «Fashion Look», «Лук Студия») и озвучивание расписания/цен — всегда реплики Менеджера.
 - Вопросы об услуге, стоимости, окошках и фразы подтверждения/отказа клиента — реплики Клиента.
 - Фразы автоинформатора АТС («разговор может быть записан», «вы позвонили в салон») выноси как «Автоинформатор: ...» и не принимай за согласие клиента на запись.
-- Фразы очереди и автоответчика ("оставайтесь на линии", "оставьте сообщение после гудка") — это Автоинформатор, даже если в стенограмме они с меткой "Менеджер". Если живой менеджер не произнёс ни одной реплики — статус "Не применимо", аудит не проводится.
+- Фразы очереди и автоответчика ("оставайтесь на линии", "оставьте сообщение после гудка", "ваш звонок очень важен", гудки) — это Автоинформатор, даже если в стенограмме они с меткой "Менеджер". Если живой менеджер не произнёс ни одной содержательной реплики или после автоинформатора/очереди/гудков есть лишь 1–2 короткие несодержательные реплики — статус "Не применимо", аудит не проводится, оценка null (см. ПРИМЕР 11).
 - Роли в SpeechKit-стенограммах одной строкой без меток ролей: если стенограмма пришла сплошным текстом одной строкой без меток «Менеджер:» / «Клиент:», восстанови роли по смыслу диалога: приветствие с названием салона, «меня зовут <имя>», «вы к нам записаны на…» («вы записаны на…», напоминание о дате, времени и мастере) — это реплики Менеджера (в исходящем подтверждающем звонке менеджер является инициатором разговора); короткие ответы подтверждения и прощания («да», «буду», «спасибо», «до свидания», «хорошо», «подойду») — реплики Клиента. В формируемом поле formatted_transcript обязательно размечай роли явно («Менеджер: ...\\nКлиент: ...»).
 
 === ЭТАП 3. РЕЗЮМЕ ===
 Составляется ИСКЛЮЧИТЕЛЬНО из фактов ЭТАПА 1.
 Каждое утверждение должно ссылаться на цитату из ЭТАПА 1.
+Контроль цитат по метке роли: перед формированием каждого поля резюме проверяй — если цитата привязана к конкретному говорящему («клиент сказал «X»», «менеджер ответил «Y»»), убедись, что реплика с соответствующей меткой («Клиент:» / «Менеджер:») действительно содержит этот текст; при несоответствии помечай поле как «требует проверки», а не выдавай неверную цитату.
 Если поля не было в ЭТАПЕ 1 — пиши "не озвучено".
 ЗАПРЕЩЕНО домысливать услуги, имена, цены, причины, отсутствующие в ЭТАПЕ 1.
 Время всегда приводи к формату ЧЧ:ММ (например, «в 10 подойдёте?» -> «10:00», «15 0 0» -> «15:00»).
@@ -230,8 +243,8 @@ ASR-искажение названия салона/бренда: наприм�
 Правило по стоимости: если конкретные цифры/рубли не озвучивались, критерий 4 имеет applicable: false, score: null.
 Правило по возражениям и альтернативам: если не было отказа или несогласия по времени/цене, критерии 5 и 8 имеют applicable: false, score: null.
 Критерий 8 (альтернативы) применим ТОЛЬКО если в диалоге был отказ или несогласие клиента по времени/цене/услуге. Если клиент подтвердил или согласился — критерий 8 не применим.
-Критерий 9 (закрытие на запись) — оценивай по сути, не по формальной формулировке: если запись подтверждена или существует и подтверждена (в том числе в исходящем подтверждающем звонке или при согласованном переносе записи) — оценка 9–10, а не 5; формулировка "визит не согласован" при подтверждённой записи запрещена.
-Критерий 9 для исходящих подтверждающих звонков: если менеджер напоминает о существующей записи («вы к нам записаны на…», «вы записаны на…») и клиент подтверждает визит — оценка 9–10; любая формулировка вида «бронь не оформлена» и «попытка закрытия отсутствовала» ЗАПРЕЩЕНА независимо от выставленного балла, так как бронь уже существует до звонка.
+Критерий 9 (закрытие на запись) — оценивай по сути, не по формальной формулировке: если запись подтверждена или существует и подтверждена (в том числе в исходящем или входящем звонке-подтверждении либо при согласованном переносе записи) — оценка 9–10, а не 5; формулировка "визит не согласован" при подтверждённой записи запрещена.
+Критерий 9 для класса «подтверждение существующей записи» (входящие и исходящие подтверждающие звонки): если в черновике booking_status = «запись подтверждена» / «запись состоялась» и клиент подтвердил визит («да, я буду», «подтверждаю», «подойду»), то оценка по критерию 9 — строго 9–10; любые формулировки вида «бронь не оформлена» и «попытка закрытия отсутствовала» ЗАПРЕЩЕНЫ независимо от выставленного балла, так как бронь уже существует до звонка (см. ПРИМЕР 8 и ПРИМЕР 10).
 Критерий 10 (качество коммуникации и завершение разговора): утверждение о качестве концовки обязательно подкрепляй дословной цитатой последней реплики менеджера или клиента из стенограммы.
 Контекст опоздания: если клиент предупреждает об опоздании на уже существующую запись — менеджер действует корректно (уточняет время прибытия, подтверждает ожидание). Не снижать оценки за «отсутствие альтернатив» или «незакрытую запись»: цель звонка — уведомление, и она достигнута.
 
@@ -240,12 +253,13 @@ ASR-искажение названия салона/бренда: наприм�
 - Штрафовать менеджера за отсутствие названия салона, если оно было озвучено, но распознано ASR с фонетическим искажением (например, «От, а, 28» = «от ЛИК 28»).
 - Писать "менеджер не переспросил про...", если клиент сам завершил тему.
 - Ставить оценку 5 или формулировку "визит не согласован" по критерию 9 (закрытие на запись), если запись подтверждена — в этом случае оценка должна быть 9–10.
-- Использовать любую формулировку вида «бронь не оформлена» или «попытка закрытия отсутствовала» при подтверждённой/существующей записи (включая исходящие подтверждающие звонки) — ЗАПРЕЩЕНО независимо от балла; оценка по критерию 9 должна быть 9–10.
+- Использовать любую формулировку вида «бронь не оформлена» или «попытка закрытия отсутствовала» при подтверждённой/существующей записи (включая входящие и исходящие подтверждающие звонки) — ЗАПРЕЩЕНО независимо от балла; оценка по критерию 9 должна быть 9–10.
 - Снижать оценки за «отсутствие альтернатив» или «незакрытую запись», если клиент предупреждает об опоздании на уже существующую запись и менеджер подтвердил ожидание.
 - Признавать критерий 8 (альтернативы) применимым, если клиент подтвердил или согласился и не было отказа/несогласия по времени/цене/услуге.
 - Придумывать ошибки и советы про SMS/автоподтверждения или допродажи, если диалог короткий/подтверждающий или для этого не было основания в стенограмме.
 - Не выставлять ошибку "не оговорён регламент предварительного напоминания о визите" и не советовать про напоминание накануне, если звонок произошёл в день визита или после наступления времени визита — окно напоминаний в этом случае прошло.
-- Если диалог отсутствует или короче ~10 секунд без содержательной реплики — строго следуй ПРИМЕРУ 1: is_conversation = false, все аудио-поля null, ошибок менеджеру не выставлять.
+- Если диалог отсутствует, короче ~10 секунд без содержательной реплики или звонок не дошёл до менеджера (автоинформатор/очередь/гудки + 1–2 короткие реплики без содержательного диалога) — строго следуй ПРИМЕРУ 1 / ПРИМЕРУ 11: is_conversation = false, booking_status = "Не применимо", все аудио-поля null, ошибок менеджеру не выставлять.
+- Приписывать клиенту цитату менеджера (или наоборот) — при несоответствии цитаты метке роли помечай поле как «требует проверки», не выдавай неверную цитату.
 - Цитаты бери ТОЛЬКО из стенограммы текущего звонка. Переносить цитаты и формулировки из примеров (например, „Будем ожидать вас.“, „Спасибо за обратный звонок.“) в цитаты текущего звонка ЗАПРЕЩЕНО — примеры показывают структуру, а не текст.
 - Копировать шаблонные фразы из примеров.
 - Выводить любой текст вне JSON.
@@ -726,6 +740,96 @@ export const FEW_SHOT_EDGE_CASES = `
 `;
 
 
+export const FEW_SHOT_EXTENDED_CASES = `
+ПРИМЕР 10 (входящий звонок-подтверждение существующей записи — класс «подтверждение существующей записи», Критерий 9 = 9–10, формулировки «попытка закрытия отсутствовала» / «бронь не оформлена» запрещены)
+Транскрипт: "Менеджер: Добрый день, салон красоты Fashion Look Studio, администратор Светлана.\\nКлиент: Здравствуйте, я записана на завтра в 11:00 на окрашивание к Елене, звоню подтвердить визит — да, я буду, подтверждаю.\\nМенеджер: Спасибо большое, что перезвонили! Отмечаю подтверждение вашей записи на завтра в 11:00 к мастеру Елене, будем рады вас видеть.\\nКлиент: Спасибо, до свидания." (длительность 22 сек)
+Ответ:
+{
+  "is_conversation": true,
+  "formatted_transcript": "Менеджер: Добрый день, салон красоты Fashion Look Studio, администратор Светлана.\\nКлиент: Здравствуйте, я записана на завтра в 11:00 на окрашивание к Елене, звоню подтвердить визит — да, я буду, подтверждаю.\\nМенеджер: Спасибо большое, что перезвонили! Отмечаю подтверждение вашей записи на завтра в 11:00 к мастеру Елене, будем рады вас видеть.\\nКлиент: Спасибо, до свидания.",
+  "facts": {
+    "client_name": {"value": "не озвучено", "quote": null},
+    "desired_service": {"value": "окрашивание", "quote": "на завтра в 11:00 на окрашивание к Елене"},
+    "master": {"value": "Елена", "quote": "на окрашивание к Елене", "note": ""},
+    "prices_mentioned": [],
+    "date_time_offered": {"value": "завтра в 11:00", "quote": "на завтра в 11:00"},
+    "booking_markers": [
+      {"value": "звоню подтвердить визит — да, я буду, подтверждаю", "quote": "звоню подтвердить визит — да, я буду, подтверждаю."},
+      {"value": "Отмечаю подтверждение вашей записи на завтра в 11:00 к мастеру Елене", "quote": "Отмечаю подтверждение вашей записи на завтра в 11:00 к мастеру Елене, будем рады вас видеть."}
+    ],
+    "greeting_check": {"greeted": true, "addressed_client_by_name": false, "named_salon": true, "named_self": true, "quote": "Добрый день, салон красоты Fashion Look Studio, администратор Светлана."}
+  },
+  "booking_status": "Запись состоялась",
+  "summary": {
+    "goal": "Входящий звонок клиента для подтверждения существующей записи на окрашивание",
+    "service": "окрашивание",
+    "master": "Елена",
+    "price": "не озвучено",
+    "date_time": "завтра в 11:00",
+    "booking_done": "Подтверждение существующей записи на завтра в 11:00 к мастеру Елене",
+    "reason_if_not": "не применимо",
+    "manager_next_steps": ["Отметить в CRM подтверждение существующей записи на завтра в 11:00 к мастеру Елене."],
+    "short_summary": "Суть обращения: услуга — окрашивание, дата — завтра, время — 11:00, мастер — Елена. Пересказ диалога: Клиент позвонила в салон и подтвердила существующую запись на окрашивание к мастеру Елене на завтра в 11:00. Администратор Светлана поблагодарила за звонок и зафиксировала подтверждение визита. Вывод: Подтверждение существующей записи.",
+    "quotes_support": ["я записана на завтра в 11:00 на окрашивание к Елене, звоню подтвердить визит — да, я буду, подтверждаю.", "Отмечаю подтверждение вашей записи на завтра в 11:00 к мастеру Елене, будем рады вас видеть."]
+  },
+  "audit": {
+    "criteria": [
+      {"name": "Приветствие и представление", "score": 10, "applicable": true, "reasoning": "Полное приветствие по стандарту: приветствие, название салона и имя администратора.", "quote": "Добрый день, салон красоты Fashion Look Studio, администратор Светлана."},
+      {"name": "Выявление потребности гостя", "score": null, "applicable": false, "reasoning": "Входящий звонок для подтверждения уже оформленной записи.", "quote": "не применимо"},
+      {"name": "Презентация услуги и мастера", "score": null, "applicable": false, "reasoning": "Услуга и мастер были согласованы ранее.", "quote": "не применимо"},
+      {"name": "Корректная презентация стоимости", "score": null, "applicable": false, "reasoning": "Стоимость не обсуждалась.", "quote": "не применимо"},
+      {"name": "Работа с возражениями", "score": null, "applicable": false, "reasoning": "Возражений со стороны клиента не было.", "quote": "не применимо"},
+      {"name": "Предложение дополнительных услуг", "score": null, "applicable": false, "reasoning": "Короткий подтверждающий звонок, допродажа не требовалась.", "quote": "не применимо"},
+      {"name": "Предложение параллельной записи", "score": null, "applicable": false, "reasoning": "Одиночная подтверждаемая запись.", "quote": "не применимо"},
+      {"name": "Предложение альтернативных вариантов", "score": null, "applicable": false, "reasoning": "Клиент подтвердила визит, отказа или переноса не было.", "quote": "не применимо"},
+      {"name": "Закрытие на запись", "score": 10, "applicable": true, "reasoning": "Клиент подтвердила существующую запись («да, я буду, подтверждаю»), администратор чётко зафиксировала подтверждение визита и повторила дату, время и мастера.", "quote": "Отмечаю подтверждение вашей записи на завтра в 11:00 к мастеру Елене, будем рады вас видеть."},
+      {"name": "Качество коммуникации и завершение разговора", "score": 10, "applicable": true, "reasoning": "Вежливая благодарность и доброжелательное прощание.", "quote": "Спасибо, до свидания."}
+    ],
+    "overall_score": 10,
+    "mistakes": []
+  },
+  "recommendations": [],
+  "missed_opportunities": []
+}
+
+ПРИМЕР 11 (звонок не дошёл до менеджера — автоинформатор, очередь, гудки и 1–2 короткие реплики без содержательного диалога)
+Транскрипт: "Автоинформатор: Здравствуйте, вы позвонили в салон красоты. Обращаем ваше внимание, разговор может быть записан. Ваш звонок очень важен для нас, оставайтесь на линии, все операторы сейчас заняты.\\n[гудки]\\nКлиент: Алло? Здравствуйте?\\n[гудки]\\nКлиент: Алло, не слышно." (длительность 26 сек)
+Ответ:
+{
+  "is_conversation": false,
+  "formatted_transcript": "Автоинформатор: Здравствуйте, вы позвонили в салон красоты. Обращаем ваше внимание, разговор может быть записан. Ваш звонок очень важен для нас, оставайтесь на линии, все операторы сейчас заняты.\\n[гудки]\\nКлиент: Алло? Здравствуйте?\\n[гудки]\\nКлиент: Алло, не слышно.",
+  "facts": {
+    "client_name": {"value": "не озвучено", "quote": null},
+    "desired_service": {"value": "не озвучено", "quote": null},
+    "master": {"value": "не озвучено", "quote": null, "note": ""},
+    "prices_mentioned": [],
+    "date_time_offered": {"value": "не озвучено", "quote": null},
+    "booking_markers": [],
+    "greeting_check": {"greeted": false, "addressed_client_by_name": false, "named_salon": false, "named_self": false, "quote": null}
+  },
+  "booking_status": "Не применимо",
+  "summary": {
+    "goal": "Звонок не дошёл до менеджера",
+    "service": "не озвучено",
+    "master": "не озвучено",
+    "price": "не озвучено",
+    "date_time": "не озвучено",
+    "booking_done": "Звонок не дошёл до менеджера (автоинформатор/очередь/гудки без содержательного диалога)",
+    "reason_if_not": "Звонок не дошёл до менеджера: диалог не состоялся",
+    "manager_next_steps": ["Перезвонить клиенту и уточнить цель обращения."],
+    "short_summary": "Разговор не состоялся: звонок не дошёл до менеджера — зафиксированы автоинформатор, ожидание в очереди/гудки и короткие реплики без содержательного диалога.",
+    "quotes_support": []
+  },
+  "audit": {
+    "criteria": [],
+    "overall_score": null,
+    "mistakes": []
+  },
+  "recommendations": ["Перезвонить клиенту в ближайшее рабочее время."],
+  "missed_opportunities": []
+}
+`;
+
 /**
  * Собирает пользовательскую часть промпта: примеры + транскрипт + длительность.
  * Системная часть (SYSTEM_PROMPT) передаётся отдельным сообщением с ролью 'system'.
@@ -738,6 +842,7 @@ export const buildUserPrompt = (transcript: string, callDurationSeconds?: number
   return `ПРИМЕРЫ ПРАВИЛЬНЫХ ОТВЕТОВ (ориентируйся на них по структуре и логике):
 ${FEW_SHOT_EXAMPLES}
 ${FEW_SHOT_EDGE_CASES}
+${FEW_SHOT_EXTENDED_CASES}
 
 ТРАНСКРИПТ ЗВОНКА:
 ${durationLine}${transcript}`;
@@ -1057,27 +1162,44 @@ export function validateResult(result: AnalysisResult, transcript?: string): { v
     }
 
     // Авто-ремонт Критерия 9 (закрытие на запись — по сути, не по формулировке):
-    // если запись подтверждена или существует и подтверждена (в т.ч. исходящий подтверждающий звонок / перенос) —
+    // для класса «подтверждение существующей записи» (входящий и исходящий звонок) и любой подтверждённой записи:
+    // если booking_status = «запись подтверждена» / «запись состоялась» / «согласие» и клиент подтвердил визит («да, я буду», «подтверждаю») —
     // оценка 9–10; формулировки «бронь не оформлена» и «попытка закрытия отсутствовала» запрещены независимо от балла.
-    const isOutboundConfirmWithAgreement = Boolean(
-      cleanTextForRepair &&
-        /(?:вы\s+(?:к\s+нам\s+)?записаны(?:\s+(?:на|к))?|ваша\s+запись\s+(?:на|к)|напомина(?:ем|ю)\s+о\s+(?:вашей\s+)?записи|перенес[а-яё]*\s+(?:вашу\s+)?запись)/iu.test(
-          cleanTextForRepair
-        ) &&
-        !/(?:отмен[а-яё]*\s+запис|не\s+смогу\s+прийти|не\s+приду|не\s+подойду)/iu.test(cleanTextForRepair) &&
-        !repairCtx?.isDeclined &&
-        /(?:^|[\s,!.?«»"])(?:да|буду|подойду|хорошо|подтверждаю|спасибо|до\s+свидания|угу|ага|конечно)(?:$|[\s,!.?«»"])/iu.test(
-          cleanTextForRepair
-        )
+    const CLIENT_VISIT_CONFIRM_RE =
+      /(?:^|[\s,!.?«»"—\-])(?:да,?\s*я\s+буду|да,?\s*буду|я\s+буду|подтверждаю|обязательно\s+буду|конечно\s+буду|да,?\s*приду|да,?\s*подойду|да|буду|подойду|хорошо|спасибо|до\s+свидания|угу|ага|конечно)(?:$|[\s,!.?«»"—\-])/iu;
+    const EXISTING_BOOKING_MENTION_RE =
+      /(?:(?:вы|я)\s+(?:к\s+нам\s+|к\s+вам\s+)?записан[аы]?(?:\s+(?:на|к))?|(?:ваша|моя)\s+запись\s+(?:на|к)|напомина(?:ем|ю)\s+о\s+(?:вашей\s+)?записи|перенес[а-яё]*\s+(?:вашу\s+)?запись|подтверд[а-яё]*\s+(?:свою\s+|вашу\s+)?(?:запис|визит)|подтвержда(?:ю|ем|ете)\s+(?:свою\s+|вашу\s+)?(?:запис|визит)|подтверждение\s+(?:ранее\s+сделанной|существующей)\s+записи)/iu;
+    const hasCancelOrRefusal = Boolean(
+      repairCtx?.isDeclined ||
+        (cleanTextForRepair && /(?:отмен[а-яё]*\s+запис|не\s+смогу\s+прийти|не\s+приду|не\s+подойду)/iu.test(cleanTextForRepair))
+    );
+    const hasClientVisitConfirmation = Boolean(
+      cleanTextForRepair && !hasCancelOrRefusal && CLIENT_VISIT_CONFIRM_RE.test(cleanTextForRepair)
+    );
+    const bookingStatusRawStr = String(result.booking_status || '');
+    const bookingDoneRawStr = String(
+      result.structured_summary?.booking_status_text || (result.key_facts as any)?.is_booked_text || ''
+    );
+    const isDraftBookingConfirmedStatus = Boolean(
+      result.booking_status === 'согласие' ||
+        /запись\s+(?:подтверждена|состоялась)|подтверждение\s+(?:ранее\s+сделанной|существующей)\s+записи/i.test(
+          `${bookingStatusRawStr} ${bookingDoneRawStr}`
+        ) ||
+        result.key_facts?.call_outcome === 'запись'
+    );
+    const isExistingConfirmationWithAgreement = Boolean(
+      !hasCancelOrRefusal &&
+        hasClientVisitConfirmation &&
+        (isDraftBookingConfirmedStatus ||
+          (cleanTextForRepair && EXISTING_BOOKING_MENTION_RE.test(cleanTextForRepair)))
     );
     const isBookingConfirmedOverall = Boolean(
-      isOutboundConfirmWithAgreement ||
-        result.booking_status === 'согласие' ||
-        /запись\s+состоялась/i.test(String(result.booking_status || '')) ||
-        result.key_facts?.call_outcome === 'запись' ||
+      isExistingConfirmationWithAgreement ||
+        isDraftBookingConfirmedStatus ||
         repairCtx?.isConfirmedBooking
     );
-    const FORBIDDEN_CONFIRM_CLOSING_RE = /(?:бронь\s+не\s+оформлена|попытка\s+закрытия(?:\s+диалога)?(?:\s+на\s+запись)?\s+отсутствовала)/iu;
+    const FORBIDDEN_CONFIRM_CLOSING_RE =
+      /(?:бронь\s+не\s+оформлена|запись\s+не\s+оформлена|попытка\s+закрытия(?:\s+диалога)?(?:\s+на\s+запись)?\s+отсутствовала|визит\s+не\s+согласован)/iu;
 
     if (isBookingConfirmedOverall) {
       let c9Repaired = false;
@@ -1088,17 +1210,17 @@ export function validateResult(result: AnalysisResult, transcript?: string): { v
           if (!isCrit9) continue;
           const hasForbiddenText = FORBIDDEN_CONFIRM_CLOSING_RE.test(String(c.explanation || ''));
           const isLowOrInvalid =
-            c.is_applicable !== false &&
-            (typeof c.score !== 'number' || isNaN(c.score) || c.score < 9);
-          // Запрещённые формулировки вычищаем НЕЗАВИСИМО от балла; при низком балле поднимаем до 9–10
+            (isExistingConfirmationWithAgreement || c.is_applicable !== false) &&
+            (c.is_applicable !== true || typeof c.score !== 'number' || isNaN(c.score) || c.score < 9);
+          // Запрещённые формулировки вычищаем НЕЗАВИСИМО от балла; при низком балле или подтверждённом визите поднимаем до 9–10
           if (hasForbiddenText || isLowOrInvalid) {
             c.is_applicable = true;
             if ('applicable' in c) {
               (c as any).applicable = true;
             }
-            c.score = typeof c.score === 'number' && c.score >= 9 ? c.score : 10;
-            c.explanation = isOutboundConfirmWithAgreement
-              ? 'Существующая запись успешно подтверждена клиентом в ходе исходящего звонка (бронь существовала до звонка).'
+            c.score = typeof c.score === 'number' && c.score >= 9 && c.score <= 10 ? c.score : 10;
+            c.explanation = isExistingConfirmationWithAgreement
+              ? 'Существующая запись успешно подтверждена клиентом в ходе звонка-подтверждения (бронь существовала до звонка).'
               : 'Запись успешно согласована и подтверждена по итогам диалога.';
             c9Repaired = true;
             criteriaMutated = true;
@@ -1120,6 +1242,28 @@ export function validateResult(result: AnalysisResult, transcript?: string): { v
             );
           }
         }
+      }
+      if (Array.isArray(result.recommendations)) {
+        const cleanedRecs = result.recommendations.filter(
+          (r: string) => !FORBIDDEN_CONFIRM_CLOSING_RE.test(String(r || ''))
+        );
+        if (cleanedRecs.length !== result.recommendations.length) {
+          result.recommendations = cleanedRecs;
+          c9Repaired = true;
+          if (result.transcript_summary) {
+            const nextRecsText = cleanedRecs.length > 0 ? cleanedRecs.join('; ') : 'не требуются';
+            result.transcript_summary = result.transcript_summary.replace(
+              /(-\s*Советы по оптимизации:\s*)[^\n]*/i,
+              `$1${nextRecsText}`
+            );
+          }
+        }
+      }
+      if (typeof result.operator_comment === 'string' && FORBIDDEN_CONFIRM_CLOSING_RE.test(result.operator_comment)) {
+        result.operator_comment = result.operator_comment
+          .replace(new RegExp(FORBIDDEN_CONFIRM_CLOSING_RE.source, 'giu'), 'существующая запись подтверждена')
+          .trim();
+        c9Repaired = true;
       }
       if (c9Repaired) {
         console.warn(
@@ -2671,6 +2815,9 @@ export function parseGigaChatJson(
   }
 
   // Явные маркеры провала перекрывают вердикт, но ТОЛЬКО если в стенограмме нет живого диалога.
+  const callDidNotReachManager = Boolean(
+    isCallWithoutLiveManager(originalTranscript) || isCallWithoutLiveManager(formattedTranscript)
+  );
   const summaryTextForCheck =
     typeof parsed.summary === 'string'
       ? parsed.summary
@@ -2678,7 +2825,7 @@ export function parseGigaChatJson(
   const combinedText = `${stripIvrFromTranscript(formattedTranscript || '')} ${parsed.transcript_summary || ''} ${summaryTextForCheck}`.toLowerCase();
   const explicitFailure =
     /разговор не состоялся|звонок не состоялся|автоответчик|автоинформатор|голосовая почта|оставьте сообщение|после сигнала|абонент временно недоступен|абонент занят|все операторы заняты/.test(combinedText);
-  if ((explicitFailure && !transcriptHasBothRoles && !liveDialoguePresent) || isCallWithoutLiveManager(originalTranscript || formattedTranscript)) {
+  if ((explicitFailure && !transcriptHasBothRoles && !liveDialoguePresent) || callDidNotReachManager) {
     isConversation = false;
   }
 
@@ -2687,7 +2834,7 @@ export function parseGigaChatJson(
     /не\s*состоял|автоответчик/i.test(rawOutcome) ||
     rawBooking === 'не применимо';
 
-  if (liveDialoguePresent && modelClaimedNotHappened) {
+  if (liveDialoguePresent && !callDidNotReachManager && modelClaimedNotHappened) {
     console.warn('[GigaChat Repair] Стенограмма содержит живой диалог — вердикт модели «не состоялся» переопределён.');
     isConversation = true;
   }
@@ -2821,6 +2968,8 @@ export function parseGigaChatJson(
     }
   > = {
     'запись состоялась': { booking_status: 'согласие', call_outcome: 'запись' },
+    'запись подтверждена': { booking_status: 'согласие', call_outcome: 'запись' },
+    'подтверждена': { booking_status: 'согласие', call_outcome: 'запись' },
     'согласие': { booking_status: 'согласие', call_outcome: 'запись' },
     'отсрочка': { booking_status: 'консультация', call_outcome: 'перезвон' },
     'отказ': { booking_status: 'отказ', call_outcome: 'отказ' },
@@ -2834,7 +2983,12 @@ export function parseGigaChatJson(
   if (exactDictMatch) {
     bookingStatus = exactDictMatch.booking_status;
     outcomeFromStage2 = exactDictMatch.call_outcome;
-  } else if (rawBooking.includes('запись состоялась') || rawBooking.includes('соглас')) {
+  } else if (
+    rawBooking.includes('запись состоялась') ||
+    rawBooking.includes('запись подтверждена') ||
+    rawBooking.includes('подтвержден') ||
+    rawBooking.includes('соглас')
+  ) {
     bookingStatus = BOOKING_STATUS_DICT['запись состоялась'].booking_status;
     outcomeFromStage2 = BOOKING_STATUS_DICT['запись состоялась'].call_outcome;
   } else if (rawBooking.includes('отсроч')) {
@@ -2870,9 +3024,9 @@ export function parseGigaChatJson(
     outcomeFromStage2 = BOOKING_STATUS_DICT['консультация'].call_outcome;
   }
 
-  // Если менеджер подтверждает существующую запись («вы к нам записаны на/к...», «вы записаны на/к...») и клиент подтверждает визит или предупреждает об опоздании — это «Запись состоялась»
+  // Если в звонке подтверждается существующая запись (исходящий или входящий звонок: «вы/я записаны на/к...», «подтвердить запись», «подтверждаю», «да, я буду») — это «Запись состоялась»
   const isExistingBookingConfirmation =
-    /(?:вы\s+(?:к\s+нам\s+)?записаны\s+(?:на|к)|ваша\s+запись\s+(?:на|к)|напомина(?:ем|ю)\s+о\s+(?:вашей\s+)?записи)/iu.test(dialogueCtx.cleanTranscript) &&
+    /(?:(?:вы|я)\s+(?:к\s+нам\s+|к\s+вам\s+)?записан[аы]?\s+(?:на|к)|(?:ваша|моя)\s+запись\s+(?:на|к)|напомина(?:ем|ю)\s+о\s+(?:вашей\s+)?записи|подтверд[а-яё]*\s+(?:свою\s+|вашу\s+)?(?:запис|визит)|подтвержда(?:ю|ем|ете))/iu.test(dialogueCtx.cleanTranscript) &&
     !/(?:отмен[а-яё]*\s+запис|не\s+смогу\s+прийти|не\s+приду)/iu.test(dialogueCtx.cleanTranscript);
 
   const hasVerifiedModelBookingMarker =
@@ -2891,7 +3045,7 @@ export function parseGigaChatJson(
     bookingStatus = 'согласие';
   } else if (dialogueCtx.isLateWarning) {
     bookingStatus = bookingStatus === 'согласие' && (isExistingBookingConfirmation || hasVerifiedModelBookingMarker) ? 'согласие' : 'консультация';
-  } else if (bookingStatus === 'согласие' && !dialogueCtx.isRescheduleOrCheck && !hasVerifiedModelBookingMarker) {
+  } else if (bookingStatus === 'согласие' && !dialogueCtx.isRescheduleOrCheck && !hasVerifiedModelBookingMarker && !isExistingBookingConfirmation) {
     bookingStatus = 'консультация';
   }
 
@@ -3058,7 +3212,7 @@ export function parseGigaChatJson(
     (isMasterNameValid(rawMaster) ? normalizeMasterName(rawMaster) : null) ||
     extracted.master;
 
-  const comment =
+  let comment =
     parsed.operator_comment && parsed.operator_comment.trim().length > 0
       ? parsed.operator_comment
       : `Администратор обработал обращение по регламенту салона «${salon}».`;
@@ -3194,7 +3348,7 @@ export function parseGigaChatJson(
   }
 
   // Структурированное резюме от модели: маппинг как parsed.structured_summary, так и нового parsed.summary
-  const modelStruct: Record<string, any> = parsed.structured_summary || (rawSummaryObj
+  const rawModelStruct: Record<string, any> = parsed.structured_summary || (rawSummaryObj
     ? {
         call_purpose: rawSummaryObj.goal,
         requested_service: rawSummaryObj.service,
@@ -3207,11 +3361,56 @@ export function parseGigaChatJson(
       }
     : {});
 
-  const modelShortSummaryRaw =
+  const modelShortSummaryBeforeGuard =
     (typeof rawSummaryObj?.short_summary === 'string' && rawSummaryObj.short_summary.trim()) ||
     (typeof parsed.transcript_summary === 'string' && parsed.transcript_summary.trim()) ||
     (typeof parsed.summary === 'string' && parsed.summary.trim()) ||
     '';
+  const modelNextStepsBeforeGuard: string[] | null = Array.isArray(rawModelStruct.manager_next_steps)
+    ? rawModelStruct.manager_next_steps.map((s: any) => String(s ?? '').trim()).filter(Boolean)
+    : null;
+
+  // Контроль цитат в генераторе ПЕРЕД формированием полей резюме:
+  // если цитата привязана к конкретному говорящему («клиент сказал X»), проверяем, что реплика с этой меткой роли действительно содержит X.
+  const transcriptForQuoteRoleCheck =
+    originalTranscript && extractRoleUtterances(originalTranscript).hasRoleLabels
+      ? originalTranscript
+      : rawFormattedTranscript && extractRoleUtterances(rawFormattedTranscript).hasRoleLabels
+      ? rawFormattedTranscript
+      : formattedTranscript || originalTranscript || '';
+
+  const quoteRoleCheck = enforceSummaryQuoteRoleControl(
+    {
+      short_summary: modelShortSummaryBeforeGuard,
+      call_purpose: typeof rawModelStruct.call_purpose === 'string' ? rawModelStruct.call_purpose : undefined,
+      requested_service: typeof rawModelStruct.requested_service === 'string' ? rawModelStruct.requested_service : undefined,
+      offered_master: typeof rawModelStruct.offered_master === 'string' ? rawModelStruct.offered_master : undefined,
+      offered_price: typeof rawModelStruct.offered_price === 'string' ? rawModelStruct.offered_price : undefined,
+      offered_date_time: typeof rawModelStruct.offered_date_time === 'string' ? rawModelStruct.offered_date_time : undefined,
+      booking_status_text: typeof rawModelStruct.booking_status_text === 'string' ? rawModelStruct.booking_status_text : undefined,
+      unbooked_reason: typeof rawModelStruct.unbooked_reason === 'string' ? rawModelStruct.unbooked_reason : undefined,
+      manager_next_steps: modelNextStepsBeforeGuard,
+      operator_comment: comment,
+    },
+    transcriptForQuoteRoleCheck
+  );
+
+  const modelStruct: Record<string, any> = {
+    ...rawModelStruct,
+    ...(quoteRoleCheck.fields.call_purpose !== undefined ? { call_purpose: quoteRoleCheck.fields.call_purpose } : {}),
+    ...(quoteRoleCheck.fields.requested_service !== undefined ? { requested_service: quoteRoleCheck.fields.requested_service } : {}),
+    ...(quoteRoleCheck.fields.offered_master !== undefined ? { offered_master: quoteRoleCheck.fields.offered_master } : {}),
+    ...(quoteRoleCheck.fields.offered_price !== undefined ? { offered_price: quoteRoleCheck.fields.offered_price } : {}),
+    ...(quoteRoleCheck.fields.offered_date_time !== undefined ? { offered_date_time: quoteRoleCheck.fields.offered_date_time } : {}),
+    ...(quoteRoleCheck.fields.booking_status_text !== undefined ? { booking_status_text: quoteRoleCheck.fields.booking_status_text } : {}),
+    ...(quoteRoleCheck.fields.unbooked_reason !== undefined ? { unbooked_reason: quoteRoleCheck.fields.unbooked_reason } : {}),
+    ...(quoteRoleCheck.fields.manager_next_steps !== undefined ? { manager_next_steps: quoteRoleCheck.fields.manager_next_steps } : {}),
+  };
+  if (typeof quoteRoleCheck.fields.operator_comment === 'string') {
+    comment = quoteRoleCheck.fields.operator_comment;
+  }
+
+  const modelShortSummaryRaw = quoteRoleCheck.fields.short_summary ?? modelShortSummaryBeforeGuard;
   const modelBookingDoneRaw =
     typeof modelStruct.booking_status_text === 'string' ? modelStruct.booking_status_text.trim() : '';
   const modelNextStepsRaw: string[] | null = Array.isArray(modelStruct.manager_next_steps)
@@ -3370,6 +3569,9 @@ export function parseGigaChatJson(
 
     const resolveModelMasterField = (): string => {
       const rawOffered = typeof modelStruct.offered_master === 'string' ? modelStruct.offered_master.trim() : '';
+      if (rawOffered === NEEDS_VERIFICATION_LABEL) {
+        return NEEDS_VERIFICATION_LABEL;
+      }
       if (!rawOffered || rawOffered.toLowerCase() === 'null') {
         return essence.master || 'не озвучено';
       }
@@ -3509,6 +3711,7 @@ export function parseGigaChatJson(
     operator_comment: comment,
     recommendations: finalAdvice,
     missed_opportunities: [],
+    ...(quoteRoleCheck.flaggedFields.length > 0 ? { verification_flags: quoteRoleCheck.flaggedFields } : {}),
     summary_source: summarySource,
     mistakes_source: mistakesSource,
     feedback_source: feedbackSource,

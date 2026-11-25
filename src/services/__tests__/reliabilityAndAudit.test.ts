@@ -23,7 +23,15 @@ import {
   markBatchItemFailed,
   finalizeBatchQueueIfDone,
 } from '../batchQueue.js';
-import { parseGigaChatJson } from '../gigachat.js';
+import {
+  parseGigaChatJson,
+  getSystemPrompt,
+  buildUserPrompt,
+  FEW_SHOT_EXTENDED_CASES,
+  hasSubstantiveLiveDialogue,
+  enforceSummaryQuoteRoleControl,
+} from '../gigachat.js';
+import { isCallWithoutLiveManager } from '../transcriptUtils.js';
 import { harmonizeMistakesAndEvaluation, reconcileMistakesWithCriteria } from '../evaluationUtils.js';
 import { CallEvaluation } from '../../types.js';
 
@@ -230,7 +238,7 @@ describe('Feedback source priority (model -> fallback) and non-verified mistakes
       },
     });
 
-    const parsed = parseGigaChatJson(rawJson, sampleTranscript, 'Fashion Look Studio');
+    const parsed = parseGigaChatJson(rawJson, 'Fashion Look Studio', sampleTranscript);
     assert.equal(parsed.feedback_source, 'model');
     assert.equal(parsed.feedback_reason, undefined);
     assert.deepEqual(parsed.recommendations, ['Называть ориентировочную стоимость услуги при оформлении записи.']);
@@ -259,7 +267,7 @@ describe('Feedback source priority (model -> fallback) and non-verified mistakes
       },
     });
 
-    const parsed = parseGigaChatJson(rawJson, sampleTranscript, 'Fashion Look Studio');
+    const parsed = parseGigaChatJson(rawJson, 'Fashion Look Studio', sampleTranscript);
     assert.equal(parsed.feedback_source, 'template');
     assert.ok(parsed.feedback_reason && parsed.feedback_reason.length > 5);
   });
@@ -289,7 +297,7 @@ describe('Feedback source priority (model -> fallback) and non-verified mistakes
       },
     });
 
-    const parsed = parseGigaChatJson(rawJson, sampleTranscript, 'Fashion Look Studio');
+    const parsed = parseGigaChatJson(rawJson, 'Fashion Look Studio', sampleTranscript);
     const mistakesJoined = (parsed.operator_mistakes || []).join(' ').toLowerCase();
     assert.equal(mistakesJoined.includes('грубых ошибок не допущено'), false);
     assert.ok((parsed.operator_mistakes || []).length > 0);
@@ -328,3 +336,210 @@ describe('Feedback source priority (model -> fallback) and non-verified mistakes
     assert.equal(direct.mistakes.some((m) => /нарушений нет/i.test(m)), false);
   });
 });
+
+describe('Criterion 9 confirmation class, not-reaching-manager detector, and generator quote-role control', () => {
+  it('enforces Criterion 9 score 9-10 and strips forbidden phrases for booking_status="запись подтверждена" when client confirms visit', () => {
+    const incomingConfirmTranscript =
+      'Менеджер: Добрый день, салон красоты Fashion Look Studio, администратор Светлана.\n' +
+      'Клиент: Здравствуйте, я записана на завтра в 11:00 на окрашивание к Елене, да, я буду, подтверждаю.\n' +
+      'Менеджер: Спасибо, отметила подтверждение вашей записи, ждём вас завтра в 11:00!\n' +
+      'Клиент: Спасибо, до свидания.';
+
+    const rawJson = JSON.stringify({
+      is_conversation: true,
+      booking_status: 'запись подтверждена',
+      summary: {
+        goal: 'Подтверждение существующей записи на окрашивание',
+        service: 'окрашивание',
+        master: 'Елена',
+        price: 'не озвучено',
+        date_time: 'завтра в 11:00',
+        booking_done: 'Подтверждение существующей записи',
+        reason_if_not: 'не применимо',
+        manager_next_steps: ['Отметить подтверждение в CRM'],
+        short_summary: 'Клиент подтвердила существующую запись на окрашивание на завтра в 11:00 к мастеру Елене.',
+      },
+      audit: {
+        criteria: [
+          { name: 'Приветствие и представление', score: 10, applicable: true, reasoning: 'Полное приветствие.' },
+          { name: 'Закрытие на запись', score: 4, applicable: true, reasoning: 'Попытка закрытия отсутствовала, бронь не оформлена.' },
+          { name: 'Качество коммуникации и завершение разговора', score: 10, applicable: true, reasoning: 'Вежливо.' },
+        ],
+        overall_score: 8,
+        mistakes: ['Попытка закрытия отсутствовала, бронь не оформлена'],
+      },
+      recommendations: ['Не допускать ситуаций, когда бронь не оформлена.'],
+    });
+
+    const parsed = parseGigaChatJson(rawJson, 'Fashion Look Studio', incomingConfirmTranscript);
+    assert.equal(parsed.booking_status, 'согласие');
+    const c9 = (parsed.criteria_scores || []).find((c) => c.id === 'closing' || /закрытие на запись/i.test(c.name));
+    assert.ok(c9);
+    assert.equal(c9!.is_applicable, true);
+    assert.ok(typeof c9!.score === 'number' && c9!.score >= 9 && c9!.score <= 10);
+    assert.doesNotMatch(c9!.explanation, /попытка закрытия отсутствовала|бронь не оформлена/i);
+    assert.equal(
+      (parsed.operator_mistakes || []).some((m) => /попытка закрытия отсутствовала|бронь не оформлена/i.test(m)),
+      false
+    );
+    assert.doesNotMatch(parsed.transcript_summary, /попытка закрытия отсутствовала|бронь не оформлена/i);
+  });
+
+  it('detects "звонок не дошёл до менеджера" (IVR/queue/beeps + 1-2 short non-substantive utterances) and suppresses audit with score null', () => {
+    const queueAndShortUtterances =
+      'Автоинформатор: Здравствуйте, вы позвонили в салон красоты. Обращаем ваше внимание, разговор может быть записан. Ваш звонок очень важен для нас, оставайтесь на линии, все операторы сейчас заняты.\n' +
+      '[гудки]\n' +
+      'Клиент: Алло? Здравствуйте?\n' +
+      '[гудки]\n' +
+      'Менеджер: Алло.';
+
+    assert.equal(isCallWithoutLiveManager(queueAndShortUtterances), true);
+    assert.equal(hasSubstantiveLiveDialogue(queueAndShortUtterances), false);
+
+    // Even if model hallucinates a conversation + score, parseGigaChatJson MUST override to "не применимо" & null
+    const hallucinatedModelJson = JSON.stringify({
+      is_conversation: true,
+      booking_status: 'Консультация',
+      summary: {
+        goal: 'Консультация',
+        short_summary: 'Клиент поздоровался с менеджером.',
+      },
+      audit: {
+        criteria: [{ name: 'Приветствие и представление', score: 6, applicable: true, reasoning: 'Сказал алло' }],
+        overall_score: 6,
+        mistakes: ['Не представился'],
+      },
+    });
+
+    const parsed = parseGigaChatJson(hallucinatedModelJson, 'Fashion Look Studio', queueAndShortUtterances);
+    assert.equal(parsed.is_conversation, false);
+    assert.equal(parsed.booking_status, 'не применимо');
+    assert.equal(parsed.operator_score, null);
+    assert.deepEqual(parsed.criteria_scores, []);
+    assert.equal(parsed.evaluation?.overall_score, null);
+    assert.deepEqual(parsed.operator_mistakes, []);
+
+    // Sanity check: genuine short dialogue after IVR (like ПРИМЕР 7) is NOT falsely flagged
+    const realShortDialogueAfterIvr =
+      'Автоинформатор: Обращаем ваше внимание, разговор может быть записан.\n' +
+      'Менеджер: Алло.\n' +
+      'Клиент: Ага, доброе утро. К тебе уже девушка подошла.\n' +
+      'Менеджер: Ага. Сейчас буду.\n' +
+      'Клиент: Угу.';
+    assert.equal(isCallWithoutLiveManager(realShortDialogueAfterIvr), false);
+    assert.equal(hasSubstantiveLiveDialogue(realShortDialogueAfterIvr), true);
+  });
+
+  it('includes valid ПРИМЕР 10 (confirmation call) and ПРИМЕР 11 (call did not reach manager) in prompt without removing ПРИМЕР 1–9', () => {
+    const sysPrompt = getSystemPrompt('Fashion Look Studio');
+    assert.match(sysPrompt, /подтверждение существующей записи/i);
+    assert.match(sysPrompt, /звонок не дошёл до менеджера/i);
+    assert.match(sysPrompt, /требует проверки/i);
+
+    const userPrompt = buildUserPrompt('Тест', 20);
+    for (let i = 1; i <= 11; i++) {
+      assert.ok(userPrompt.includes(`ПРИМЕР ${i}`), `Должен присутствовать ПРИМЕР ${i}`);
+    }
+
+    const ex10Idx = FEW_SHOT_EXTENDED_CASES.indexOf('ПРИМЕР 10');
+    const ex11Idx = FEW_SHOT_EXTENDED_CASES.indexOf('ПРИМЕР 11');
+    assert.ok(ex10Idx >= 0 && ex11Idx > ex10Idx);
+
+    const ex10Chunk = FEW_SHOT_EXTENDED_CASES.slice(ex10Idx, ex11Idx);
+    const parsed10 = JSON.parse(ex10Chunk.slice(ex10Chunk.indexOf('{'), ex10Chunk.lastIndexOf('}') + 1));
+    assert.equal(parsed10.is_conversation, true);
+    assert.equal(parsed10.booking_status, 'Запись состоялась');
+    const c9Ex10 = parsed10.audit.criteria.find((c: any) => /закрытие на запись/i.test(c.name));
+    assert.equal(c9Ex10?.applicable, true);
+    assert.ok(c9Ex10?.score >= 9);
+
+    const ex11Chunk = FEW_SHOT_EXTENDED_CASES.slice(ex11Idx);
+    const parsed11 = JSON.parse(ex11Chunk.slice(ex11Chunk.indexOf('{'), ex11Chunk.lastIndexOf('}') + 1));
+    assert.equal(parsed11.is_conversation, false);
+    assert.equal(parsed11.booking_status, 'Не применимо');
+    assert.equal(parsed11.audit.overall_score, null);
+    assert.deepEqual(parsed11.audit.criteria, []);
+  });
+
+  it('checks speaker-attributed quotes in generator, logs [Generator WARNING] цитата не совпадает с меткой роли, and marks field "требует проверки" without emitting false quote', () => {
+    const transcript =
+      'Менеджер: Добрый день, салон Fashion Look Studio, администратор Анна. Мы работаем до девяти вечера.\n' +
+      'Клиент: Здравствуйте, запишите меня на маникюр завтра в 18:00.\n' +
+      'Менеджер: Записала вас на маникюр завтра в 18:00 к мастеру Ольге.\n' +
+      'Клиент: Отлично, да, я буду.';
+
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: any[]) => {
+      warnings.push(args.map(String).join(' '));
+    };
+
+    try {
+      const mismatchedJson = JSON.stringify({
+        is_conversation: true,
+        booking_status: 'Запись состоялась',
+        summary: {
+          goal: 'Клиент сказал «мы работаем до девяти вечера» и попросил запись',
+          service: 'маникюр',
+          master: 'Ольга',
+          price: 'не озвучено',
+          date_time: 'завтра в 18:00',
+          booking_done: 'Запись состоялась',
+          reason_if_not: 'не применимо',
+          manager_next_steps: ['Подтвердить запись'],
+          short_summary:
+            'В ходе звонка клиент сказал «мы работаем до девяти вечера», а затем попросил записать на маникюр. Клиент подтвердил «отлично, да, я буду».',
+        },
+        audit: {
+          criteria: [
+            { name: 'Приветствие и представление', score: 10, applicable: true, reasoning: 'Ок' },
+            { name: 'Закрытие на запись', score: 10, applicable: true, reasoning: 'Запись оформлена' },
+          ],
+          overall_score: 10,
+          mistakes: [],
+        },
+        recommendations: ['Сохранять вежливый стиль общения.'],
+      });
+
+      const parsed = parseGigaChatJson(mismatchedJson, 'Fashion Look Studio', transcript);
+
+      assert.ok(
+        warnings.some((w) => w.includes('[Generator WARNING] цитата не совпадает с меткой роли')),
+        `Ожидался лог [Generator WARNING] цитата не совпадает с меткой роли, получено: ${warnings.join(' | ')}`
+      );
+      assert.equal(parsed.structured_summary?.call_purpose, 'требует проверки');
+      assert.equal(parsed.transcript_summary.includes('мы работаем до девяти вечера'), false);
+      assert.ok(parsed.transcript_summary.includes('требует проверки'));
+      // Valid client quote ("отлично, да, я буду") must NOT be removed
+      assert.ok(parsed.transcript_summary.includes('отлично, да, я буду'));
+      assert.ok((parsed.verification_flags || []).includes('call_purpose'));
+      assert.ok((parsed.verification_flags || []).includes('short_summary'));
+    } finally {
+      console.warn = origWarn;
+    }
+
+    // Valid attribution must produce zero warnings and preserve fields untouched
+    const cleanWarnings: string[] = [];
+    const origWarn2 = console.warn;
+    console.warn = (...args: any[]) => {
+      cleanWarnings.push(args.map(String).join(' '));
+    };
+    try {
+      const check = enforceSummaryQuoteRoleControl(
+        {
+          short_summary: 'Менеджер сообщил «мы работаем до девяти вечера», а клиент ответил «отлично, да, я буду».',
+          call_purpose: 'Клиент попросил «запишите меня на маникюр завтра в 18:00»',
+        },
+        transcript
+      );
+      assert.equal(check.mismatches.length, 0);
+      assert.deepEqual(check.flaggedFields, []);
+      assert.equal(cleanWarnings.length, 0);
+      assert.match(check.fields.short_summary || '', /мы работаем до девяти вечера/);
+      assert.match(check.fields.call_purpose || '', /запишите меня на маникюр/);
+    } finally {
+      console.warn = origWarn2;
+    }
+  });
+});
+
