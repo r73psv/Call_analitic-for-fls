@@ -14,6 +14,7 @@ import {
 import { CallRecord } from '../types.js';
 import { getTagBadgeStyle } from './CallDetails.js';
 import { deduplicateCalls } from '../services/callUtils.js';
+import { resolveCallAdministratorName, UNIDENTIFIED_ADMINISTRATOR_LABEL } from '../services/administratorIdentity.js';
 
 interface CallListProps {
   calls: CallRecord[];
@@ -95,18 +96,21 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
     return uniqueCalls.some(c => c.is_demo || c.call_id === 'megafon-call-89101' || c.call_id === 'megafon-call-89102');
   }, [uniqueCalls]);
 
-  // Available unique operators with call count
+  // Available unique administrators by spoken intro name with call count
   const availableOperators = useMemo(() => {
     const map = new Map<string, number>();
     uniqueCalls.forEach(c => {
-      const op = (c.operator_name || '').trim();
-      if (op) {
-        map.set(op, (map.get(op) || 0) + 1);
-      }
+      const op = resolveCallAdministratorName(c).name;
+      map.set(op, (map.get(op) || 0) + 1);
     });
     return Array.from(map.entries())
       .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'ru'));
+      .sort((a, b) => {
+        const aUnid = a.name === UNIDENTIFIED_ADMINISTRATOR_LABEL;
+        const bUnid = b.name === UNIDENTIFIED_ADMINISTRATOR_LABEL;
+        if (aUnid !== bUnid) return aUnid ? 1 : -1;
+        return b.count - a.count || a.name.localeCompare(b.name, 'ru');
+      });
   }, [uniqueCalls]);
 
   // Available unique tags across all calls
@@ -262,7 +266,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
 
         const maskedPhone = (call.client_phone_masked || '').toLowerCase();
         const clientName = (call.client_name || '').toLowerCase();
-        const operatorName = (call.operator_name || '').toLowerCase();
+        const operatorName = `${resolveCallAdministratorName(call).name} ${call.operator_name || ''}`.toLowerCase();
         const callId = (call.call_id || '').toLowerCase();
         const summary = (call.summary || '').toLowerCase();
         const transcript = (call.transcript || '').toLowerCase();
@@ -331,9 +335,9 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
         }
       }
 
-      // 4. Operator Name Filter (Параметр: по имени оператора)
+      // 4. Operator Name Filter (Параметр: по имени представления администратора)
       if (operatorFilter !== 'all') {
-        const op = (call.operator_name || '').trim().toLowerCase();
+        const op = resolveCallAdministratorName(call).name.trim().toLowerCase();
         if (op !== operatorFilter.trim().toLowerCase()) return false;
       }
 
@@ -1596,11 +1600,21 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
                         </span>
                       )}
                       <span className="truncate">{displayName}</span>
-                      {call.operator_name && (
-                        <span className="text-[11px] font-normal text-slate-500 truncate" title={`Оператор: ${call.operator_name}`}>
-                          ↔ {call.operator_name}
-                        </span>
-                      )}
+                      {(() => {
+                        const resolvedAdmin = resolveCallAdministratorName(call);
+                        return (
+                          <span
+                            className={`text-[11px] font-normal truncate ${resolvedAdmin.identified ? 'text-slate-500' : 'text-amber-600/80'}`}
+                            title={
+                              resolvedAdmin.identified
+                                ? `Администратор (по приветствию): ${resolvedAdmin.name}`
+                                : 'Администратор не представился в начале разговора'
+                            }
+                          >
+                            ↔ {resolvedAdmin.name}
+                          </span>
+                        );
+                      })()}
                     </h3>
                   </div>
                   

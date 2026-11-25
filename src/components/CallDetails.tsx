@@ -20,6 +20,7 @@ import { getSttEngineDisplayName } from './TranscriptionModelSelector.js';
 import { refineTranscriptRoles } from '../services/transcriptUtils.js';
 import { extractStructuredCallSummary } from '../services/summaryUtils.js';
 import { extractCallEvaluation, EVALUATION_CRITERIA_DEFINITIONS, harmonizeMistakesAndEvaluation, filterOutdatedReminderMistakes, reconcileMistakesWithCriteria } from '../services/evaluationUtils.js';
+import { resolveCallAdministratorName } from '../services/administratorIdentity.js';
 
 const DICTIONARY_STATUS_FIELD_SET = new Set(['booking_status', 'call_outcome']);
 
@@ -1187,7 +1188,7 @@ export function CallDetails({
               ))}
             </div>
             <h1 className="text-lg font-bold text-slate-800">
-              {call.client_phone_masked || call.client_name || 'Клиент'} ↔ {call.operator_name || 'Оператор'}
+              {call.client_phone_masked || call.client_name || 'Клиент'} ↔ {resolveCallAdministratorName(call).name}
             </h1>
           </div>
 
@@ -1387,7 +1388,7 @@ export function CallDetails({
           </div>
 
           <h1 className="text-lg font-bold text-slate-800">
-            {call.client_phone_masked || call.client_name || 'Клиент'} ↔ {call.operator_name || 'Оператор'}
+            {call.client_phone_masked || call.client_name || 'Клиент'} ↔ {resolveCallAdministratorName(call).name}
           </h1>
         </div>
 

@@ -52,13 +52,15 @@ function makeCall(overrides: Partial<CallRecord>): CallRecord {
 test('aggregateDailyCallsReport computes calls, missed, bookings by service & master, and respects UTC+4 boundaries', () => {
   const calls: CallRecord[] = [
     // 1. Booking: Маникюр, мастер Анна (Samara 2026-11-24 00:30 = 2026-11-23T20:30:00Z)
+    // Все звонки пришли через один общий номер АТС (operator_name: 'reception_701'), но представляются разные администраторы
     makeCall({
       call_id: 'c-1',
       timestamp: '2026-11-23T20:30:00.000Z',
       type: 'incoming',
       duration_seconds: 180,
       booking_status: 'согласие',
-      operator_name: 'Алёна',
+      operator_name: 'reception_701',
+      transcript: 'Менеджер: Добрый день, салон красоты Лик 28, меня зовут Алёна.\nКлиент: Запишите на маникюр к Анне.',
       operator_score: 9,
       structured_summary: {
         call_purpose: 'Запись',
@@ -71,14 +73,15 @@ test('aggregateDailyCallsReport computes calls, missed, bookings by service & ma
         manager_next_steps: [],
       },
     }),
-    // 2. Booking: Маникюр (different case), Анна
+    // 2. Booking: Маникюр (different case), Анна — тоже Алена (должна объединиться с Алёной)
     makeCall({
       call_id: 'c-2',
       timestamp: '2026-11-24T08:15:00.000Z',
       type: 'incoming',
       duration_seconds: 120,
       booking_status: 'согласие',
-      operator_name: 'Алёна',
+      operator_name: 'reception_701',
+      transcript: 'Менеджер: Здравствуйте, салон Лик 28, администратор Алена.\nКлиент: Хочу записаться на маникюр.',
       operator_score: 8,
       structured_summary: {
         call_purpose: 'Запись',
@@ -91,14 +94,15 @@ test('aggregateDailyCallsReport computes calls, missed, bookings by service & ma
         manager_next_steps: [],
       },
     }),
-    // 3. Booking: Окрашивание волос, no master specified (outgoing confirmation call)
+    // 3. Booking: Окрашивание волос, no master specified (outgoing confirmation call) — другой администратор на той же линии АТС
     makeCall({
       call_id: 'c-3',
       timestamp: '2026-11-24T11:00:00.000Z',
       type: 'outgoing',
       duration_seconds: 60,
       booking_status: 'согласие',
-      operator_name: 'Елена',
+      operator_name: 'reception_701',
+      transcript: 'Менеджер: Добрый день, Ольга! Салон Лик 28, меня зовут Елена, звоню подтвердить запись.\nКлиент: Да, буду.',
       operator_score: 10,
       key_facts: {
         is_dispute: false,
@@ -111,7 +115,7 @@ test('aggregateDailyCallsReport computes calls, missed, bookings by service & ma
         master: 'не озвучено',
       },
     }),
-    // 4. Missed incoming call
+    // 4. Missed incoming call (без диалога — не представился)
     makeCall({
       call_id: 'c-4',
       timestamp: '2026-11-24T12:00:00.000Z',
@@ -119,7 +123,8 @@ test('aggregateDailyCallsReport computes calls, missed, bookings by service & ma
       status: 'missed',
       is_answered: false,
       duration_seconds: 0,
-      operator_name: 'Елена',
+      operator_name: 'reception_701',
+      transcript: '',
       operator_score: null,
       key_facts: {
         is_dispute: false,
@@ -130,14 +135,15 @@ test('aggregateDailyCallsReport computes calls, missed, bookings by service & ma
         call_outcome: 'не успешно',
       },
     }),
-    // 5. Consultation + dispute
+    // 5. Consultation + dispute — Алёна
     makeCall({
       call_id: 'c-5',
       timestamp: '2026-11-24T14:00:00.000Z',
       type: 'incoming',
       duration_seconds: 240,
       booking_status: 'консультация',
-      operator_name: 'Алёна',
+      operator_name: 'reception_701',
+      transcript: 'Менеджер: Салон красоты Лик 28, Алёна, слушаю вас.\nКлиент: Почему педикюр такой дорогой?',
       operator_score: 6,
       key_facts: {
         is_dispute: true,
@@ -200,9 +206,12 @@ test('aggregateDailyCallsReport computes calls, missed, bookings by service & ma
     { name: 'Анна', count: 2 },
     { name: 'Не указан / любой мастер', count: 1 },
   ]);
-  assert.equal(metrics.operatorStats.length, 2);
+  assert.equal(metrics.operatorStats.length, 3);
   assert.equal(metrics.operatorStats[0].name, 'Алёна');
   assert.equal(metrics.operatorStats[0].bookings, 2);
+  assert.equal(metrics.operatorStats[1].name, 'Елена');
+  assert.equal(metrics.operatorStats[1].bookings, 1);
+  assert.equal(metrics.operatorStats[2].name, 'Не представился');
 });
 
 test('formatVkDailyReportMessage complies strictly with 152-ФЗ anonymization (no phones or client names)', () => {

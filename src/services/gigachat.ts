@@ -21,6 +21,11 @@ import { readStoreSync } from '../store/store.js';
 import { getGigaChatToken, isGigaChatConfigured, invalidateGigaChatTokenCache } from './gigachat-auth.js';
 import { fetchYclientsMasters, getPersistedYclientsMasterNames } from './yclients.js';
 import { resolveSalonName } from './salonBranding.js';
+import {
+  extractAdministratorIntroNameFromTranscript,
+  isGenericAtsOperatorLabel,
+  normalizeAdministratorFirstName,
+} from './administratorIdentity.js';
 import { GigaChatModel, AnalysisResult, CallRecord, NextStepItem, KeyFacts, TokenUsage, ContextClarification, StructuredCallSummary, CallEvaluationCriterion, CallEvaluation } from '../types.js';
 import {
   VERIFIER_PROMPT,
@@ -295,6 +300,7 @@ ASR-искажение названия салона/бренда: наприм�
     "addressed_client_by_name": true,
     "named_salon": true,
     "named_self": false,
+    "administrator_name": "имя, которым представился администратор в начале разговора, или null",
     "quote": "..."
   }
 }
@@ -4462,6 +4468,23 @@ export function parseGigaChatJson(
       : `[Feedback source: template (причина: ${feedbackReason || 'не указана'})]`;
   console.log(`${summaryLogTag} [Mistakes source: ${mistakesSource}] ${feedbackLogTag}`);
 
+  const rawGreetingCheck = parsed.facts?.greeting_check && typeof parsed.facts.greeting_check === 'object'
+    ? parsed.facts.greeting_check
+    : null;
+  const greetingCheckQuote =
+    typeof rawGreetingCheck?.quote === 'string' && rawGreetingCheck.quote.trim()
+      ? rawGreetingCheck.quote.trim()
+      : null;
+  const modelAdminNameRaw =
+    typeof rawGreetingCheck?.administrator_name === 'string' && !isGenericAtsOperatorLabel(rawGreetingCheck.administrator_name)
+      ? normalizeAdministratorFirstName(rawGreetingCheck.administrator_name, { requireKnownName: false })
+      : null;
+  const transcriptAdminIntro = extractAdministratorIntroNameFromTranscript(
+    formattedTranscript || fullTranscript,
+    greetingCheckQuote
+  );
+  const spokenOperatorName = modelAdminNameRaw || transcriptAdminIntro.name || null;
+
   const result: AnalysisResult = {
     is_conversation: true,
     transcript_summary: formattedSummary,
@@ -4490,6 +4513,7 @@ export function parseGigaChatJson(
       date: essence.date,
       time: essence.time,
       master: essence.master,
+      administrator_name: spokenOperatorName,
       call_purpose: finalStructuredSummary.call_purpose,
       requested_service: finalStructuredSummary.requested_service,
       offered_master: finalStructuredSummary.offered_master,
@@ -4505,6 +4529,7 @@ export function parseGigaChatJson(
       ...(validDateTimeOfferedQuote ? { date_time_offered_quote: validDateTimeOfferedQuote } : {}),
     },
     operator_score: score,
+    spoken_operator_name: spokenOperatorName,
     operator_mistakes: finalMistakes,
     operator_comment: comment,
     recommendations: finalAdvice,

@@ -184,6 +184,7 @@ export interface KeyFacts {
   date?: string | null;
   time?: string | null;
   master?: string | null;
+  administrator_name?: string | null;
 
   // 8 обязательных параметров резюме звонка (по требованию пользователя):
   call_purpose?: string; // Цель обращения
@@ -233,6 +234,7 @@ export interface CallRecord {
   // Custom metadata for rich display
   client_name?: string;
   operator_name?: string;
+  spoken_operator_name?: string | null;
   audio_url?: string;
   status: 'processing' | 'completed' | 'failed' | 'needs_transcription' | 'Success' | 'missed' | 'Cancel' | 'Busy' | 'NotAvailable' | 'NotAllowed' | 'NotFound' | 'transcription_failed' | 'analysis_failed';
   transcription_status?: string;
@@ -561,6 +563,7 @@ export interface AnalysisResult {
     date?: string | null;
     time?: string | null;
     master?: string | null;
+    administrator_name?: string | null;
     promises?: string[];
     // 8 обязательных параметров резюме:
     call_purpose?: string;
@@ -579,6 +582,7 @@ export interface AnalysisResult {
   };
   operator_score: number | null;
   operator_comment: string;
+  spoken_operator_name?: string | null;
   operator_mistakes?: string[];
   recommendations: string | string[];
   structured_summary?: StructuredCallSummary;

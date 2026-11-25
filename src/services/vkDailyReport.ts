@@ -5,6 +5,7 @@
 
 import { CallRecord } from '../types.js';
 import { resolveSalonName } from './salonBranding.js';
+import { resolveCallAdministratorName, UNIDENTIFIED_ADMINISTRATOR_LABEL } from './administratorIdentity.js';
 
 export const DEFAULT_SALON_TIMEZONE = 'Europe/Samara';
 export const DEFAULT_DAILY_REPORT_TIME = '21:05';
@@ -573,12 +574,11 @@ export function aggregateDailyCallsReport(
       scoredCallsCount++;
     }
 
-    // Operator breakdown (excluding raw phone numbers if operator_name accidentally contains one)
-    const opNameRaw = (call.operator_name || '').trim();
-    const opName = opNameRaw && !/^\+?\d{7,}$/.test(opNameRaw.replace(/\D/g, ''))
-      ? stripPhoneNumbers(opNameRaw)
-      : 'Дежурный администратор';
-    const opKey = opName.toLowerCase();
+    // Разрез администраторов строго по имени, которым они представляются в начале разговора
+    // (под одним номером АТС в разное время могут работать разные администраторы)
+    const resolvedAdmin = resolveCallAdministratorName(call);
+    const opName = stripPhoneNumbers(resolvedAdmin.name);
+    const opKey = resolvedAdmin.identified ? opName.toLowerCase() : '__unidentified__';
     let opEntry = operatorMap.get(opKey);
     if (!opEntry) {
       opEntry = {
@@ -611,6 +611,9 @@ export function aggregateDailyCallsReport(
 
   const operatorStats: OperatorDailyStat[] = Array.from(operatorMap.values())
     .sort((a, b) => {
+      const aUnid = a.name === UNIDENTIFIED_ADMINISTRATOR_LABEL;
+      const bUnid = b.name === UNIDENTIFIED_ADMINISTRATOR_LABEL;
+      if (aUnid !== bUnid) return aUnid ? 1 : -1;
       if (b.bookings !== a.bookings) return b.bookings - a.bookings;
       if (b.totalCalls !== a.totalCalls) return b.totalCalls - a.totalCalls;
       return a.name.localeCompare(b.name, 'ru');

@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/services/__tests__/callVerifier.test.ts src/services/__tests__/gigachat.test.ts src/services/__tests__/transcriptionService.test.ts src/services/__tests__/sttRetry.test.ts src/services/__tests__/gigaamAsrQueue.test.ts src/services/__tests__/serverEnv.test.ts src/services/__tests__/yclients.test.ts src/services/__tests__/reportExport.test.ts src/services/__tests__/vkDailyReport.test.ts src/services/__tests__/vkMessageFormatter.test.ts src/services/__tests__/reliabilityAndAudit.test.ts src/services/__tests__/salonBrandingAndYclientsSync.test.ts"
+    "test": "tsx --test src/services/__tests__/callVerifier.test.ts src/services/__tests__/gigachat.test.ts src/services/__tests__/transcriptionService.test.ts src/services/__tests__/sttRetry.test.ts src/services/__tests__/gigaamAsrQueue.test.ts src/services/__tests__/serverEnv.test.ts src/services/__tests__/yclients.test.ts src/services/__tests__/reportExport.test.ts src/services/__tests__/vkDailyReport.test.ts src/services/__tests__/vkMessageFormatter.test.ts src/services/__tests__/reliabilityAndAudit.test.ts src/services/__tests__/salonBrandingAndYclientsSync.test.ts src/services/__tests__/administratorIdentity.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1098.0",

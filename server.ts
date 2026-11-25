@@ -23,6 +23,7 @@ import { savePendingTranscriptionAudio, loadPendingTranscriptionAudio, deletePen
 import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation, harmonizeMistakesAndEvaluation, filterOutdatedReminderMistakes, reconcileMistakesWithCriteria, generateLocalFallbackAnalysis, clearCrmMastersCache } from './src/services/gigachat.js';
 import { clearYclientsCache, fetchYclientsMasters, isYclientsDailySyncDue, normalizeYclientsSyncTime, getYclientsMastersSyncStatus, getEffectiveYclientsConfig } from './src/services/yclients.js';
 import { detectSalonTheme, resolveSalonName, LOGIN_FORM_TITLE } from './src/services/salonBranding.js';
+import { resolveCallAdministratorName, extractAdministratorIntroNameFromTranscript } from './src/services/administratorIdentity.js';
 import { classifyCallContext } from './src/services/summaryUtils.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
 import { readStoreSync, writeStore, writeStoreSyncAtomic, flushStoreWrite, getDefaultConfig } from './src/store/store.js';
@@ -798,17 +799,25 @@ async function executeSingleModelAttempt(
         ? '[Feedback source: model]'
         : `[Feedback source: ${analysis.feedback_source} (причина: ${analysis.feedback_reason || analysis.fallback_reason || 'не указана'})]`;
     appendLog('success', 'gigachat', `Звонок успешно проанализирован моделью ${gigaModel}. [Summary source: ${analysis.summary_source || 'model'}] [Mistakes source: ${analysis.mistakes_source || 'model'}] ${feedbackSourceLabel}`);
+    const normalizedTranscript = normalizeSalonNames(analysis.formatted_transcript || cleanTranscript, salonName);
+    const spokenOperatorName =
+      analysis.spoken_operator_name ||
+      analysis.key_facts?.administrator_name ||
+      extractAdministratorIntroNameFromTranscript(normalizedTranscript).name ||
+      null;
     return {
       success: true,
       result: {
-        transcript: normalizeSalonNames(analysis.formatted_transcript || cleanTranscript, salonName),
+        transcript: normalizedTranscript,
         summary: normalizeSalonNames(analysis.transcript_summary, salonName),
         booking_status: analysis.booking_status || analysis.key_facts?.booking_status,
+        spoken_operator_name: spokenOperatorName,
         structured_summary: analysis.structured_summary,
         evaluation: analysis.evaluation,
         criteria_scores: analysis.criteria_scores,
         key_facts: {
           ...analysis.key_facts,
+          administrator_name: spokenOperatorName,
           booking_status: analysis.booking_status || analysis.key_facts?.booking_status,
           structured_summary: analysis.structured_summary,
           evaluation: analysis.evaluation,
@@ -4604,8 +4613,11 @@ function getAnonymizedPeriodCalls(db: any, startDate?: string, endDate?: string)
     const rawPhone = call.client_phone || call.full_phone || '';
     const masked = maskPhone(rawPhone || call.client_phone_masked || '');
     const bookingStatus = resolveCallBookingStatus(call);
+    const resolvedAdmin = resolveCallAdministratorName(call);
     return {
       ...call,
+      operator_name: resolvedAdmin.name,
+      spoken_operator_name: resolvedAdmin.identified ? resolvedAdmin.name : null,
       client_name: 'Обезличено (152-ФЗ)',
       client_phone: masked,
       full_phone: undefined,
@@ -4656,7 +4668,7 @@ app.post('/api/reports/period-stats-pdf', async (req, res) => {
         timestamp: c.timestamp,
         duration_seconds: c.duration_seconds || 0,
         type: c.type || 'incoming',
-        operator_name: c.operator_name || 'Дежурный администратор',
+        operator_name: c.spoken_operator_name || c.operator_name || 'Не представился',
         client_masked: c.client_phone_masked || '****000000',
         booking_status: c.booking_status || 'консультация',
         service: c.key_facts?.service || '',

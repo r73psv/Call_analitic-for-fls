@@ -21,6 +21,7 @@ import {
 import * as d3 from 'd3';
 import { DashboardStats, CallRecord, SentimentTrendItem } from '../types.js';
 import { DEFAULT_SALON_NAME } from '../services/salonBranding.js';
+import { resolveCallAdministratorName, UNIDENTIFIED_ADMINISTRATOR_LABEL } from '../services/administratorIdentity.js';
 
 export interface PeriodStatsReportData {
   periodTitle: string;
@@ -277,10 +278,11 @@ export function StatsGrid({ stats, calls = [], authToken, userRole, salonName }:
     return { text, isGood, diff, hasPrev: true };
   }
 
-  // Operator Performance and Comparative Ranking
+  // Operator Performance and Comparative Ranking (строго по имени представления в начале разговора)
   const operatorsData = useMemo(() => {
     const map: Record<string, {
       name: string;
+      isUnidentified: boolean;
       totalCalls: number;
       bookedCount: number;
       disputes: number;
@@ -291,9 +293,20 @@ export function StatsGrid({ stats, calls = [], authToken, userRole, salonName }:
     }> = {};
 
     currentCalls.forEach((c) => {
-      const name = c.operator_name || 'Дежурный администратор';
+      const resolved = resolveCallAdministratorName(c);
+      const name = resolved.name;
       if (!map[name]) {
-        map[name] = { name, totalCalls: 0, bookedCount: 0, disputes: 0, scores: [], prevTotalCalls: 0, prevBookedCount: 0, prevScores: [] };
+        map[name] = {
+          name,
+          isUnidentified: !resolved.identified,
+          totalCalls: 0,
+          bookedCount: 0,
+          disputes: 0,
+          scores: [],
+          prevTotalCalls: 0,
+          prevBookedCount: 0,
+          prevScores: [],
+        };
       }
       map[name].totalCalls++;
       if (c.booking_status === 'согласие' || c.key_facts?.call_outcome === 'запись' || c.key_facts?.call_outcome === 'успешно') {
@@ -309,9 +322,20 @@ export function StatsGrid({ stats, calls = [], authToken, userRole, salonName }:
 
     if (isComparative) {
       previousCalls.forEach((c) => {
-        const name = c.operator_name || 'Дежурный администратор';
+        const resolved = resolveCallAdministratorName(c);
+        const name = resolved.name;
         if (!map[name]) {
-          map[name] = { name, totalCalls: 0, bookedCount: 0, disputes: 0, scores: [], prevTotalCalls: 0, prevBookedCount: 0, prevScores: [] };
+          map[name] = {
+            name,
+            isUnidentified: !resolved.identified,
+            totalCalls: 0,
+            bookedCount: 0,
+            disputes: 0,
+            scores: [],
+            prevTotalCalls: 0,
+            prevBookedCount: 0,
+            prevScores: [],
+          };
         }
         map[name].prevTotalCalls++;
         if (c.booking_status === 'согласие' || c.key_facts?.call_outcome === 'запись' || c.key_facts?.call_outcome === 'успешно') {
@@ -330,6 +354,7 @@ export function StatsGrid({ stats, calls = [], authToken, userRole, salonName }:
       const prevConversionRate = op.prevTotalCalls > 0 ? Math.round((op.prevBookedCount / op.prevTotalCalls) * 100) : 0;
       return {
         name: op.name,
+        isUnidentified: op.isUnidentified,
         totalCalls: op.totalCalls,
         avgScore,
         bookedCount: op.bookedCount,
@@ -339,7 +364,10 @@ export function StatsGrid({ stats, calls = [], authToken, userRole, salonName }:
         prevAvgScore,
         prevConversionRate
       };
-    }).sort((a, b) => b.totalCalls - a.totalCalls);
+    }).sort((a, b) => {
+      if (a.isUnidentified !== b.isUnidentified) return a.isUnidentified ? 1 : -1;
+      return b.totalCalls - a.totalCalls;
+    });
   }, [currentCalls, previousCalls, isComparative]);
 
   // Export handler is defined below once peakHour is computed
@@ -1557,12 +1585,12 @@ export function StatsGrid({ stats, calls = [], authToken, userRole, salonName }:
                 </div>
                 <p className="text-xs text-slate-500 mt-1">
                   {isComparative
-                    ? `Сравнение показателей администраторов за текущий период (${startDate} — ${endDate}) и предыдущий (${prevStartDate} — ${prevEndDate}).`
-                    : `Индивидуальные показатели конверсии в запись, среднего балла качества и спорных ситуаций за выбранный период.`}
+                    ? `Сравнение показателей администраторов (по имени представления в начале разговора) за текущий период (${startDate} — ${endDate}) и предыдущий (${prevStartDate} — ${prevEndDate}).`
+                    : `Индивидуальные показатели конверсии в запись, среднего балла качества и спорных ситуаций по имени, которым администратор представляется в начале разговора.`}
                 </p>
               </div>
               <div className="text-xs text-slate-500 font-mono self-start sm:self-auto">
-                Всего операторов: <strong className="text-slate-800">{operatorsData.length}</strong>
+                Определено администраторов: <strong className="text-slate-800">{operatorsData.filter(op => op.name !== UNIDENTIFIED_ADMINISTRATOR_LABEL).length}</strong>
               </div>
             </div>
           </div>
@@ -1571,7 +1599,7 @@ export function StatsGrid({ stats, calls = [], authToken, userRole, salonName }:
             <table className="w-full text-left text-xs">
               <thead className="bg-slate-50/80 border-b border-slate-200 text-slate-600 font-semibold uppercase tracking-wider text-[11px]">
                 <tr>
-                  <th className="py-3 px-4">Администратор</th>
+                  <th className="py-3 px-4">Администратор (по приветствию)</th>
                   <th className="py-3 px-4">Звонки {isComparative ? '(тек. / пред.)' : ''}</th>
                   <th className="py-3 px-4">Записи клиентов</th>
                   <th className="py-3 px-4">Конверсия в запись {isComparative ? 'Δ' : ''}</th>
@@ -1581,6 +1609,7 @@ export function StatsGrid({ stats, calls = [], authToken, userRole, salonName }:
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {operatorsData.map((op, idx) => {
+                  const isUnidentified = op.name === UNIDENTIFIED_ADMINISTRATOR_LABEL;
                   const callsDelta = isComparative ? calcDelta(op.totalCalls, op.prevTotalCalls) : null;
                   const convDelta = isComparative ? calcDelta(op.conversionRate, op.prevConversionRate, true) : null;
                   const scoreDelta = isComparative && op.avgScore !== null && op.prevAvgScore !== null && op.prevAvgScore !== undefined
@@ -1588,15 +1617,19 @@ export function StatsGrid({ stats, calls = [], authToken, userRole, salonName }:
                     : null;
 
                   return (
-                    <tr key={op.name} className="hover:bg-slate-50/60 transition-colors">
+                    <tr key={op.name} className={isUnidentified ? 'bg-amber-50/30 hover:bg-amber-50/60 transition-colors' : 'hover:bg-slate-50/60 transition-colors'}>
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-2">
                           <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                            idx === 0 ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-600'
+                            isUnidentified
+                              ? 'bg-amber-100 text-amber-800'
+                              : idx === 0
+                              ? 'bg-amber-100 text-amber-800'
+                              : 'bg-slate-100 text-slate-600'
                           }`}>
-                            {idx + 1}
+                            {isUnidentified ? '?' : idx + 1}
                           </span>
-                          <span className="font-bold text-slate-900">{op.name}</span>
+                          <span className={`font-bold ${isUnidentified ? 'text-amber-900' : 'text-slate-900'}`}>{op.name}</span>
                         </div>
                       </td>
                       <td className="py-3 px-4 font-mono">

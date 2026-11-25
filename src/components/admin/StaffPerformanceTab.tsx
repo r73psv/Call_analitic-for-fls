@@ -21,6 +21,7 @@ interface StaffRecentCall {
   call_outcome: string;
   booking_status?: string;
   summary: string;
+  intro_quote?: string | null;
 }
 
 interface StaffMember {
@@ -30,7 +31,10 @@ interface StaffMember {
   role: string;
   isActive: boolean;
   isOnline: boolean;
+  isUnidentifiedBucket?: boolean;
   lastLoginAt?: string;
+  lastCallAt?: string;
+  sampleIntroQuote?: string | null;
   notes?: string;
   totalCalls: number;
   averageScore: number | null;
@@ -48,9 +52,12 @@ interface StaffMember {
 interface StaffPerformanceData {
   period: string;
   totalStaff: number;
+  identifiedStaffCount?: number;
   activeStaff: number;
   onlineStaff: number;
   totalCallsAnalyzed: number;
+  identifiedCallsCount?: number;
+  unidentifiedCallsCount?: number;
   salonAverageScore: number | null;
   salonConversionRate: number;
   staff: StaffMember[];
@@ -154,14 +161,14 @@ export function StaffPerformanceTab({ authToken, onSelectCall }: StaffPerformanc
           <div className="space-y-1">
             <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-200 border border-emerald-400/30 text-[11px] font-bold">
               <Flame className="w-3.5 h-3.5 text-amber-400" />
-              Firestore Data Sync • Речевая аналитика
+              Идентификация по имени представления • Речевая аналитика
             </div>
             <h3 className="text-base font-bold text-white tracking-tight flex items-center gap-2">
               <Users className="w-5 h-5 text-emerald-300" />
-              Персонал: Администраторы ресепшена и оценка качества работы
+              Персонал: Эффективность администраторов по имени из начала разговора
             </h3>
             <p className="text-xs text-emerald-100/90 max-w-2xl leading-relaxed">
-              Мониторинг текущих статусов администраторов стойки ресепшена, объема обработанных звонков за период, средней оценки по 10 критериям речевого стандарта и конверсии в запись.
+              Оценка работы каждого администратора по имени, которым он представляется в приветствии (независимо от общего номера АТС), включая конверсию в запись и детализацию по 10 критериям стандарта.
             </p>
           </div>
 
@@ -179,14 +186,14 @@ export function StaffPerformanceTab({ authToken, onSelectCall }: StaffPerformanc
           </div>
         </div>
 
-        {/* Firestore Source Indicator */}
+        {/* Source Indicator */}
         <div className="mt-4 pt-3 border-t border-white/10 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 text-[11px] text-emerald-200/90 font-mono">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span>Источник данных: {data?.dataSourceDescription || 'Коллекции staff, calls, evaluations'}</span>
+            <span>Классификация: {data?.dataSourceDescription || 'По имени представления в начале разговора'}</span>
           </div>
           <div className="text-[10px] text-emerald-300/80">
-            Защита ПДн по 152-ФЗ • Таймаут сессии 4 часа
+            Защита ПДн по 152-ФЗ • Без привязки к общему номеру АТС
           </div>
         </div>
       </div>
@@ -296,15 +303,15 @@ export function StaffPerformanceTab({ authToken, onSelectCall }: StaffPerformanc
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
           <div className="text-xs font-bold text-slate-500 flex items-center justify-between">
-            <span>Администраторы ресепшена</span>
+            <span>Определено администраторов</span>
             <Headphones className="w-4 h-4 text-purple-600" />
           </div>
           <div className="text-2xl font-bold text-slate-900 mt-2">
-            {data?.totalStaff || 0} <span className="text-xs font-normal text-slate-500">сотрудников</span>
+            {data?.identifiedStaffCount ?? data?.totalStaff ?? 0} <span className="text-xs font-normal text-slate-500">по имени в речи</span>
           </div>
           <div className="flex items-center gap-2 mt-1 text-[11px] text-emerald-700 font-medium">
             <span className="inline-block w-2 h-2 rounded-full bg-emerald-500" />
-            {data?.onlineStaff || 0} сейчас на смене / активны
+            {data?.onlineStaff || 0} отвечали за последние 24ч
           </div>
         </div>
 
@@ -317,7 +324,7 @@ export function StaffPerformanceTab({ authToken, onSelectCall }: StaffPerformanc
             {data?.totalCallsAnalyzed || 0} <span className="text-xs font-normal text-slate-500">звонков</span>
           </div>
           <div className="text-[11px] text-slate-500 mt-1">
-            За выбранный период: {period === 'all' ? 'всё время' : period}
+            С именем: {data?.identifiedCallsCount ?? 0} • Без имени: {data?.unidentifiedCallsCount ?? 0}
           </div>
         </div>
 
@@ -379,8 +386,8 @@ export function StaffPerformanceTab({ authToken, onSelectCall }: StaffPerformanc
           <table className="w-full text-left text-xs" id="staff-performance-table">
             <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold">
               <tr>
-                <th className="px-4 py-3">Администратор ресепшена</th>
-                <th className="px-4 py-3">Текущий статус</th>
+                <th className="px-4 py-3">Администратор (по приветствию)</th>
+                <th className="px-4 py-3">Активность / последний звонок</th>
                 <th className="px-4 py-3 text-center">Звонков за период</th>
                 <th className="px-4 py-3 text-center">Конверсия в запись</th>
                 <th className="px-4 py-3 text-center">Средняя оценка работы</th>
@@ -391,6 +398,8 @@ export function StaffPerformanceTab({ authToken, onSelectCall }: StaffPerformanc
               {data && data.staff.length > 0 ? (
                 data.staff.map((member) => {
                   const isSelected = selectedStaff?.id === member.id;
+                  const isUnidentified = Boolean(member.isUnidentifiedBucket);
+                  const lastActivityTs = member.lastCallAt || member.lastLoginAt;
                   return (
                     <tr 
                       key={member.id} 
@@ -398,51 +407,61 @@ export function StaffPerformanceTab({ authToken, onSelectCall }: StaffPerformanc
                       className={`cursor-pointer transition-colors ${
                         isSelected 
                           ? 'bg-emerald-50/80 hover:bg-emerald-50' 
+                          : isUnidentified
+                          ? 'bg-amber-50/30 hover:bg-amber-50/60'
                           : 'hover:bg-slate-50/80'
                       }`}
                     >
-                      {/* Name & Login */}
+                      {/* Name & Intro Quote */}
                       <td className="px-4 py-3.5">
                         <div className="font-bold text-slate-900 flex items-center gap-2">
-                          <div className="w-7 h-7 rounded-lg bg-purple-100 text-purple-700 flex items-center justify-center font-bold text-xs shrink-0">
-                            {member.name.charAt(0)}
+                          <div className={`w-7 h-7 rounded-lg flex items-center justify-center font-bold text-xs shrink-0 ${
+                            isUnidentified
+                              ? 'bg-amber-100 text-amber-800'
+                              : 'bg-purple-100 text-purple-700'
+                          }`}>
+                            {isUnidentified ? '?' : member.name.charAt(0)}
                           </div>
                           <div>
-                            <div className="text-slate-900">{member.name}</div>
-                            <div className="font-mono text-[11px] text-slate-400">@{member.username}</div>
+                            <div className={isUnidentified ? 'text-amber-900' : 'text-slate-900'}>
+                              {member.name}
+                            </div>
+                            <div className="text-[11px] font-normal text-slate-400">
+                              {isUnidentified ? 'Имя не прозвучало в начале звонка' : 'Определён по представлению в диалоге'}
+                            </div>
                           </div>
                         </div>
-                        {member.notes && (
-                          <div className="text-[10px] text-slate-400 mt-1 truncate max-w-xs pl-9">
-                            {member.notes}
+                        {member.sampleIntroQuote && (
+                          <div className="text-[10px] text-slate-500 mt-1 truncate max-w-xs pl-9 italic" title={member.sampleIntroQuote}>
+                            «{member.sampleIntroQuote}»
                           </div>
                         )}
                       </td>
 
-                      {/* Status */}
+                      {/* Activity */}
                       <td className="px-4 py-3.5">
                         <div className="space-y-1">
-                          {member.isOnline ? (
+                          {isUnidentified ? (
+                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200 text-[11px] font-medium">
+                              <span className="w-2 h-2 rounded-full bg-amber-400" />
+                              Без представления
+                            </span>
+                          ) : member.isOnline ? (
                             <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-[11px] font-bold">
                               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                              На смене (активен)
-                            </span>
-                          ) : member.isActive ? (
-                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200 text-[11px] font-medium">
-                              <span className="w-2 h-2 rounded-full bg-slate-400" />
-                              Не на смене
+                              Активен (24ч)
                             </span>
                           ) : (
-                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-rose-50 text-rose-800 border border-rose-200 text-[11px] font-medium">
-                              <XCircle className="w-3 h-3 text-rose-600" />
-                              Заблокирован
+                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200 text-[11px] font-medium">
+                              <span className="w-2 h-2 rounded-full bg-slate-400" />
+                              Был на смене ранее
                             </span>
                           )}
                           <div className="text-[10px] text-slate-400 flex items-center gap-1">
                             <Clock className="w-3 h-3 text-slate-400 shrink-0" />
-                            {member.lastLoginAt 
-                              ? `Вход: ${new Date(member.lastLoginAt).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' })}`
-                              : 'Ещё не входил'}
+                            {lastActivityTs
+                              ? `Звонок: ${new Date(lastActivityTs).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' })}`
+                              : 'Нет звонков'}
                           </div>
                         </div>
                       </td>
@@ -560,12 +579,12 @@ export function StaffPerformanceTab({ authToken, onSelectCall }: StaffPerformanc
                 <div>
                   <h4 className="font-bold text-base flex items-center gap-2">
                     {selectedStaff.name}
-                    <span className="font-mono text-xs font-normal text-purple-200 bg-white/10 px-2 py-0.5 rounded">
-                      @{selectedStaff.username}
+                    <span className="text-xs font-normal text-purple-200 bg-white/10 px-2 py-0.5 rounded">
+                      {selectedStaff.isUnidentifiedBucket ? 'без представления' : 'по имени в приветствии'}
                     </span>
                   </h4>
                   <p className="text-xs text-purple-200/90 mt-0.5">
-                    {selectedStaff.notes || 'Администратор стойки ресепшена'} • {selectedStaff.isOnline ? '🟢 Сейчас на смене' : '⚪ Не на смене'}
+                    {selectedStaff.notes || 'Определён по имени, которым представился в начале разговора'}
                   </p>
                 </div>
               </div>
