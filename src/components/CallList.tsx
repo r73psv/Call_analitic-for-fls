@@ -168,38 +168,78 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
     return { counts, unrated };
   }, [uniqueCalls]);
 
-  // Date preset helper synchronizing preset with startDate/endDate
+  // Форматирование даты в часовом поясе салона (Europe/Samara, YYYY-MM-DD)
+  const formatDateInSalonTz = (dateInput: Date | string): string => {
+    const d = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
+    if (isNaN(d.getTime())) return '';
+    try {
+      return new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Europe/Samara',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(d);
+    } catch {
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+  };
+
+  const formatYmdToRu = (ymd: string): string => {
+    if (!ymd || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return ymd;
+    const [y, m, d] = ymd.split('-');
+    return `${d}.${m}.${y}`;
+  };
+
+  // Date preset helper synchronizing preset with startDate/endDate (Europe/Samara)
   const handleDatePresetChange = (preset: string) => {
     setDatePreset(preset);
-    const now = new Date();
-    const formatYmd = (dateObj: Date) => {
-      const year = dateObj.getFullYear();
-      const month = String(dateObj.getMonth() + 1).padStart(2, '0');
-      const day = String(dateObj.getDate()).padStart(2, '0');
-      return `${year}-${month}-${day}`;
+    const todayYmd = formatDateInSalonTz(new Date());
+    const [yStr, mStr, dStr] = todayYmd.split('-');
+    const baseUtc = new Date(Date.UTC(Number(yStr), Number(mStr) - 1, Number(dStr)));
+    const shiftDays = (deltaDays: number): string => {
+      const dt = new Date(baseUtc.getTime() + deltaDays * 24 * 60 * 60 * 1000);
+      return dt.toISOString().slice(0, 10);
     };
 
     if (preset === 'all') {
       setStartDate('');
       setEndDate('');
     } else if (preset === 'today') {
-      const today = formatYmd(now);
-      setStartDate(today);
-      setEndDate(today);
+      setStartDate(todayYmd);
+      setEndDate(todayYmd);
     } else if (preset === 'yesterday') {
-      const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-      const yestStr = formatYmd(yesterday);
+      const yestStr = shiftDays(-1);
       setStartDate(yestStr);
       setEndDate(yestStr);
     } else if (preset === 'week') {
-      const weekAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7);
-      setStartDate(formatYmd(weekAgo));
-      setEndDate(formatYmd(now));
+      setStartDate(shiftDays(-6));
+      setEndDate(todayYmd);
+    } else if (preset === 'this_month') {
+      setStartDate(`${yStr}-${mStr}-01`);
+      setEndDate(todayYmd);
     } else if (preset === 'month') {
-      const monthAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30);
-      setStartDate(formatYmd(monthAgo));
-      setEndDate(formatYmd(now));
+      setStartDate(shiftDays(-29));
+      setEndDate(todayYmd);
     }
+  };
+
+  const handleStartDateChange = (val: string) => {
+    setStartDate(val);
+    if (val && endDate && val > endDate) {
+      setEndDate(val);
+    }
+    setDatePreset(val || endDate ? 'custom' : 'all');
+  };
+
+  const handleEndDateChange = (val: string) => {
+    setEndDate(val);
+    if (val && startDate && val < startDate) {
+      setStartDate(val);
+    }
+    setDatePreset(startDate || val ? 'custom' : 'all');
   };
 
   // Tone matching logic helper
@@ -231,20 +271,14 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
     return true;
   };
 
-  // Date range matching logic helper (Samara/Moscow timezone friendly)
+  // Date range matching logic helper (сравнение календарной даты в часовом поясе салона Europe/Samara)
   const matchesDate = (timestamp: string): boolean => {
     if (datePreset === 'all' && !startDate && !endDate) return true;
-    const d = new Date(timestamp);
-    if (isNaN(d.getTime())) return true;
+    const callYmd = formatDateInSalonTz(timestamp);
+    if (!callYmd) return true;
 
-    if (startDate) {
-      const start = new Date(`${startDate}T00:00:00`);
-      if (d < start) return false;
-    }
-    if (endDate) {
-      const end = new Date(`${endDate}T23:59:59.999`);
-      if (d > end) return false;
-    }
+    if (startDate && callYmd < startDate) return false;
+    if (endDate && callYmd > endDate) return false;
     return true;
   };
 
@@ -491,8 +525,11 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
 
     try {
       const endpoint = format === 'pdf' ? '/api/calls/export-table-pdf' : '/api/calls/export-table-csv';
+      const periodDesc = startDate || endDate
+        ? `, период ${startDate ? formatYmdToRu(startDate) : '...'} — ${endDate ? formatYmdToRu(endDate) : '...'}`
+        : '';
       const filterDesc = scope === 'filtered' && activeFiltersCount > 0
-        ? `Выборка (${targetCalls.length} звонков из ${uniqueCalls.length})`
+        ? `Выборка (${targetCalls.length} звонков из ${uniqueCalls.length}${periodDesc})`
         : `Полный реестр (${targetCalls.length} звонков)`;
 
       const callIds = targetCalls.map(c => c.call_id);
@@ -904,6 +941,101 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
             </button>
           )}
         </div>
+
+        {/* Dedicated Always-Visible Date Range Filter Block (Фильтр по диапазону дат) */}
+        <div
+          id="call-list-date-range-bar"
+          className={`p-2.5 rounded-xl border transition-all space-y-2 ${
+            datePreset !== 'all' || startDate || endDate
+              ? 'bg-indigo-50/40 border-indigo-200 shadow-3xs'
+              : 'bg-white border-slate-200/80 shadow-3xs'
+          }`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[11px] font-bold text-slate-700 flex items-center gap-1 mr-0.5">
+                <Calendar className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Период:</span>
+              </span>
+              {[
+                { id: 'all', label: 'Все' },
+                { id: 'today', label: 'Сегодня' },
+                { id: 'yesterday', label: 'Вчера' },
+                { id: 'week', label: '7 дней' },
+                { id: 'this_month', label: 'Этот месяц' },
+                { id: 'month', label: '30 дней' },
+              ].map((preset) => {
+                const isSelected = datePreset === preset.id;
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    id={`date-preset-${preset.id}`}
+                    onClick={() => handleDatePresetChange(preset.id)}
+                    className={`text-[11px] px-2 py-0.5 rounded-lg font-medium transition-all cursor-pointer border ${
+                      isSelected
+                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-3xs font-semibold'
+                        : 'bg-slate-50 text-slate-600 hover:bg-slate-100 border-slate-200'
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            {(datePreset !== 'all' || startDate || endDate) && (
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-semibold text-indigo-700 bg-indigo-100/70 px-2 py-0.5 rounded-md">
+                  {startDate && endDate && startDate === endDate
+                    ? formatYmdToRu(startDate)
+                    : `${startDate ? formatYmdToRu(startDate) : '…'} — ${endDate ? formatYmdToRu(endDate) : '…'}`}
+                </span>
+                <button
+                  type="button"
+                  id="btn-reset-date-range"
+                  onClick={() => handleDatePresetChange('all')}
+                  className="text-[11px] text-rose-600 hover:text-rose-800 font-semibold inline-flex items-center gap-0.5 cursor-pointer transition-colors"
+                  title="Сбросить фильтр по датам"
+                >
+                  <X className="w-3 h-3" />
+                  <span>Сбросить</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 pt-1.5 border-t border-slate-100">
+            <div className="flex items-center gap-1.5">
+              <label htmlFor="filter-start-date" className="text-[10px] font-semibold text-slate-500 uppercase shrink-0">
+                С
+              </label>
+              <input
+                id="filter-start-date"
+                type="date"
+                value={startDate}
+                max={endDate || undefined}
+                onChange={(e) => handleStartDateChange(e.target.value)}
+                className="w-full text-xs px-2 py-1 bg-white border border-slate-200 rounded-lg text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                title="Дата начала периода (включительно)"
+              />
+            </div>
+            <div className="flex items-center gap-1.5">
+              <label htmlFor="filter-end-date" className="text-[10px] font-semibold text-slate-500 uppercase shrink-0">
+                По
+              </label>
+              <input
+                id="filter-end-date"
+                type="date"
+                value={endDate}
+                min={startDate || undefined}
+                onChange={(e) => handleEndDateChange(e.target.value)}
+                className="w-full text-xs px-2 py-1 bg-white border border-slate-200 rounded-lg text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                title="Дата окончания периода (включительно)"
+              />
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* 2. Quick Presets Bar (Чипы быстрой фильтрации) */}
@@ -1054,93 +1186,9 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
             </div>
           </div>
 
-          {/* 3 Core Filter Cards: Date Range, 1-5 Star Rating, and Keywords */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
-            {/* 1. ДИАПАЗОН ДАТ */}
-            <div className={`p-2.5 rounded-xl border transition-all flex flex-col justify-between ${
-              datePreset !== 'all' || startDate || endDate ? 'bg-indigo-50/30 border-indigo-200 shadow-3xs' : 'bg-white border-slate-200/80 shadow-3xs'
-            }`} id="filter-date-card">
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-[10px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1">
-                    <Calendar className="w-3 h-3 text-indigo-600" />
-                    <span>Диапазон дат</span>
-                  </span>
-                  {(datePreset !== 'all' || startDate || endDate) && (
-                    <button
-                      type="button"
-                      onClick={() => handleDatePresetChange('all')}
-                      className="text-[10px] text-indigo-600 hover:text-indigo-800 font-bold cursor-pointer"
-                      title="Сбросить диапазон дат"
-                    >
-                      × Сброс
-                    </button>
-                  )}
-                </div>
-
-                {/* Quick Date Presets */}
-                <div className="flex flex-wrap items-center gap-1 mb-2">
-                  {[
-                    { id: 'all', label: 'Все' },
-                    { id: 'today', label: 'Сегодня' },
-                    { id: 'yesterday', label: 'Вчера' },
-                    { id: 'week', label: '7 дней' },
-                    { id: 'month', label: '30 дней' },
-                  ].map((preset) => {
-                    const isSelected = datePreset === preset.id && !startDate && !endDate;
-                    return (
-                      <button
-                        key={preset.id}
-                        type="button"
-                        onClick={() => handleDatePresetChange(preset.id)}
-                        className={`text-[10px] px-2 py-0.5 rounded-md font-medium transition-all cursor-pointer border ${
-                          isSelected
-                            ? 'bg-indigo-600 text-white border-indigo-600 shadow-3xs font-semibold'
-                            : 'bg-slate-50 text-slate-600 hover:bg-slate-100 border-slate-200'
-                        }`}
-                      >
-                        {preset.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Date pickers (from - to) */}
-              <div className="pt-1 border-t border-slate-100 flex items-center gap-1.5">
-                <div className="flex-1">
-                  <label htmlFor="filter-start-date" className="block text-[9px] text-slate-400 font-semibold mb-0.5 uppercase">С даты</label>
-                  <input
-                    id="filter-start-date"
-                    type="date"
-                    value={startDate}
-                    onChange={(e) => {
-                      setStartDate(e.target.value);
-                      setDatePreset('custom');
-                    }}
-                    className="w-full text-[11px] p-1 bg-white border border-slate-200 rounded-md text-slate-700 focus:outline-hidden focus:border-indigo-500"
-                    title="Дата начала периода"
-                  />
-                </div>
-                <span className="text-slate-400 text-xs mt-3">—</span>
-                <div className="flex-1">
-                  <label htmlFor="filter-end-date" className="block text-[9px] text-slate-400 font-semibold mb-0.5 uppercase">По дату</label>
-                  <input
-                    id="filter-end-date"
-                    type="date"
-                    value={endDate}
-                    onChange={(e) => {
-                      setEndDate(e.target.value);
-                      setDatePreset('custom');
-                    }}
-                    className="w-full text-[11px] p-1 bg-white border border-slate-200 rounded-md text-slate-700 focus:outline-hidden focus:border-indigo-500"
-                    title="Дата конца периода"
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* 2. ОЦЕНКА (1-5 ЗВЕЗД) */}
+          {/* 2 Core Filter Cards: 1-5 Star Rating and Keywords (Date Range is always visible in header bar above) */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+            {/* 1. ОЦЕНКА (1-5 ЗВЕЗД) */}
             <div className={`p-2.5 rounded-xl border transition-all flex flex-col justify-between ${
               starFilter !== 'all' ? 'bg-amber-50/30 border-amber-200 shadow-3xs' : 'bg-white border-slate-200/80 shadow-3xs'
             }`} id="filter-stars-card">
