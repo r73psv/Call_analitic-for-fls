@@ -12,6 +12,7 @@ import { getInitialUsers } from './user-store.js';
 import { readConsentStoreSync, setConsentStoreDirect } from './consent-store.js';
 import { deduplicateCalls } from '../services/callUtils.js';
 import { hydrateStoreFromServerEnv, getEnvValue } from '../services/serverEnv.js';
+import { DEFAULT_VK_CALL_TEMPLATE } from '../services/vkMessageFormatter.js';
 
 const DATA_PATH_ENC = process.env.DATA_PATH_ENC || path.join(process.cwd(), 'data', 'data-store.enc');
 const DATA_PATH_JSON = process.env.DATA_PATH || path.join(process.cwd(), 'data', 'data-store.json');
@@ -79,7 +80,7 @@ export function getDefaultConfig(): SystemConfig {
       enabled: Boolean(vkToken && vkChatId),
       dailyReportEnabled: process.env.VK_DAILY_REPORT_ENABLED !== 'false',
       dailyReportTime: (process.env.VK_DAILY_REPORT_TIME || '21:05').trim(),
-      template: `🔔 *Анализ звонка #{call_id}*\n📅 *Дата:* {call_date_time}\n⏱️ *Длительность:* {duration}\n👤 *Клиент:* {client_name}\n📞 *Оценка оператора:* {operator_score}\n💬 *Резюме:* {summary}\n⚠️ *Конфликт:* {is_dispute_text}\n💡 *Рекомендации:* {recommendations}`,
+      template: DEFAULT_VK_CALL_TEMPLATE,
     },
     yclients: {
       login: yclientsLogin,

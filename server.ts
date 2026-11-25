@@ -44,6 +44,7 @@ import {
   sendVkTextMessage,
   DailyVkReportMetrics,
 } from './src/services/vkDailyReport.js';
+import { formatVkCallMessage } from './src/services/vkMessageFormatter.js';
 import { isYandexAuthConfigured } from './src/services/yandex-auth.js';
 import { isGigaChatConfigured, getGigaChatConfigStatus } from './src/services/gigachat-auth.js';
 import { hydrateFromS3, scheduleSyncToS3, flushSyncToS3, manualSync, getSyncStatus, getS3SyncPendingState } from './src/services/s3-sync.js';
@@ -1406,68 +1407,14 @@ async function sendToVk(call: CallRecord, config: VkConfig, force: boolean = fal
     return { success: true, skipped: true };
   }
 
-  // Format message template
-  const isDisputeText = call.key_facts.is_dispute ? '⚠️ ДА (Конфликтный звонок)' : '✅ Нет';
-  const disputeReason = call.key_facts.dispute_reason || 'нет';
-  const promisesText = call.key_facts.promises.length > 0 ? call.key_facts.promises.join(', ') : 'нет обещаний';
-  const recommendationsText = call.recommendations.join('\n- ');
-
-  const callDateTimeUtc4 = formatUtc4DateTime(call.timestamp);
-  const callDateUtc4 = formatUtc4Date(call.timestamp);
-  const callTimeUtc4 = formatUtc4Time(call.timestamp);
-  const durationText = formatCallDuration(call.duration_seconds);
-  const durationMmSs = formatDurationMmSs(call.duration_seconds);
-  const durationSecText = (call.duration_seconds !== undefined && call.duration_seconds !== null) ? `${call.duration_seconds} сек.` : 'н/д';
-
-  let templateToUse = config.template || '';
-  if (!templateToUse.includes('{call_date_time}') && !templateToUse.includes('{call_date}') && !templateToUse.includes('{call_time}') && !templateToUse.includes('{date}') && !templateToUse.includes('{time}') && !templateToUse.includes('{timestamp}')) {
-    if (templateToUse.includes('\n')) {
-      const firstLineEnd = templateToUse.indexOf('\n');
-      templateToUse = templateToUse.slice(0, firstLineEnd) + `\n📅 *Дата и время (UTC+4):* {call_date_time}` + templateToUse.slice(firstLineEnd);
-    } else {
-      templateToUse = `📅 *Дата и время (UTC+4):* {call_date_time}\n` + templateToUse;
-    }
-  }
-
-  // Inject duration if not already present in the user template
-  if (!templateToUse.includes('{duration}') && !templateToUse.includes('{call_duration}') && !templateToUse.includes('{duration_seconds}') && !templateToUse.includes('{duration_formatted}')) {
-    if (templateToUse.includes('{call_date_time}')) {
-      templateToUse = templateToUse.replace('{call_date_time}', '{call_date_time}\n⏱️ *Длительность:* {duration}');
-    } else if (templateToUse.includes('{call_date}')) {
-      templateToUse = templateToUse.replace('{call_date}', '{call_date}\n⏱️ *Длительность:* {duration}');
-    } else if (templateToUse.includes('\n')) {
-      const firstLineEnd = templateToUse.indexOf('\n');
-      templateToUse = templateToUse.slice(0, firstLineEnd) + `\n⏱️ *Длительность:* {duration}` + templateToUse.slice(firstLineEnd);
-    } else {
-      templateToUse = templateToUse + `\n⏱️ *Длительность:* {duration}`;
-    }
-  }
-
-  const scoreText = (call.operator_score !== null && call.operator_score !== undefined)
-    ? `${call.operator_score}/10`
-    : 'не оценивалось';
-
-  let message = templateToUse
-    .replace(/{call_id}/g, call.call_id)
-    .replace(/{call_date_time}/g, callDateTimeUtc4)
-    .replace(/{call_date}/g, callDateUtc4)
-    .replace(/{call_time}/g, callTimeUtc4)
-    .replace(/{date}/g, callDateUtc4)
-    .replace(/{time}/g, callTimeUtc4)
-    .replace(/{timestamp}/g, callDateTimeUtc4)
-    .replace(/{duration}/g, durationText)
-    .replace(/{call_duration}/g, durationText)
-    .replace(/{duration_formatted}/g, durationText)
-    .replace(/{duration_seconds}/g, durationSecText)
-    .replace(/{duration_mmss}/g, durationMmSs)
-    .replace(/{client_name}/g, call.client_name || 'Неизвестный клиент')
-    .replace(/{operator_score}\/10/g, scoreText)
-    .replace(/{operator_score}/g, scoreText)
-    .replace(/{summary}/g, call.summary)
-    .replace(/{is_dispute_text}/g, isDisputeText)
-    .replace(/{dispute_reason}/g, disputeReason)
-    .replace(/{promises}/g, promisesText)
-    .replace(/{recommendations}/g, recommendationsText);
+  // Format message template (always guarantees mandatory «Краткий пересказ диалога» block)
+  const message = formatVkCallMessage(call, config, {
+    formatUtc4DateTime,
+    formatUtc4Date,
+    formatUtc4Time,
+    formatCallDuration,
+    formatDurationMmSs,
+  });
 
   try {
     appendLog('info', 'vk', `Отправка результатов звонка ${call.call_id} в чат VK ${config.chatId}...`);

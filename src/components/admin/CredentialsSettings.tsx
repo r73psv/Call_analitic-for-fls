@@ -2895,11 +2895,14 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
           <div>
             <label className="block text-xs font-bold text-slate-700 mb-1">Шаблон сообщения</label>
             <textarea
-              rows={2}
+              rows={3}
               value={vkTemplate}
               onChange={(e) => setVkTemplate(e.target.value)}
               className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-xl text-[11px] font-mono"
             />
+            <p className="mt-1 text-[10px] text-slate-500">
+              Переменная <code className="bg-slate-100 px-1 rounded text-sky-700 font-semibold">{'{short_summary}'}</code> — краткий пересказ диалога (включается в каждое сообщение VK обязательно, даже если не указана в шаблоне).
+            </p>
           </div>
 
           <div className="flex items-center gap-2 pt-1">
