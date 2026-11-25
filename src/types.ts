@@ -382,6 +382,14 @@ export interface VkConfig {
   lastDailyReportError?: string; // текст последней ошибки автоотправки
 }
 
+export interface YclientsSyncedMaster {
+  id: number;
+  name: string;
+  specialization?: string;
+  position?: string;
+  bookable?: boolean;
+}
+
 export interface YclientsConfig {
   login?: string;
   password?: string;
@@ -390,6 +398,11 @@ export interface YclientsConfig {
   salonId: string;
   enabled: boolean;
   readOnly?: boolean;
+  mastersSyncTime?: string; // HH:MM в часовом поясе салона (по умолчанию '08:00')
+  syncedMasters?: YclientsSyncedMaster[]; // Кэш мастеров, синхронизированных из YClients
+  lastMastersSyncDate?: string; // YYYY-MM-DD в часовом поясе салона
+  lastMastersSyncAt?: string; // ISO timestamp последнего успешного обновления
+  lastMastersSyncError?: string; // текст последней ошибки автообновления
 }
 
 export interface AutoCleanupSettings {

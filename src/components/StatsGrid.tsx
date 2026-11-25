@@ -20,6 +20,7 @@ import {
 } from 'recharts';
 import * as d3 from 'd3';
 import { DashboardStats, CallRecord, SentimentTrendItem } from '../types.js';
+import { DEFAULT_SALON_NAME } from '../services/salonBranding.js';
 
 export interface PeriodStatsReportData {
   periodTitle: string;
@@ -99,7 +100,7 @@ interface CellData {
 }
 
 export function StatsGrid({ stats, calls = [], authToken, userRole, salonName }: StatsGridProps) {
-  const effectiveSalonName = salonName?.trim() || 'Fashion Look Studio';
+  const effectiveSalonName = salonName?.trim() || DEFAULT_SALON_NAME;
   // Period Selection and Comparative Analysis
   const { minDateStr, maxDateStr } = useMemo(() => {
     if (!calls || calls.length === 0) return { minDateStr: '2026-07-01', maxDateStr: '2026-10-01' };

@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { CallRecord } from '../types.js';
 import { anonymizeTranscript, maskPhone } from './anonymize.js';
+import { resolveSalonName } from './salonBranding.js';
 
 function getFontPaths(): { regular: string; bold: string } {
   const localRegular = path.join(process.cwd(), 'fonts', 'LiberationSans-Regular.ttf');
@@ -46,7 +47,7 @@ function formatDuration(sec?: number): string {
 }
 
 export function generateCallAuditPdf(call: CallRecord, userRole: string = 'manager', customSalonName?: string): InstanceType<typeof PDFDocument> {
-  const salonName = customSalonName || process.env.SALON_NAME || 'Fashion Look Studio';
+  const salonName = resolveSalonName({ configSalonName: customSalonName, envSalonName: process.env.SALON_NAME });
   const doc = new PDFDocument({
     size: 'A4',
     margin: 36,
@@ -389,7 +390,7 @@ export function generateCallAuditPdf(call: CallRecord, userRole: string = 'manag
   const signY = doc.y;
   doc.rect(margin, signY, contentWidth, 44).fillAndStroke('#f8fafc', '#e2e8f0');
 
-  doc.font('AppFontBold').fontSize(8).fillColor('#475569').text('УТВЕРЖДЕНИЕ ОТЧЕТА УПРАВЛЯЮЩИМ САЛОНА «ЛИК 28»', margin + 12, signY + 8);
+  doc.font('AppFontBold').fontSize(8).fillColor('#475569').text(`УТВЕРЖДЕНИЕ ОТЧЕТА УПРАВЛЯЮЩИМ САЛОНА «${salonName.toUpperCase()}»`, margin + 12, signY + 8);
   doc.font('AppFont').fontSize(8).fillColor('#334155').text(
     'Управляющий: ________________________ / ________________________            Дата: «____» ________________ 202___ г.',
     margin + 12,
@@ -484,7 +485,7 @@ export interface PeriodStatsReportData {
  * Генерация комплексного PDF-отчета за период со сравнительным анализом
  */
 export function generatePeriodStatsPdf(data: PeriodStatsReportData, customSalonName?: string): InstanceType<typeof PDFDocument> {
-  const salonName = customSalonName || process.env.SALON_NAME || 'Fashion Look Studio';
+  const salonName = resolveSalonName({ configSalonName: customSalonName, envSalonName: process.env.SALON_NAME });
   const doc = new PDFDocument({
     size: 'A4',
     margin: 36,
@@ -895,7 +896,7 @@ export function generateCallsTablePdf(
   customSalonName?: string,
   filterTitle?: string
 ): InstanceType<typeof PDFDocument> {
-  const salonName = (customSalonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
+  const salonName = resolveSalonName({ configSalonName: customSalonName, envSalonName: process.env.SALON_NAME });
 
   // Создаем документ в альбомной ориентации (841.89 x 595.28)
   const doc = new PDFDocument({

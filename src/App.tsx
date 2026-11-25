@@ -34,6 +34,7 @@ import { UsersManagement } from './components/admin/UsersManagement.js';
 
 import { CallRecord, DashboardStats, SystemConfig, LogEntry, GigaChatModel, SttProvider, UserRole } from './types.js';
 import { deduplicateCalls } from './services/callUtils.js';
+import { DEFAULT_SALON_NAME, SalonThemeId, detectSalonTheme } from './services/salonBranding.js';
 
 interface CurrentUserInfo {
   id: string;
@@ -207,6 +208,36 @@ export default function App() {
   });
 
   const userRole: UserRole = currentUser?.role || 'operator';
+
+  // Public branding fetched from server env (SALON_NAME) even before login
+  const [publicBranding, setPublicBranding] = useState<{
+    salonName: string;
+    envSalonName?: string;
+    theme: SalonThemeId;
+  } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    fetch('/api/public/branding')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!active || !data) return;
+        const resolvedName = typeof data.salonName === 'string' && data.salonName.trim()
+          ? data.salonName.trim()
+          : DEFAULT_SALON_NAME;
+        setPublicBranding({
+          salonName: resolvedName,
+          envSalonName: typeof data.envSalonName === 'string' ? data.envSalonName : '',
+          theme: data.theme === 'liq28' ? 'liq28' : detectSalonTheme(resolvedName),
+        });
+      })
+      .catch(() => {
+        // Non-fatal fallback
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   // Admin gate protection
   const [isAdminUnlocked, setIsAdminUnlocked] = useState(false);
@@ -603,17 +634,35 @@ export default function App() {
     }
   };
 
-  const currentSalonName = config?.salonName?.trim() || 'Fashion Look Studio';
+  const currentSalonName =
+    config?.salonName?.trim() ||
+    publicBranding?.salonName?.trim() ||
+    DEFAULT_SALON_NAME;
+  const salonTheme: SalonThemeId = detectSalonTheme(currentSalonName);
+  const isLiq28Theme = salonTheme === 'liq28';
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-salon-theme', salonTheme);
+    document.title = `Аудит звонков — ${currentSalonName}`;
+  }, [salonTheme, currentSalonName]);
 
   // Strict Authentication Gate on Launch & 4-Hour Inactivity Timeout (152-ФЗ)
   if (!currentUser || !authToken) {
     return (
-      <div className="min-h-screen bg-slate-900 flex flex-col justify-center items-center p-4" id="applet-auth-gate">
+      <div
+        className={
+          isLiq28Theme
+            ? 'min-h-screen flex flex-col justify-center items-center p-4 bg-[#FAF7F2]'
+            : 'min-h-screen bg-slate-900 flex flex-col justify-center items-center p-4'
+        }
+        id="applet-auth-gate"
+      >
         <LoginModal
           isOpen={true}
           onLoginSuccess={handleLoginSuccess}
           onOpenChangePassword={() => setIsChangePasswordModalOpen(true)}
           salonName={currentSalonName}
+          theme={salonTheme}
           sessionExpiredNotice={sessionExpiredNotice}
         />
         {isChangePasswordModalOpen && (
@@ -629,34 +678,78 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50/70 flex flex-col text-slate-800" id="applet-viewport">
+    <div
+      className={
+        isLiq28Theme
+          ? 'min-h-screen bg-[#FAF7F2] flex flex-col text-[#1F1B18]'
+          : 'min-h-screen bg-slate-50/70 flex flex-col text-slate-800'
+      }
+      id="applet-viewport"
+    >
       {/* App Header */}
-      <header className="bg-white border-b border-slate-200/80 px-6 py-3.5 sticky top-0 z-40 shadow-xs" id="applet-main-header">
+      <header
+        className={
+          isLiq28Theme
+            ? 'bg-white/95 border-b border-[#E6DDD1] px-6 py-3.5 sticky top-0 z-40'
+            : 'bg-white border-b border-slate-200/80 px-6 py-3.5 sticky top-0 z-40 shadow-xs'
+        }
+        id="applet-main-header"
+      >
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
           <div className="flex items-center gap-3">
-            <div className="bg-emerald-600 text-white p-2.5 rounded-xl shadow-xs">
-              <PhoneCall className="w-5 h-5" />
-            </div>
+            {isLiq28Theme ? (
+              <div className="bg-[#231F1C] text-[#FAF7F2] px-3 py-2 rounded-xl border border-[#9A7B56]/40 shadow-xs flex items-center justify-center">
+                <span className="liq28-display text-base font-semibold tracking-[0.14em] leading-none">
+                  LIQ.28
+                </span>
+              </div>
+            ) : (
+              <div className="bg-emerald-600 text-white p-2.5 rounded-xl shadow-xs">
+                <PhoneCall className="w-5 h-5" />
+              </div>
+            )}
             <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold text-slate-900 tracking-tight">
-                  Remix CallQA AI_RU
+              <div className="flex items-center gap-2 flex-wrap">
+                <h1
+                  className={
+                    isLiq28Theme
+                      ? 'text-base font-semibold text-[#1F1B18] tracking-tight'
+                      : 'text-base font-bold text-slate-900 tracking-tight'
+                  }
+                >
+                  {isLiq28Theme ? 'Аудит телефонных звонков' : 'Remix CallQA AI_RU'}
                 </h1>
-                <span className="bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                  <ShieldCheck className="w-3 h-3 text-emerald-600" /> 152-ФЗ
+                <span
+                  className={
+                    isLiq28Theme
+                      ? 'text-[#7D6140] text-[10px] font-semibold tracking-wide flex items-center gap-1 border-l border-[#E6DDD1] pl-2'
+                      : 'bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1'
+                  }
+                >
+                  <ShieldCheck className={`w-3 h-3 ${isLiq28Theme ? 'text-[#9A7B56]' : 'text-emerald-600'}`} /> 152-ФЗ
                 </span>
                 <button
                   type="button"
                   onClick={() => setIsEditSalonModalOpen(true)}
-                  className="group bg-slate-100 hover:bg-emerald-50 text-slate-700 hover:text-emerald-800 border border-slate-200/80 hover:border-emerald-300 text-[10px] font-mono font-medium px-2 py-0.5 rounded-md transition-all flex items-center gap-1 cursor-pointer shadow-3xs"
-                  title="Нажмите, чтобы ввести или изменить название салона красоты вручную"
+                  className={
+                    isLiq28Theme
+                      ? 'group bg-[#FAF7F2] hover:bg-[#F3ECE2] text-[#2C2621] border border-[#E6DDD1] hover:border-[#9A7B56] text-[11px] font-medium px-2.5 py-0.5 rounded-md transition-all flex items-center gap-1.5 cursor-pointer'
+                      : 'group bg-slate-100 hover:bg-emerald-50 text-slate-700 hover:text-emerald-800 border border-slate-200/80 hover:border-emerald-300 text-[10px] font-mono font-medium px-2 py-0.5 rounded-md transition-all flex items-center gap-1 cursor-pointer shadow-3xs'
+                  }
+                  title="Нажмите, чтобы ввести или изменить название салона красоты"
                   id="header-edit-salon-name-btn"
                 >
                   <span>салон «{currentSalonName}»</span>
-                  <Pencil className="w-2.5 h-2.5 text-slate-400 group-hover:text-emerald-600 transition-colors" />
+                  <Pencil
+                    className={`w-2.5 h-2.5 transition-colors ${
+                      isLiq28Theme
+                        ? 'text-[#9A8B7A] group-hover:text-[#7D6140]'
+                        : 'text-slate-400 group-hover:text-emerald-600'
+                    }`}
+                  />
                 </button>
               </div>
-              <p className="text-[11px] text-slate-500">
+              <p className={`text-[11px] ${isLiq28Theme ? 'text-[#6B6157]' : 'text-slate-500'}`}>
                 {getSttEngineDisplayName(config?.transcriptionModel)} + GigaChat (Сбер) + Шифрование AES-256-GCM + RBAC доступ
               </p>
             </div>

@@ -6,6 +6,9 @@
 import crypto from 'crypto';
 import { readStoreSync } from '../store/store.js';
 import { getEnvValue } from './serverEnv.js';
+import { getLocalDateParts, resolveReportTimeZone } from './vkDailyReport.js';
+
+export const DEFAULT_YCLIENTS_MASTERS_SYNC_TIME = '08:00';
 
 /**
  * Интеграция YClients работает СТРОГО в режиме «только чтение» (read-only)
@@ -105,6 +108,153 @@ export function isValidYclientsSalonId(salonId: string): boolean {
 export function clearYclientsCache(): void {
   cachedAuthToken = null;
   cachedMasters = null;
+}
+
+/**
+ * Нормализует время ежедневной синхронизации мастеров YClients (формат HH:MM, по умолчанию 08:00).
+ */
+export function normalizeYclientsSyncTime(raw?: string | null): string {
+  const cleaned = (raw || '').trim();
+  const match = cleaned.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return DEFAULT_YCLIENTS_MASTERS_SYNC_TIME;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+    return DEFAULT_YCLIENTS_MASTERS_SYNC_TIME;
+  }
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+/**
+ * Проверяет, пора ли выполнить ежедневное обновление списка мастеров из YClients (в 08:00 по времени салона).
+ * Выполняется строго один раз в день после наступления заданного времени (устойчиво к рестартам).
+ */
+export function isYclientsDailySyncDue(
+  now: Date = new Date(),
+  options: {
+    syncTime?: string;
+    timeZone?: string;
+    lastSyncDate?: string;
+  } = {}
+): {
+  due: boolean;
+  reason: 'due' | 'already_synced_today' | 'before_scheduled_time';
+  todayStr: string;
+  timeZone: string;
+  syncTime: string;
+  currentMinutes: number;
+  targetMinutes: number;
+} {
+  const timeZone = options.timeZone || resolveReportTimeZone();
+  const syncTime = normalizeYclientsSyncTime(options.syncTime || getEnvValue('YCLIENTS_MASTERS_SYNC_TIME'));
+  const [targetH, targetM] = syncTime.split(':').map(Number);
+  const targetMinutes = targetH * 60 + targetM;
+
+  const localParts = getLocalDateParts(now, timeZone);
+  const currentMinutes = localParts.hour * 60 + localParts.minute;
+
+  if (options.lastSyncDate && options.lastSyncDate.trim() === localParts.dateStr) {
+    return {
+      due: false,
+      reason: 'already_synced_today',
+      todayStr: localParts.dateStr,
+      timeZone,
+      syncTime,
+      currentMinutes,
+      targetMinutes,
+    };
+  }
+
+  if (currentMinutes < targetMinutes) {
+    return {
+      due: false,
+      reason: 'before_scheduled_time',
+      todayStr: localParts.dateStr,
+      timeZone,
+      syncTime,
+      currentMinutes,
+      targetMinutes,
+    };
+  }
+
+  return {
+    due: true,
+    reason: 'due',
+    todayStr: localParts.dateStr,
+    timeZone,
+    syncTime,
+    currentMinutes,
+    targetMinutes,
+  };
+}
+
+/**
+ * Синхронно возвращает последний загруженный список мастеров YClients:
+ * приоритет: свежий in-memory кэш -> сохранённый в БД результат ежедневной синхронизации (08:00).
+ */
+export function getPersistedYclientsMasters(): YclientsMaster[] {
+  if (cachedMasters && Array.isArray(cachedMasters.masters) && cachedMasters.masters.length > 0) {
+    return cachedMasters.masters;
+  }
+  try {
+    const store = readStoreSync();
+    const synced = store?.config?.yclients?.syncedMasters;
+    if (Array.isArray(synced) && synced.length > 0) {
+      return synced.filter((m) => m && typeof m.name === 'string' && m.name.trim().length >= 2);
+    }
+  } catch {
+    // Store may be unavailable during early bootstrap or isolated unit tests
+  }
+  return [];
+}
+
+/**
+ * Синхронно возвращает уникальные имена мастеров из YClients (для немедленной подстановки в системный промпт).
+ */
+export function getPersistedYclientsMasterNames(): string[] {
+  const masters = getPersistedYclientsMasters();
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const m of masters) {
+    const clean = (m?.name || '').trim();
+    if (clean.length < 2) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    names.push(clean);
+  }
+  return names;
+}
+
+/**
+ * Возвращает метаданные статуса ежедневного обновления списка мастеров YClients.
+ */
+export function getYclientsMastersSyncStatus(): {
+  syncTime: string;
+  timeZone: string;
+  count: number;
+  lastMastersSyncDate: string;
+  lastMastersSyncAt: string;
+  lastMastersSyncError: string;
+  source: 'yclients' | 'fallback';
+} {
+  let ycCfg: Record<string, any> = {};
+  try {
+    const store = readStoreSync();
+    ycCfg = (store?.config?.yclients || {}) as Record<string, any>;
+  } catch {
+    // ignore
+  }
+  const names = getPersistedYclientsMasterNames();
+  return {
+    syncTime: normalizeYclientsSyncTime(ycCfg.mastersSyncTime || getEnvValue('YCLIENTS_MASTERS_SYNC_TIME')),
+    timeZone: resolveReportTimeZone(),
+    count: names.length,
+    lastMastersSyncDate: typeof ycCfg.lastMastersSyncDate === 'string' ? ycCfg.lastMastersSyncDate : '',
+    lastMastersSyncAt: typeof ycCfg.lastMastersSyncAt === 'string' ? ycCfg.lastMastersSyncAt : '',
+    lastMastersSyncError: typeof ycCfg.lastMastersSyncError === 'string' ? ycCfg.lastMastersSyncError : '',
+    source: names.length > 0 ? 'yclients' : 'fallback',
+  };
 }
 
 /**

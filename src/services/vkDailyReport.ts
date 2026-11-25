@@ -4,6 +4,7 @@
  */
 
 import { CallRecord } from '../types.js';
+import { resolveSalonName } from './salonBranding.js';
 
 export const DEFAULT_SALON_TIMEZONE = 'Europe/Samara';
 export const DEFAULT_DAILY_REPORT_TIME = '21:05';
@@ -478,7 +479,7 @@ export function aggregateDailyCallsReport(
   options: { timeZone?: string; salonName?: string; includeDemo?: boolean } = {}
 ): DailyVkReportMetrics {
   const timeZone = resolveReportTimeZone(options.timeZone);
-  const salonName = (options.salonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
+  const salonName = resolveSalonName({ configSalonName: options.salonName, envSalonName: process.env.SALON_NAME });
   const includeDemo = options.includeDemo === true;
 
   const dayCalls = (calls || []).filter((c) => {

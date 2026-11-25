@@ -21,11 +21,12 @@ import { isTbankVoiceKitConfigured } from './src/services/tbank-voicekit.js';
 import { getGigaAmConfig, isGigaAmConfigured, formatGigaAsrIncidentSummary, getAsrQueueStatus } from './src/services/gigaam-asr.js';
 import { savePendingTranscriptionAudio, loadPendingTranscriptionAudio, deletePendingTranscriptionAudio } from './src/services/s3-archive.js';
 import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation, harmonizeMistakesAndEvaluation, filterOutdatedReminderMistakes, reconcileMistakesWithCriteria, generateLocalFallbackAnalysis, clearCrmMastersCache } from './src/services/gigachat.js';
-import { clearYclientsCache } from './src/services/yclients.js';
+import { clearYclientsCache, fetchYclientsMasters, isYclientsDailySyncDue, normalizeYclientsSyncTime, getYclientsMastersSyncStatus, getEffectiveYclientsConfig } from './src/services/yclients.js';
+import { detectSalonTheme, resolveSalonName, LOGIN_FORM_TITLE } from './src/services/salonBranding.js';
 import { classifyCallContext } from './src/services/summaryUtils.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
 import { readStoreSync, writeStore, writeStoreSyncAtomic, flushStoreWrite, getDefaultConfig } from './src/store/store.js';
-import { loadServerEnvironment, persistServerEnvVars, hydrateStoreFromServerEnv } from './src/services/serverEnv.js';
+import { loadServerEnvironment, persistServerEnvVars, hydrateStoreFromServerEnv, getEnvValue } from './src/services/serverEnv.js';
 import { readConsentStoreSync, writeConsentStore } from './src/store/consent-store.js';
 import { ensureAutoConsent, getConsentForPhone, registerConsent, syncConsentsFromCalls } from './src/store/consents.js';
 import { initCleanupScheduler, runCleanupNow } from './src/store/cleanup.js';
@@ -124,14 +125,23 @@ function getFullDataForSync() {
 const DEFAULT_CONFIG: SystemConfig = getDefaultConfig();
 
 export function getEffectiveSalonName(cfg?: SystemConfig): string {
+  const envSalonName = getEnvValue('SALON_NAME');
   if (cfg) {
-    return (cfg.salonName || cfg.credentials?.salonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
+    return resolveSalonName({
+      envSalonName,
+      configSalonName: cfg.salonName,
+      credentialsSalonName: cfg.credentials?.salonName,
+    });
   }
   try {
     const db = readDb();
-    return (db.config?.salonName || db.config?.credentials?.salonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
+    return resolveSalonName({
+      envSalonName,
+      configSalonName: db.config?.salonName,
+      credentialsSalonName: db.config?.credentials?.salonName,
+    });
   } catch {
-    return (process.env.SALON_NAME || 'Fashion Look Studio').trim();
+    return resolveSalonName({ envSalonName });
   }
 }
 
@@ -2823,6 +2833,19 @@ setInterval(async () => {
 // Health check endpoint for Docker / Container orchestrators
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString(), asrQueue: getAsrQueueStatus() });
+});
+
+// Public non-sensitive branding endpoint (loaded before authentication on login screen)
+app.get('/api/public/branding', (_req, res) => {
+  const salonName = getEffectiveSalonName();
+  const envSalonName = getEnvValue('SALON_NAME') || '';
+  const theme = detectSalonTheme(salonName);
+  res.json({
+    salonName,
+    envSalonName,
+    theme,
+    loginTitle: LOGIN_FORM_TITLE,
+  });
 });
 
 // Helper to execute S3 hydration into local database stores
@@ -5731,7 +5754,10 @@ app.post('/api/config', (req, res) => {
   const envUpdates: Record<string, string> = {};
 
   if (body.salonName !== undefined) {
-    const cleanSalon = String(body.salonName).trim() || 'Fashion Look Studio';
+    const cleanSalon = resolveSalonName({
+      configSalonName: String(body.salonName),
+      envSalonName: getEnvValue('SALON_NAME'),
+    });
     db.config.salonName = cleanSalon;
     envUpdates.SALON_NAME = cleanSalon;
     if (!db.config.credentials) db.config.credentials = {};
@@ -6262,6 +6288,169 @@ app.post('/api/calls/:id/send-yclients', async (_req, res) => {
   });
 });
 
+// 9.2. DAILY YCLIENTS MASTERS SYNC (scheduled daily at 08:00 salon local time, strictly read-only)
+let yclientsDailySyncInProgress = false;
+let yclientsDailySyncCronTask: ReturnType<typeof cron.schedule> | null = null;
+
+async function runYclientsMastersDailySync(options: {
+  force?: boolean;
+  trigger?: 'cron' | 'startup' | 'manual';
+} = {}): Promise<{
+  success: boolean;
+  skipped?: boolean;
+  reason?: string;
+  count?: number;
+  date: string;
+  timeZone: string;
+  error?: string;
+}> {
+  const trigger = options.trigger || 'cron';
+  const timeZone = resolveReportTimeZone();
+  const now = new Date();
+  const todayStr = getLocalDateParts(now, timeZone).dateStr;
+
+  if (yclientsDailySyncInProgress) {
+    return {
+      success: false,
+      skipped: true,
+      reason: 'already_running',
+      date: todayStr,
+      timeZone,
+      error: 'Синхронизация списка мастеров YClients уже выполняется.',
+    };
+  }
+
+  yclientsDailySyncInProgress = true;
+  try {
+    const db = readDb();
+    const ycCfg: YclientsConfig = db.config?.yclients || {
+      partnerToken: '',
+      salonId: '',
+      enabled: false,
+      readOnly: true,
+    };
+    const effCfg = getEffectiveYclientsConfig();
+    const hasCredentials = Boolean(effCfg.login && effCfg.password && effCfg.salonId && effCfg.partnerToken);
+    const syncTime = normalizeYclientsSyncTime(ycCfg.mastersSyncTime || getEnvValue('YCLIENTS_MASTERS_SYNC_TIME'));
+
+    if (!hasCredentials) {
+      return {
+        success: true,
+        skipped: true,
+        reason: 'yclients_not_configured',
+        date: todayStr,
+        timeZone,
+      };
+    }
+
+    if (!options.force && (trigger === 'cron' || trigger === 'startup')) {
+      const dueCheck = isYclientsDailySyncDue(now, {
+        syncTime,
+        timeZone,
+        lastSyncDate: ycCfg.lastMastersSyncDate,
+      });
+
+      if (!dueCheck.due) {
+        return {
+          success: true,
+          skipped: true,
+          reason: dueCheck.reason,
+          date: todayStr,
+          timeZone,
+        };
+      }
+    }
+
+    appendLog(
+      'info',
+      'yclients',
+      `[YClients Daily Sync ${syncTime}] Загрузка актуального списка мастеров из YClients (${trigger === 'manual' ? 'вручную' : 'авто по расписанию 08:00'})...`
+    );
+
+    const masters = await fetchYclientsMasters({
+      bypassCache: true,
+      ignoreEnabledFlag: true,
+    });
+
+    const latestDb = readDb();
+    if (!latestDb.config.yclients) {
+      latestDb.config.yclients = { partnerToken: '', salonId: '', enabled: true, readOnly: true };
+    }
+    latestDb.config.yclients.readOnly = true;
+    latestDb.config.yclients.mastersSyncTime = syncTime;
+    if (masters.length > 0) {
+      latestDb.config.yclients.syncedMasters = masters;
+    }
+    latestDb.config.yclients.lastMastersSyncDate = todayStr;
+    latestDb.config.yclients.lastMastersSyncAt = new Date().toISOString();
+    latestDb.config.yclients.lastMastersSyncError = '';
+    writeDb(latestDb);
+    clearCrmMastersCache();
+
+    appendLog(
+      'success',
+      'yclients',
+      `[YClients Daily Sync ${syncTime}] Список мастеров успешно обновлён из YClients: ${masters.length} мастеров. Динамический список активирован в системном промпте с приоритетом над резервным.`
+    );
+
+    return {
+      success: true,
+      count: masters.length,
+      date: todayStr,
+      timeZone,
+    };
+  } catch (err: any) {
+    const errMsg = err?.message || String(err);
+    try {
+      const latestDb = readDb();
+      if (latestDb.config?.yclients) {
+        latestDb.config.yclients.lastMastersSyncError = errMsg;
+        writeDb(latestDb);
+      }
+    } catch {
+      // ignore
+    }
+    appendLog('error', 'yclients', `[YClients Daily Sync] Ошибка ежедневного обновления списка мастеров: ${errMsg}`);
+    return {
+      success: false,
+      date: todayStr,
+      timeZone,
+      error: errMsg,
+    };
+  } finally {
+    yclientsDailySyncInProgress = false;
+  }
+}
+
+function initYclientsDailySyncScheduler(): void {
+  if (yclientsDailySyncCronTask) return;
+
+  // Check every 5 minutes so daily 08:00 sync runs reliably in salon timezone and survives restarts
+  yclientsDailySyncCronTask = cron.schedule('*/5 * * * *', () => {
+    runYclientsMastersDailySync({ trigger: 'cron' }).catch((err) => {
+      console.error('[YClients Daily Sync Cron Error]', err?.message || err);
+    });
+  });
+
+  // One-time check shortly after startup in case server started after 08:00 and hasn't synced today
+  setTimeout(() => {
+    runYclientsMastersDailySync({ trigger: 'startup' }).catch((err) => {
+      console.error('[YClients Daily Sync Startup Check Error]', err?.message || err);
+    });
+  }, 12000);
+
+  const status = getYclientsMastersSyncStatus();
+  console.log(`[YClients Daily Sync] Планировщик ежедневного обновления мастеров запущен (ежедневно в ${status.syncTime}, ${status.timeZone})`);
+}
+
+app.get('/api/yclients/masters-sync/status', requireRole(['admin', 'manager']), (_req, res) => {
+  res.json({
+    success: true,
+    readOnly: true,
+    status: getYclientsMastersSyncStatus(),
+  });
+});
+
 // 10. RE-SEED / SEED DEMO CALLS
 app.post('/api/calls/create-demo', (req, res) => {
   res.status(403).json({ success: false, error: 'Функция генерации демонстрационных звонков отключена.' });
@@ -6568,6 +6757,13 @@ function runPostStartupMaintenance() {
     initVkDailyReportScheduler();
   } catch (vkCronErr: any) {
     console.error('[VK Daily Report] Ошибка запуска планировщика:', vkCronErr.message);
+  }
+
+  // Initialize daily YClients masters sync scheduler (daily at 08:00 salon local time)
+  try {
+    initYclientsDailySyncScheduler();
+  } catch (ycCronErr: any) {
+    console.error('[YClients Daily Sync] Ошибка запуска планировщика:', ycCronErr.message);
   }
 
   // 152-ФЗ: Синхронизация реестра согласий со всеми звонками в базе

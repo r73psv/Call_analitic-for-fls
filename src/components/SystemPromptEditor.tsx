@@ -8,6 +8,7 @@ import {
   Sparkles, CheckCircle2, AlertCircle, AlertTriangle, FileText, RotateCcw, 
   Save, RefreshCw, Check, BookOpen, ShieldCheck, Zap
 } from 'lucide-react';
+import { DEFAULT_SALON_NAME } from '../services/salonBranding.js';
 
 interface SystemPromptEditorProps {
   authToken?: string | null;
@@ -19,7 +20,7 @@ interface SystemPromptEditorProps {
 export function SystemPromptEditor({
   authToken,
   userRole = 'manager',
-  salonName = 'Fashion Look Studio',
+  salonName = DEFAULT_SALON_NAME,
   onPromptSaved,
 }: SystemPromptEditorProps) {
   const [loading, setLoading] = useState(true);

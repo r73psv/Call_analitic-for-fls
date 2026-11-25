@@ -19,7 +19,8 @@
 import axios from 'axios';
 import { readStoreSync } from '../store/store.js';
 import { getGigaChatToken, isGigaChatConfigured, invalidateGigaChatTokenCache } from './gigachat-auth.js';
-import { fetchYclientsMasters } from './yclients.js';
+import { fetchYclientsMasters, getPersistedYclientsMasterNames } from './yclients.js';
+import { resolveSalonName } from './salonBranding.js';
 import { GigaChatModel, AnalysisResult, CallRecord, NextStepItem, KeyFacts, TokenUsage, ContextClarification, StructuredCallSummary, CallEvaluationCriterion, CallEvaluation } from '../types.js';
 import {
   VERIFIER_PROMPT,
@@ -73,39 +74,116 @@ export const FALLBACK_SALON_MASTERS = [
   'Ирина',
 ];
 
-let crmMastersCache: { list: string[]; fetchedAt: number } | null = null;
+let crmMastersCache: { list: string[]; source: 'yclients' | 'fallback'; fetchedAt: number } | null = null;
 const CRM_MASTERS_CACHE_TTL_MS = 10 * 60 * 1000;
 
 export function clearCrmMastersCache(): void {
   crmMastersCache = null;
 }
 
+function normalizeMasterNames(names: Array<string | undefined | null>): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of names) {
+    if (typeof raw !== 'string') continue;
+    const clean = raw.trim();
+    if (clean.length < 2) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(clean);
+  }
+  return result;
+}
+
 /**
- * Динамически подтягивает актуальный список мастеров из YClients CRM
- * в режиме «только чтение» (аутентификация по логину и паролю + YCLIENTS_PARTNER_TOKEN,
- * с 10-минутным кэшем и резервным списком известных мастеров салона).
+ * Динамически получает актуальный список мастеров с безусловным приоритетом YClients CRM:
+ * 1. Свежие данные из YClients API (строго «только чтение»).
+ * 2. Сохранённый в БД результат ежедневного обновления в 08:00 из YClients.
+ * 3. Резервный список FALLBACK_SALON_MASTERS используется ТОЛЬКО если YClients не настроен или не вернул ни одного мастера.
  */
-export async function getCrmMastersList(): Promise<string[]> {
-  if (crmMastersCache && Date.now() - crmMastersCache.fetchedAt < CRM_MASTERS_CACHE_TTL_MS) {
-    return crmMastersCache.list;
+export async function getCrmMastersWithSource(options?: { bypassCache?: boolean }): Promise<{
+  list: string[];
+  source: 'yclients' | 'fallback';
+}> {
+  if (
+    !options?.bypassCache &&
+    crmMastersCache &&
+    Date.now() - crmMastersCache.fetchedAt < CRM_MASTERS_CACHE_TTL_MS
+  ) {
+    return { list: crmMastersCache.list, source: crmMastersCache.source };
   }
 
-  const merged = new Set<string>(FALLBACK_SALON_MASTERS);
-
   try {
-    const masters = await fetchYclientsMasters();
-    for (const member of masters) {
-      if (member?.name && member.name.trim().length >= 2) {
-        merged.add(member.name.trim());
-      }
+    const masters = await fetchYclientsMasters({ bypassCache: Boolean(options?.bypassCache) });
+    const yclientsNames = normalizeMasterNames(masters.map((m) => m?.name));
+    if (yclientsNames.length > 0) {
+      crmMastersCache = { list: yclientsNames, source: 'yclients', fetchedAt: Date.now() };
+      return { list: yclientsNames, source: 'yclients' };
     }
   } catch (err: any) {
     console.warn(`[GigaChat Masters] Не удалось получить список мастеров из YClients: ${err?.message || err}`);
   }
 
-  const list = Array.from(merged);
-  crmMastersCache = { list, fetchedAt: Date.now() };
-  return list;
+  // Приоритет №2: сохранённый список от ежедневной синхронизации YClients в 08:00
+  const persistedYclients = normalizeMasterNames(getPersistedYclientsMasterNames());
+  if (persistedYclients.length > 0) {
+    crmMastersCache = { list: persistedYclients, source: 'yclients', fetchedAt: Date.now() };
+    return { list: persistedYclients, source: 'yclients' };
+  }
+
+  // Приоритет №3: резервный список только если YClients не настроен/пуст
+  const fallbackList = [...FALLBACK_SALON_MASTERS];
+  crmMastersCache = { list: fallbackList, source: 'fallback', fetchedAt: Date.now() };
+  return { list: fallbackList, source: 'fallback' };
+}
+
+/**
+ * Динамически подтягивает актуальный список мастеров из YClients CRM
+ * (список из YClients имеет безусловный приоритет над резервным списком).
+ */
+export async function getCrmMastersList(): Promise<string[]> {
+  const res = await getCrmMastersWithSource();
+  return res.list;
+}
+
+/**
+ * Подменяет (или добавляет) блок [СПИСОК МАСТЕРОВ] в системном промпте на актуальный список из YClients,
+ * гарантируя, что динамический список из YClients всегда имеет приоритет перед жёстко зафиксированным в промпте.
+ */
+export function injectDynamicMastersIntoPrompt(
+  promptText: string,
+  mastersList: string[],
+  source: 'yclients' | 'fallback' = 'yclients'
+): string {
+  const cleanMasters = normalizeMasterNames(mastersList);
+  if (cleanMasters.length === 0) return promptText;
+
+  const mastersBlock = cleanMasters.join(', ');
+  const sourceLabel =
+    source === 'yclients'
+      ? 'Актуальный список мастеров салона (динамически обновляется из YClients ежедневно в 08:00; имеет приоритет над любым статическим списком)'
+      : 'Актуальный список мастеров салона (резервный список; будет автоматически заменён при синхронизации с YClients)';
+  const replacementLine = `${sourceLabel}: ${mastersBlock}.`;
+
+  // 1. Заменяем существующую строку «Актуальный список мастеров салона...»
+  const linePattern = /Актуальный список мастеров салона[^\n]*/;
+  if (linePattern.test(promptText)) {
+    return promptText.replace(linePattern, replacementLine);
+  }
+
+  // 2. Если есть заголовок [СПИСОК МАСТЕРОВ] без стандартной строки
+  if (promptText.includes('[СПИСОК МАСТЕРОВ]')) {
+    return promptText.replace('[СПИСОК МАСТЕРОВ]', `[СПИСОК МАСТЕРОВ]\n${replacementLine}`);
+  }
+
+  // 3. Если в кастомном промпте вообще нет блока [СПИСОК МАСТЕРОВ], добавляем его с приоритетом YClients
+  if (source === 'yclients') {
+    const block = `\n\n[СПИСОК МАСТЕРОВ]\n${replacementLine}\nСопоставляй искажённые распознаванием имена мастеров именно с этим списком из YClients. Выдумывать мастеров вне стенограммы и этого списка ЗАПРЕЩЕНО.`;
+    return `${promptText.trimEnd()}${block}`;
+  }
+
+  return promptText;
 }
 
 const DEFAULT_SALON_TIMEZONE = 'Europe/Samara';
@@ -164,16 +242,37 @@ export function buildCallMetadataBlock(callTimestamp?: string | Date): string {
 }
 
 export function getSystemPrompt(customSalonName?: string, mastersList?: string[], callTimestamp?: string | Date): string {
-  const salon = customSalonName || process.env.SALON_NAME || 'Fashion Look Studio';
-  const effectiveMasters =
-    Array.isArray(mastersList) && mastersList.length > 0 ? mastersList : FALLBACK_SALON_MASTERS;
+  const salon = resolveSalonName({
+    configSalonName: customSalonName,
+    envSalonName: customSalonName ? undefined : process.env.SALON_NAME,
+  });
+  const explicitMasters = Array.isArray(mastersList) ? normalizeMasterNames(mastersList) : [];
+  const persistedYclientsMasters = explicitMasters.length === 0 ? normalizeMasterNames(getPersistedYclientsMasterNames()) : [];
+
+  let effectiveMasters: string[];
+  let mastersSource: 'yclients' | 'fallback';
+  if (explicitMasters.length > 0) {
+    effectiveMasters = explicitMasters;
+    mastersSource = 'yclients';
+  } else if (persistedYclientsMasters.length > 0) {
+    effectiveMasters = persistedYclientsMasters;
+    mastersSource = 'yclients';
+  } else {
+    effectiveMasters = FALLBACK_SALON_MASTERS;
+    mastersSource = 'fallback';
+  }
+
   const mastersBlock = effectiveMasters.join(', ');
+  const mastersHeader =
+    mastersSource === 'yclients'
+      ? `Актуальный список мастеров салона (динамически обновляется из YClients ежедневно в 08:00; имеет приоритет над любым статическим списком): ${mastersBlock}.`
+      : `Актуальный список мастеров салона (резервный список; автоматически заменяется списком из YClients при синхронизации в 08:00): ${mastersBlock}.`;
   const metadataBlock = callTimestamp ? `\n${buildCallMetadataBlock(callTimestamp)}\n` : '';
 
   return `Ты — аудитор телефонных звонков салона красоты «${salon}» (сеть салонов: «Fashion Look Studio» и «LIQ28»). Ты работаешь строго по стенограмме. Ни одного факта вне стенограммы.
 ${metadataBlock}
 [СПИСОК МАСТЕРОВ]
-Актуальный список мастеров салона: ${mastersBlock}.
+${mastersHeader}
 Если имя мастера в стенограмме искажено распознаванием речи (например, «уволюовой Татьяны»), сопоставь с этим списком (Татьяна Валиулова) и укажи примечание в поле note. Выдумывать других мастеров вне стенограммы и этого списка ЗАПРЕЩЕНО.
 
 === ЭТАП 1. ИЗВЛЕЧЕНИЕ ФАКТОВ ===
@@ -2322,16 +2421,21 @@ export async function analyzeWithGigaChat(
   const gigachatApiUrl = process.env.GIGACHAT_API_URL || 'https://gigachat.devices.sberbank.ru/api/v1/chat/completions';
 
   // Системная часть: кастомный системный промпт из настроек администратора (если задан), иначе дефолтный шаблон с актуальным списком мастеров из CRM.
-  // В обоих случаях добавляем блок МЕТАДАННЫЕ ЗВОНКА с датой и временем звонка в часовом поясе салона.
+  // В обоих случаях динамический список мастеров из YClients имеет приоритет перед жёстко зафиксированным в промпте,
+  // а блок МЕТАДАННЫЕ ЗВОНКА добавляется с датой и временем звонка в часовом поясе салона.
   const metadataBlock = buildCallMetadataBlock(callTimestamp);
+  const { list: crmMasters, source: crmMastersSource } = await getCrmMastersWithSource();
   let systemPromptContent: string;
   if (customSystemPrompt && customSystemPrompt.trim().length > 30) {
     const trimmedCustom = customSystemPrompt.trim();
-    systemPromptContent = trimmedCustom.includes('МЕТАДАННЫЕ ЗВОНКА:')
-      ? trimmedCustom
-      : `${trimmedCustom}\n\n${metadataBlock}`;
+    const withDynamicMasters =
+      crmMastersSource === 'yclients'
+        ? injectDynamicMastersIntoPrompt(trimmedCustom, crmMasters, 'yclients')
+        : trimmedCustom;
+    systemPromptContent = withDynamicMasters.includes('МЕТАДАННЫЕ ЗВОНКА:')
+      ? withDynamicMasters
+      : `${withDynamicMasters}\n\n${metadataBlock}`;
   } else {
-    const crmMasters = await getCrmMastersList();
     systemPromptContent = getSystemPrompt(customSalonName, crmMasters, callTimestamp);
     if (!systemPromptContent.includes('МЕТАДАННЫЕ ЗВОНКА:')) {
       systemPromptContent = `${systemPromptContent}\n\n${metadataBlock}`;

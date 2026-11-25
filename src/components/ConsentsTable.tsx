@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { ConsentRecord } from '../types.js';
 import { ConsentModal } from './ConsentModal.js';
+import { DEFAULT_SALON_NAME } from '../services/salonBranding.js';
 
 interface ConsentsTableProps {
   userRole?: string;
@@ -18,7 +19,7 @@ interface ConsentsTableProps {
 }
 
 export const ConsentsTable: React.FC<ConsentsTableProps> = ({ userRole = 'admin', salonName }) => {
-  const effectiveSalonName = salonName?.trim() || 'Fashion Look Studio';
+  const effectiveSalonName = salonName?.trim() || DEFAULT_SALON_NAME;
   const [consents, setConsents] = useState<ConsentRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');

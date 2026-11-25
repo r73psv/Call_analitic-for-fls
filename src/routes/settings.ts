@@ -7,12 +7,14 @@ import { Router, Request, Response } from 'express';
 import { readStore, writeStore } from '../store/store.js';
 import { requireRole, getCurrentUser, logAccess } from './auth.js';
 import { GigaChatModel, SttProvider, GigaamModelVariant } from '../types.js';
-import { getDefaultSystemPrompt } from '../services/gigachat.js';
+import { getDefaultSystemPrompt, getCrmMastersWithSource } from '../services/gigachat.js';
 import { resolveActiveSttProvider } from '../services/transcriptionService.js';
 import { isYandexAuthConfigured } from '../services/yandex-auth.js';
 import { isTbankVoiceKitConfigured } from '../services/tbank-voicekit.js';
 import { getGigaAmConfig, isGigaAmConfigured, normalizeGigaamVariant } from '../services/gigaam-asr.js';
 import { isGigaChatConfigured } from '../services/gigachat-auth.js';
+import { getEnvValue, persistServerEnvVars } from '../services/serverEnv.js';
+import { resolveSalonName } from '../services/salonBranding.js';
 
 export const settingsRouter = Router();
 
@@ -21,8 +23,13 @@ settingsRouter.get('/', async (req: Request, res: Response) => {
   try {
     const store = await readStore();
     const defaultModel = store.config.default_gigachat_model || (process.env.GIGACHAT_DEFAULT_MODEL as GigaChatModel) || 'GigaChat:Ultra';
-    const salonName = store.config.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
-    const defaultPrompt = getDefaultSystemPrompt(salonName);
+    const salonName = resolveSalonName({
+      envSalonName: getEnvValue('SALON_NAME'),
+      configSalonName: store.config.salonName,
+      credentialsSalonName: store.config.credentials?.salonName,
+    });
+    const { list: crmMasters } = await getCrmMastersWithSource();
+    const defaultPrompt = getDefaultSystemPrompt(salonName, crmMasters);
     const transcriptionModel = resolveActiveSttProvider();
     const gigaamCfg = getGigaAmConfig();
     res.json({
@@ -48,8 +55,13 @@ settingsRouter.get('/', async (req: Request, res: Response) => {
 settingsRouter.get('/system-prompt', requireRole(['admin', 'manager']), async (req: Request, res: Response) => {
   try {
     const store = await readStore();
-    const salonName = store.config.salonName || store.config.credentials?.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
-    const defaultPrompt = getDefaultSystemPrompt(salonName);
+    const salonName = resolveSalonName({
+      envSalonName: getEnvValue('SALON_NAME'),
+      configSalonName: store.config.salonName,
+      credentialsSalonName: store.config.credentials?.salonName,
+    });
+    const { list: crmMasters } = await getCrmMastersWithSource();
+    const defaultPrompt = getDefaultSystemPrompt(salonName, crmMasters);
     const customPrompt = store.config.customSystemPrompt || store.config.credentials?.customSystemPrompt || '';
     res.json({
       success: true,
@@ -93,8 +105,13 @@ settingsRouter.post('/system-prompt', requireRole(['admin', 'manager']), async (
       }
     );
 
-    const salonName = store.config.salonName || store.config.credentials?.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
-    const defaultPrompt = getDefaultSystemPrompt(salonName);
+    const salonName = resolveSalonName({
+      envSalonName: getEnvValue('SALON_NAME'),
+      configSalonName: store.config.salonName,
+      credentialsSalonName: store.config.credentials?.salonName,
+    });
+    const { list: crmMasters } = await getCrmMastersWithSource();
+    const defaultPrompt = getDefaultSystemPrompt(salonName, crmMasters);
 
     res.json({
       success: true,
@@ -134,8 +151,13 @@ settingsRouter.post('/system-prompt/reset', requireRole(['admin', 'manager']), a
       }
     );
 
-    const salonName = store.config.salonName || store.config.credentials?.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
-    const defaultPrompt = getDefaultSystemPrompt(salonName);
+    const salonName = resolveSalonName({
+      envSalonName: getEnvValue('SALON_NAME'),
+      configSalonName: store.config.salonName,
+      credentialsSalonName: store.config.credentials?.salonName,
+    });
+    const { list: crmMasters } = await getCrmMastersWithSource();
+    const defaultPrompt = getDefaultSystemPrompt(salonName, crmMasters);
 
     res.json({
       success: true,
@@ -217,9 +239,9 @@ settingsRouter.put('/', requireRole(['admin', 'manager']), async (req: Request, 
         return res.status(400).json({ error: 'Название салона красоты не может быть пустым' });
       }
       store.config.salonName = cleanSalonName;
-      process.env.SALON_NAME = cleanSalonName;
       if (!store.config.credentials) store.config.credentials = {};
       store.config.credentials.salonName = cleanSalonName;
+      persistServerEnvVars({ SALON_NAME: cleanSalonName });
     }
 
     if (customSystemPrompt !== undefined) {
@@ -247,7 +269,11 @@ settingsRouter.put('/', requireRole(['admin', 'manager']), async (req: Request, 
 
     res.json({
       success: true,
-      salonName: store.config.salonName || 'Fashion Look Studio',
+      salonName: resolveSalonName({
+        envSalonName: getEnvValue('SALON_NAME'),
+        configSalonName: store.config.salonName,
+        credentialsSalonName: store.config.credentials?.salonName,
+      }),
       default_gigachat_model: store.config.default_gigachat_model,
       transcriptionModel: resolveActiveSttProvider(),
       gigaamVariant: getGigaAmConfig().variant,

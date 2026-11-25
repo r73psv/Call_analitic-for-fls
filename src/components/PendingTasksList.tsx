@@ -11,6 +11,7 @@ import {
   ArrowRight, RefreshCw, BarChart2, ShieldCheck, ChevronDown
 } from 'lucide-react';
 import { CallRecord, NextStepItem, UserRole } from '../types.js';
+import { DEFAULT_SALON_NAME } from '../services/salonBranding.js';
 
 interface PendingTasksListProps {
   calls: CallRecord[];
@@ -25,7 +26,7 @@ export function PendingTasksList({
   onSelectCall,
   onCallUpdated,
   userRole,
-  salonName = 'Фэшн Лук Студио'
+  salonName = DEFAULT_SALON_NAME
 }: PendingTasksListProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedOperator, setSelectedOperator] = useState<string>('all');

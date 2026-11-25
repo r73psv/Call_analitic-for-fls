@@ -6,6 +6,7 @@
 import React, { useState } from 'react';
 import { X, ShieldCheck, CheckCircle2, AlertCircle, FileText, Smartphone } from 'lucide-react';
 import { ConsentRecord } from '../types.js';
+import { DEFAULT_SALON_NAME } from '../services/salonBranding.js';
 
 interface ConsentModalProps {
   isOpen: boolean;
@@ -24,7 +25,7 @@ export const ConsentModal: React.FC<ConsentModalProps> = ({
   userRole = 'admin',
   salonName,
 }) => {
-  const effectiveSalonName = salonName?.trim() || 'Fashion Look Studio';
+  const effectiveSalonName = salonName?.trim() || DEFAULT_SALON_NAME;
   const [phone, setPhone] = useState(initialPhone);
   const [method, setMethod] = useState<'written' | 'digital'>('written');
   const [isLoyaltyOnly, setIsLoyaltyOnly] = useState(true);

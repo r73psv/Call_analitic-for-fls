@@ -5,7 +5,8 @@
 
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Sparkles, Building2, Save, X, AlertCircle, CheckCircle2, RotateCcw } from 'lucide-react';
+import { Building2, Save, X, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { DEFAULT_SALON_NAME, isLiq28Salon } from '../services/salonBranding.js';
 
 interface EditSalonNameModalProps {
   isOpen: boolean;
@@ -16,10 +17,10 @@ interface EditSalonNameModalProps {
 }
 
 const PRESET_SUGGESTIONS = [
+  'LIQ28',
+  'Лик 28',
   'Fashion Look Studio',
   'FLS',
-  'Лик 28',
-  'Лик 28 Премиум',
   'Beauty Studio',
   'Mon Amie',
   'Этуаль',
@@ -33,14 +34,14 @@ export const EditSalonNameModal: React.FC<EditSalonNameModalProps> = ({
   onSave,
   userRole = 'admin',
 }) => {
-  const [salonName, setSalonName] = useState(currentName || 'Fashion Look Studio');
+  const [salonName, setSalonName] = useState(currentName || DEFAULT_SALON_NAME);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
-      setSalonName(currentName || 'Fashion Look Studio');
+      setSalonName(currentName || DEFAULT_SALON_NAME);
       setError(null);
       setSuccess(false);
     }
@@ -97,14 +98,22 @@ export const EditSalonNameModal: React.FC<EditSalonNameModalProps> = ({
           aria-modal="true"
         >
           {/* Header */}
-          <div className="bg-gradient-to-r from-emerald-600 to-teal-700 px-6 py-4 text-white flex items-center justify-between">
+          <div
+            className={
+              isLiq28Salon(salonName)
+                ? 'bg-[#231F1C] px-6 py-4 text-[#FAF7F2] flex items-center justify-between border-b border-[#9A7B56]/30'
+                : 'bg-gradient-to-r from-emerald-600 to-teal-700 px-6 py-4 text-white flex items-center justify-between'
+            }
+          >
             <div className="flex items-center gap-3">
-              <div className="p-2 bg-white/20 rounded-xl">
+              <div className="p-2 bg-white/15 rounded-xl">
                 <Building2 className="w-5 h-5 text-white" />
               </div>
               <div>
                 <h3 className="font-bold text-base leading-tight">Название салона красоты</h3>
-                <p className="text-xs text-emerald-100">Ручной ввод и настройка бренда</p>
+                <p className={isLiq28Salon(salonName) ? 'text-xs text-[#D6C8B8]' : 'text-xs text-emerald-100'}>
+                  Синхронизируется с переменной окружения SALON_NAME
+                </p>
               </div>
             </div>
             <button
@@ -137,24 +146,13 @@ export const EditSalonNameModal: React.FC<EditSalonNameModalProps> = ({
                     if (error) setError(null);
                   }}
                   autoFocus
-                  placeholder="Например: Fashion Look Studio, FLS, Лик 28, Mon Amie..."
+                  placeholder="Введите название салона красоты (например: LIQ28)..."
                   className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600 transition-all placeholder:text-slate-400"
                   maxLength={100}
                 />
-                {salonName.trim() !== 'Fashion Look Studio' && (
-                  <button
-                    type="button"
-                    onClick={() => setSalonName('Fashion Look Studio')}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700 rounded-md transition-colors text-xs flex items-center gap-1"
-                    title="Вернуть «Fashion Look Studio» по умолчанию"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    <span className="text-[10px]">Fashion Look</span>
-                  </button>
-                )}
               </div>
               <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
-                Это название применяется в шапке системы, реестре согласий 152-ФЗ, протоколах аудита звонков (PDF/CSV), автоинформаторе 152-ФЗ и речевых скриптах GigaChat.
+                Это название сохраняется в переменную окружения <code className="font-mono">SALON_NAME</code> и применяется в форме входа, шапке, теме оформления, реестре согласий 152-ФЗ, отчётах PDF/CSV и промптах GigaChat.
               </p>
             </div>
 

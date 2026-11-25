@@ -1,6 +1,7 @@
 import { CallRecord } from '../types.js';
 import { anonymizeTranscript, maskPhone } from './anonymize.js';
 import type { PeriodStatsReportData } from './pdfReport.js';
+import { resolveSalonName } from './salonBranding.js';
 
 function sanitizeFormulaCell(raw: string): string {
   // Нейтрализация CSV Formula Injection (=, +, @, \t, \r, а также '-' если это не обычное число/дефис)
@@ -31,7 +32,7 @@ function escapeCsv(val: any): string {
 }
 
 export function generateCallCsv(call: CallRecord, userRole: string = 'manager', customSalonName?: string): string {
-  const salonName = (customSalonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
+  const salonName = resolveSalonName({ configSalonName: customSalonName, envSalonName: process.env.SALON_NAME });
   const rawPhone = call.client_phone || (call as any).full_phone || '';
   const maskedPhone = call.client_phone_masked || maskPhone(rawPhone);
 
@@ -210,7 +211,7 @@ export function generateCallsTableCsv(
   customSalonName?: string,
   filterTitle?: string
 ): string {
-  const salonName = (customSalonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
+  const salonName = resolveSalonName({ configSalonName: customSalonName, envSalonName: process.env.SALON_NAME });
   const rows: string[] = [];
 
   // Время генерации (Самара, UTC+4)
@@ -409,7 +410,7 @@ export function generatePeriodStatsCsv(
   calls: CallRecord[] = [],
   customSalonName?: string
 ): string {
-  const salonName = (customSalonName || process.env.SALON_NAME || 'Fashion Look Studio').trim();
+  const salonName = resolveSalonName({ configSalonName: customSalonName, envSalonName: process.env.SALON_NAME });
   const rows: string[] = [];
 
   const nowSamara = new Date().toLocaleString('ru-RU', {

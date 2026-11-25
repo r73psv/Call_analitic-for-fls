@@ -93,6 +93,7 @@ export const MANAGED_SERVER_ENV_KEYS = new Set<string>([
   'YCLIENTS_PARTNER_TOKEN',
   'YCLIENTS_SALON_ID',
   'YCLIENTS_USER_TOKEN',
+  'YCLIENTS_MASTERS_SYNC_TIME',
 ]);
 
 /** Canonical alias pairs kept in sync when either side is loaded or updated. */

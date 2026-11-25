@@ -13,6 +13,7 @@ import { readConsentStoreSync, setConsentStoreDirect } from './consent-store.js'
 import { deduplicateCalls } from '../services/callUtils.js';
 import { hydrateStoreFromServerEnv, getEnvValue } from '../services/serverEnv.js';
 import { DEFAULT_VK_CALL_TEMPLATE } from '../services/vkMessageFormatter.js';
+import { resolveSalonName } from '../services/salonBranding.js';
 
 const DATA_PATH_ENC = process.env.DATA_PATH_ENC || path.join(process.cwd(), 'data', 'data-store.enc');
 const DATA_PATH_JSON = process.env.DATA_PATH || path.join(process.cwd(), 'data', 'data-store.json');
@@ -51,7 +52,7 @@ export function getDefaultConfig(): SystemConfig {
     process.env.STT_PROVIDER === 'tbank_voicekit' || process.env.STT_PROVIDER === 'gigaam_v3'
       ? process.env.STT_PROVIDER
       : 'yandex_speechkit';
-  const salonName = (process.env.SALON_NAME || 'Fashion Look Studio').trim();
+  const salonName = resolveSalonName({ envSalonName: getEnvValue('SALON_NAME') });
 
   return {
     activeModel: gigachatModel,
@@ -90,6 +91,7 @@ export function getDefaultConfig(): SystemConfig {
       salonId: yclientsSalonId,
       enabled: Boolean(yclientsLogin && yclientsPassword && yclientsSalonId),
       readOnly: true,
+      mastersSyncTime: getEnvValue('YCLIENTS_MASTERS_SYNC_TIME') || '08:00',
     },
     credentials: {
       salonName,

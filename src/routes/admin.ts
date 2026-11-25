@@ -17,14 +17,15 @@ import { invalidateGigaChatTokenCache } from '../services/gigachat-auth.js';
 import { invalidateAuthorizedKeyCache, getAuthorizedKeyInfo, getIamToken, testYandexSpeechKit } from '../services/yandex-auth.js';
 import { setStoreEncryptionKey, isStoreEncryptionKeyConfigured } from '../store/crypto-store.js';
 import { scanTempFiles, cleanTempFiles, runCleanupNow } from '../store/cleanup.js';
-import { getDefaultSystemPrompt, clearCrmMastersCache } from '../services/gigachat.js';
+import { getDefaultSystemPrompt, clearCrmMastersCache, getCrmMastersWithSource } from '../services/gigachat.js';
 import { archiveCallsToS3, getS3ArchiveStatus, listS3Archives } from '../services/s3-archive.js';
 import { testTbankVoiceKitConnection, isTbankVoiceKitConfigured } from '../services/tbank-voicekit.js';
 import { testGigaAmConnection, getGigaAmConfig, isGigaAmConfigured, normalizeGigaamVariant, normalizeGigaAmEndpointUrl } from '../services/gigaam-asr.js';
 import { resolveActiveSttProvider, normalizeSttProvider } from '../services/transcriptionService.js';
 import { persistServerEnvVars, getServerEnvStatus, getEnvValue } from '../services/serverEnv.js';
-import { clearYclientsCache, fetchYclientsMasters, testYclientsReadOnlyConnection } from '../services/yclients.js';
-import { normalizeDailyReportTime, resolveReportTimeZone } from '../services/vkDailyReport.js';
+import { clearYclientsCache, fetchYclientsMasters, testYclientsReadOnlyConnection, getYclientsMastersSyncStatus } from '../services/yclients.js';
+import { normalizeDailyReportTime, resolveReportTimeZone, getLocalDateParts } from '../services/vkDailyReport.js';
+import { resolveSalonName } from '../services/salonBranding.js';
 import { SystemCredentials, GigaChatModel, AutoCleanupSettings, LogEntry } from '../types.js';
 
 export const adminRouter = Router();
@@ -47,7 +48,11 @@ adminRouter.get('/credentials', async (req: Request, res: Response) => {
       ? (keyInfo.filePath || '/app/keys/authorized_key.json')
       : (rawKeyPath || '/app/keys/authorized_key.json');
 
-    const effectiveSalonName = getEnvValue('SALON_NAME') || store.config.salonName || creds.salonName || 'Fashion Look Studio';
+    const effectiveSalonName = resolveSalonName({
+      envSalonName: getEnvValue('SALON_NAME'),
+      configSalonName: store.config.salonName,
+      credentialsSalonName: creds.salonName,
+    });
     const effectiveGigaKey = getEnvValue('GIGACHAT_AUTH_KEY', 'GIGACHAT_CREDENTIALS') || creds.gigachatAuthKey || '';
     const effectiveYandexKey = getEnvValue('YC_API_KEY') || creds.yandexApiKey || '';
     const effectiveYandexStorageKey = getEnvValue('YC_STORAGE_ACCESS_KEY', 'YC_S3_KEY_ID') || creds.yandexStorageAccessKey || '';
@@ -65,6 +70,7 @@ adminRouter.get('/credentials', async (req: Request, res: Response) => {
       gigachatConfigured: !!effectiveGigaKey,
       customSystemPrompt: store.config.customSystemPrompt || creds.customSystemPrompt || '',
       defaultSystemPrompt: getDefaultSystemPrompt(effectiveSalonName),
+      yclientsMastersSync: getYclientsMastersSyncStatus(),
 
       // Yandex SpeechKit
       yandexApiKey: effectiveYandexKey,
@@ -367,7 +373,10 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
 
     // Название салона красоты
     if (body.salonName !== undefined) {
-      const cleanSalonName = String(body.salonName).trim() || 'Fashion Look Studio';
+      const cleanSalonName = resolveSalonName({
+        configSalonName: String(body.salonName),
+        envSalonName: getEnvValue('SALON_NAME'),
+      });
       store.config.salonName = cleanSalonName;
       creds.salonName = cleanSalonName;
       envUpdates.SALON_NAME = cleanSalonName;
@@ -864,7 +873,11 @@ adminRouter.post('/test/vk', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'Токен VK или ID чата не указаны' });
     }
 
-    const currentSalon = store.config.salonName || store.config.credentials?.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
+    const currentSalon = resolveSalonName({
+      envSalonName: getEnvValue('SALON_NAME'),
+      configSalonName: store.config.salonName,
+      credentialsSalonName: store.config.credentials?.salonName,
+    });
     const message = `🔔 [${currentSalon} Тест] Проверка интеграции уведомлений аналитики звонков салона красоты «${currentSalon}» (${new Date().toLocaleString('ru-RU')})`;
     const params = new URLSearchParams();
     params.append('v', '5.131');
@@ -924,7 +937,7 @@ adminRouter.post('/test/yclients', async (req: Request, res: Response) => {
 
 /**
  * GET /api/admin/yclients/masters
- * Возвращает список активных мастеров салона из YClients (строго чтение).
+ * Возвращает список активных мастеров салона из YClients (строго чтение) и сохраняет его в БД.
  */
 adminRouter.get('/yclients/masters', async (req: Request, res: Response) => {
   try {
@@ -933,17 +946,80 @@ adminRouter.get('/yclients/masters', async (req: Request, res: Response) => {
       bypassCache,
       ignoreEnabledFlag: true,
     });
+    if (masters.length > 0) {
+      const store = await readStore();
+      if (!store.config.yclients) {
+        store.config.yclients = { partnerToken: '', salonId: '', enabled: false, readOnly: true };
+      }
+      const tz = resolveReportTimeZone();
+      store.config.yclients.syncedMasters = masters;
+      store.config.yclients.lastMastersSyncDate = getLocalDateParts(new Date(), tz).dateStr;
+      store.config.yclients.lastMastersSyncAt = new Date().toISOString();
+      store.config.yclients.lastMastersSyncError = '';
+      await writeStore(store);
+      clearCrmMastersCache();
+    }
     res.json({
       success: true,
       readOnly: true,
       count: masters.length,
       masters,
+      syncStatus: getYclientsMastersSyncStatus(),
     });
   } catch (err: any) {
     res.status(400).json({
       success: false,
       readOnly: true,
       error: err?.message || 'Не удалось загрузить список мастеров из YClients',
+      syncStatus: getYclientsMastersSyncStatus(),
+    });
+  }
+});
+
+/**
+ * POST /api/admin/yclients/sync-masters
+ * Принудительно обновляет сохранённый список мастеров из YClients (аналог ежедневной синхронизации в 08:00).
+ */
+adminRouter.post('/yclients/sync-masters', async (req: Request, res: Response) => {
+  try {
+    const masters = await fetchYclientsMasters({
+      bypassCache: true,
+      ignoreEnabledFlag: true,
+    });
+    const store = await readStore();
+    if (!store.config.yclients) {
+      store.config.yclients = { partnerToken: '', salonId: '', enabled: false, readOnly: true };
+    }
+    const tz = resolveReportTimeZone();
+    if (masters.length > 0) {
+      store.config.yclients.syncedMasters = masters;
+    }
+    store.config.yclients.lastMastersSyncDate = getLocalDateParts(new Date(), tz).dateStr;
+    store.config.yclients.lastMastersSyncAt = new Date().toISOString();
+    store.config.yclients.lastMastersSyncError = '';
+    await writeStore(store);
+    clearCrmMastersCache();
+
+    await logAccess(
+      getCurrentUser(req)?.name || 'admin',
+      'write',
+      `Принудительная синхронизация списка мастеров из YClients (${masters.length} мастеров)`,
+      req.ip || '127.0.0.1'
+    );
+
+    res.json({
+      success: true,
+      readOnly: true,
+      count: masters.length,
+      masters,
+      syncStatus: getYclientsMastersSyncStatus(),
+    });
+  } catch (err: any) {
+    res.status(400).json({
+      success: false,
+      readOnly: true,
+      error: err?.message || 'Не удалось синхронизировать список мастеров из YClients',
+      syncStatus: getYclientsMastersSyncStatus(),
     });
   }
 });
@@ -1134,14 +1210,25 @@ adminRouter.get('/archive/list', async (req: Request, res: Response) => {
 
 /**
  * GET /api/admin/default-system-prompt
- * Возвращает эталонный заводской системный промпт для текущего салона
+ * Возвращает эталонный заводской системный промпт для текущего салона с динамическим списком мастеров из YClients
  */
 adminRouter.get('/default-system-prompt', async (_req: Request, res: Response) => {
   try {
     const store = await readStore();
-    const salon = store.config.salonName || store.config.credentials?.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
-    const defaultPrompt = getDefaultSystemPrompt(salon);
-    res.json({ success: true, defaultSystemPrompt: defaultPrompt });
+    const salon = resolveSalonName({
+      envSalonName: getEnvValue('SALON_NAME'),
+      configSalonName: store.config.salonName,
+      credentialsSalonName: store.config.credentials?.salonName,
+    });
+    const { list: crmMasters, source: mastersSource } = await getCrmMastersWithSource();
+    const defaultPrompt = getDefaultSystemPrompt(salon, crmMasters);
+    res.json({
+      success: true,
+      defaultSystemPrompt: defaultPrompt,
+      mastersSource,
+      mastersCount: crmMasters.length,
+      yclientsMastersSync: getYclientsMastersSyncStatus(),
+    });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -1159,8 +1246,13 @@ adminRouter.post('/reset-system-prompt', async (req: Request, res: Response) => 
       store.config.credentials.customSystemPrompt = '';
     }
     await writeStore(store);
-    const salon = store.config.salonName || store.config.credentials?.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
-    const defaultPrompt = getDefaultSystemPrompt(salon);
+    const salon = resolveSalonName({
+      envSalonName: getEnvValue('SALON_NAME'),
+      configSalonName: store.config.salonName,
+      credentialsSalonName: store.config.credentials?.salonName,
+    });
+    const { list: crmMasters } = await getCrmMastersWithSource();
+    const defaultPrompt = getDefaultSystemPrompt(salon, crmMasters);
     await logAccess(
       getCurrentUser(req)?.name || 'admin',
       'write',

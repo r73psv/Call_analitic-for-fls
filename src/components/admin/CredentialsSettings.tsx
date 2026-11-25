@@ -12,6 +12,7 @@ import {
   Building2, RotateCcw, Users, PhoneCall, Radio, Sparkles, FileText, Mic, Send, BarChart3
 } from 'lucide-react';
 import { GigaChatModel, MegafonApiVersion, SttProvider, GigaamModelVariant } from '../../types.js';
+import { DEFAULT_SALON_NAME } from '../../services/salonBranding.js';
 import { S3SyncPanel } from '../S3SyncPanel.js';
 import { TranscriptionModelSelector } from '../TranscriptionModelSelector.js';
 
@@ -30,7 +31,7 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
   const [showKeys, setShowKeys] = useState(false);
 
   // Название салона красоты
-  const [salonName, setSalonName] = useState('Fashion Look Studio');
+  const [salonName, setSalonName] = useState('');
   const [savingSalonOnly, setSavingSalonOnly] = useState(false);
   const [salonSaveSuccess, setSalonSaveSuccess] = useState<string | null>(null);
 
@@ -215,7 +216,7 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
       if (!res.ok) throw new Error('Не удалось загрузить системные настройки');
       const data = await res.json();
 
-      setSalonName(data.salonName || 'Fashion Look Studio');
+      setSalonName(data.salonName || DEFAULT_SALON_NAME);
       setGigachatAuthKey(data.gigachatAuthKey || '');
       setGigachatModel(data.gigachatModel || 'GigaChat:Lite');
       if (data.gigachatScope) {
@@ -330,7 +331,7 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
 
     try {
       const body = {
-        salonName: salonName.trim() || 'Fashion Look Studio',
+        salonName: salonName.trim() || DEFAULT_SALON_NAME,
         gigachatAuthKey,
         gigachatModel,
         gigachatScope,
@@ -1142,22 +1143,11 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
                   type="text"
                   value={salonName}
                   onChange={(e) => setSalonName(e.target.value)}
-                  placeholder="Введите название салона красоты (например: Fashion Look Studio)..."
+                  placeholder="Введите название салона красоты (из SALON_NAME)..."
                   className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600 transition-all placeholder:text-slate-400"
                   maxLength={100}
                   id="admin-salon-name-input"
                 />
-                {salonName.trim() !== 'Fashion Look Studio' && (
-                  <button
-                    type="button"
-                    onClick={() => setSalonName('Fashion Look Studio')}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700 rounded-md transition-colors text-[10px] flex items-center gap-1"
-                    title="Сбросить на значение по умолчанию («Fashion Look Studio»)"
-                  >
-                    <RotateCcw className="w-3 h-3" />
-                    <span>Сброс</span>
-                  </button>
-                )}
               </div>
               <button
                 type="button"
@@ -1180,7 +1170,7 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
 
           <div className="flex items-center flex-wrap gap-1.5 pt-1">
             <span className="text-[11px] text-slate-500 font-medium">Быстрые варианты:</span>
-            {['Fashion Look Studio', 'FLS', 'Лик 28', 'Лик 28 Премиум', 'Beauty Studio', 'Mon Amie', 'Магия Красоты'].map((preset) => (
+            {['LIQ28', 'Лик 28', 'Fashion Look Studio', 'FLS', 'Beauty Studio', 'Mon Amie', 'Магия Красоты'].map((preset) => (
               <button
                 key={preset}
                 type="button"
@@ -1418,7 +1408,7 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
               </button>
               <button
                 type="button"
-                onClick={() => handleAppendInstruction(`НАЗВАНИЕ САЛОНА: Официальное название салона — «${salonName || 'Fashion Look Studio'}». Регламент приветствия обязателен.`)}
+                onClick={() => handleAppendInstruction(`НАЗВАНИЕ САЛОНА: Официальное название салона — «${salonName || DEFAULT_SALON_NAME}». Регламент приветствия обязателен.`)}
                 className="px-2.5 py-1 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-800 font-medium rounded-lg border border-slate-200 transition-colors"
               >
                 + Бренд салона
@@ -1455,7 +1445,7 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
             </div>
 
             <p className="text-[11px] text-slate-500">
-              Если поле пустое, GigaChat использует встроенный эталонный промпт с автоматической подстановкой наименования салона «{salonName || 'Fashion Look Studio'}». Заполните это поле, если хотите полностью переопределить системные правила анализа.
+              Если поле пустое, GigaChat использует встроенный эталонный промпт с автоматической подстановкой наименования салона «{salonName || DEFAULT_SALON_NAME}» и динамически обновляемым списком мастеров из YClients (ежедневно в 08:00). Заполните это поле, если хотите переопределить системные правила анализа (список мастеров из YClients сохранит приоритет).
             </p>
           </div>
 
@@ -2343,7 +2333,7 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
             </div>
 
             <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 text-[11px] text-slate-600 leading-relaxed">
-              <span className="font-bold text-slate-800">🔒 Требования 152-ФЗ «О персональных данных»:</span> Все данные клиентов салона красоты «{salonName || 'Fashion Look Studio'}», телефонные номера, записи разговоров и аудиофайлы хранятся в зашифрованном виде. При переносе файла <code className="font-mono bg-white px-1 py-0.5 rounded border border-slate-200">data-store.enc</code> на другой сервер необходимо указать идентичный <code className="font-mono bg-white px-1 py-0.5 rounded border border-slate-200">STORE_ENCRYPTION_KEY</code>.
+              <span className="font-bold text-slate-800">🔒 Требования 152-ФЗ «О персональных данных»:</span> Все данные клиентов салона красоты «{salonName || DEFAULT_SALON_NAME}», телефонные номера, записи разговоров и аудиофайлы хранятся в зашифрованном виде. При переносе файла <code className="font-mono bg-white px-1 py-0.5 rounded border border-slate-200">data-store.enc</code> на другой сервер необходимо указать идентичный <code className="font-mono bg-white px-1 py-0.5 rounded border border-slate-200">STORE_ENCRYPTION_KEY</code>.
             </div>
           </div>
         </div>
@@ -3061,12 +3051,12 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
           </div>
 
           <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl px-3 py-2 text-[11px] text-amber-900">
-            <strong>Режим только чтения:</strong> приложение аутентифицируется по логину и паролю (+ <code className="font-mono">YCLIENTS_PARTNER_TOKEN</code>) и читает только список мастеров (<code className="font-mono">GET /staff/&#123;salonId&#125;</code>). Запись и изменение данных в YClients полностью отключены.
+            <strong>Режим только чтения + ежедневное обновление в 08:00:</strong> приложение аутентифицируется по логину и паролю (+ <code className="font-mono">YCLIENTS_PARTNER_TOKEN</code>), читает список мастеров (<code className="font-mono">GET /staff/&#123;salonId&#125;</code>) ежедневно в 08:00 по времени салона и автоматически подставляет его в системный промпт с приоритетом над резервным списком. Запись в YClients отключена.
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">ID салона «{salonName || 'Fashion Look Studio'}» (YCLIENTS_SALON_ID)</label>
+              <label className="block text-xs font-bold text-slate-700 mb-1">ID салона «{salonName || DEFAULT_SALON_NAME}» (YCLIENTS_SALON_ID)</label>
               <input
                 type="text"
                 value={yclientsSalonId}

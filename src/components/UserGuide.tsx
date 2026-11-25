@@ -4,18 +4,19 @@
  */
 
 import React, { useState } from 'react';
-import { 
-  BookOpen, ShieldCheck, Sparkles, PhoneCall, BarChart3, 
-  Download, Database, MessageCircle, SlidersHorizontal, CheckSquare, 
-  HelpCircle, ChevronRight, FileText, FileSpreadsheet, Lock, UserCheck, 
+import {
+  BookOpen, ShieldCheck, Sparkles, PhoneCall, BarChart3,
+  Download, Database, MessageCircle, SlidersHorizontal, CheckSquare,
+  HelpCircle, ChevronRight, FileText, FileSpreadsheet, Lock, UserCheck,
   Activity, Check, Copy, AlertTriangle, ListTodo, Bell
 } from 'lucide-react';
+import { DEFAULT_SALON_NAME } from '../services/salonBranding.js';
 
 interface UserGuideProps {
   salonName?: string;
 }
 
-export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps) {
+export function UserGuide({ salonName = DEFAULT_SALON_NAME }: UserGuideProps) {
   const [activeSection, setActiveSection] = useState<string>('intro');
   const [copiedSection, setCopiedSection] = useState<string | null>(null);
 
@@ -23,10 +24,10 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
     { id: 'intro', title: '1. Назначение и обзор системы', icon: BookOpen },
     { id: 'roles', title: '2. Роли и безопасность 152-ФЗ', icon: ShieldCheck },
     { id: 'list', title: '3. Журнал звонков и фильтры', icon: SlidersHorizontal },
-    { id: 'analysis', title: '4. Анализ диалога и оценка ИИ', icon: Activity },
+    { id: 'analysis', title: '4. Анализ, классы A/B/C и Verifier', icon: Activity },
     { id: 'next-steps', title: '5. Следующие шаги (Next Steps ИИ)', icon: Sparkles },
-    { id: 'export', title: '6. Экспорт отчетов (CSV & PDF)', icon: Download },
-    { id: 'integrations', title: '7. МегаФон, Yclients, VK, S3', icon: Database },
+    { id: 'export', title: '6. Экспорт отчётов (CSV & PDF)', icon: Download },
+    { id: 'integrations', title: '7. МегаФон, STT, VK, YClients, S3', icon: Database },
     { id: 'architecture', title: '8. Техническая архитектура', icon: FileText },
   ];
 
@@ -46,7 +47,7 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
               <BookOpen className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-sm font-bold text-slate-900 leading-tight">Справка & Руководство</h2>
+              <h2 className="text-sm font-bold text-slate-900 leading-tight">Справка &amp; Руководство</h2>
               <p className="text-[11px] text-slate-500">Салон «{salonName}»</p>
             </div>
           </div>
@@ -79,17 +80,17 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
         <div className="mt-6 p-3 rounded-xl bg-purple-50/70 border border-purple-200 text-purple-900 text-[11px] space-y-1.5">
           <div className="font-bold flex items-center gap-1.5">
             <Sparkles className="w-3.5 h-3.5 text-purple-600" />
-            <span>AI CallQA v2.8</span>
+            <span>AI CallQA v3.0</span>
           </div>
           <p className="leading-snug text-purple-800">
-            Речевая аналитика Сбер GigaChat + Yandex SpeechKit с полным соответствием 152-ФЗ РФ.
+            GigaChat:Ultra + Repair + Verifier • GigaASR / Yandex SpeechKit / T-Bank VoiceKit • 152-ФЗ РФ.
           </p>
         </div>
       </div>
 
       {/* Main Content Pane */}
       <div className="flex-1 p-6 overflow-y-auto max-h-[820px] bg-white space-y-6">
-        
+
         {/* Section 1: Intro */}
         {activeSection === 'intro' && (
           <div className="space-y-4 animate-in fade-in">
@@ -99,32 +100,32 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                 1. Назначение и обзор системы
               </h1>
               <p className="text-xs text-slate-500 mt-0.5">
-                Автоматизированный программный комплекс речевой аналитики и контроля качества телефонных диалогов салона красоты «{salonName}».
+                Автоматизированный комплекс речевой аналитики, фактчекинга и аудита звонков салонов красоты «Fashion Look Studio» и «LIQ28» (активный салон: «{salonName}»).
               </p>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/60 space-y-1">
-                <span className="text-[10px] font-bold uppercase text-slate-400">1. Запись и распознавание</span>
-                <p className="text-xs font-semibold text-slate-800">МегаФон ВАТС + Yandex SpeechKit</p>
+                <span className="text-[10px] font-bold uppercase text-slate-400">1. Запись и распознавание (STT)</span>
+                <p className="text-xs font-semibold text-slate-800">МегаФон ВАТС + GigaASR / SpeechKit / VoiceKit</p>
                 <p className="text-[11px] text-slate-500 leading-relaxed">
-                  Автоматический прием аудиозаписей звонков, шумоподавление, транскрибация речи и разделение ролей (Менеджер / Клиент).
+                  Приём входящих и исходящих записей, выбор STT-провайдера (GigaAM v3 / Yandex SpeechKit / T-Bank VoiceKit), смысловое восстановление ролей и ретраи при сетевых сбоях.
                 </p>
               </div>
 
               <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/60 space-y-1">
-                <span className="text-[10px] font-bold uppercase text-slate-400">2. Интеллектуальный анализ</span>
-                <p className="text-xs font-semibold text-slate-800">Сбер GigaChat (Lite / Pro / Max)</p>
+                <span className="text-[10px] font-bold uppercase text-slate-400">2. Интеллектуальный аудит</span>
+                <p className="text-xs font-semibold text-slate-800">GigaChat:Ultra + Repair + Verifier</p>
                 <p className="text-[11px] text-slate-500 leading-relaxed">
-                  Определение статуса записи (согласие/отказ), фиксация сути (услуга, мастер, дата, время), пересказ и 10-балльная оценка работы администратора.
+                  8 обязательных параметров резюме, 10 критериев аудита с цитатами, классы звонков A/B/C, программный авто-ремонт (Repair) и двухпроходный фактчекер (Verifier).
                 </p>
               </div>
 
               <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/60 space-y-1">
-                <span className="text-[10px] font-bold uppercase text-slate-400">3. Действия и экспорт</span>
-                <p className="text-xs font-semibold text-slate-800">Next Steps + Отчеты PDF / CSV</p>
+                <span className="text-[10px] font-bold uppercase text-slate-400">3. Действия, VK и отчёты</span>
+                <p className="text-xs font-semibold text-slate-800">Next Steps + VK + CSV / PDF (152-ФЗ)</p>
                 <p className="text-[11px] text-slate-500 leading-relaxed">
-                  Формирование пошаговых задач для дежурного администратора, отправка в Yclients CRM, закрытый чат VK и экспорт реестров для управляющего.
+                  Задачи Next Steps, уведомления в VK с обязательным кратким пересказом диалога, ежедневная сводка KPI после 21:00 и экспорт обезличенных отчётов из StatsGrid.
                 </p>
               </div>
             </div>
@@ -132,13 +133,13 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
             <div className="rounded-xl border border-blue-200 bg-blue-50/40 p-4 space-y-2 text-xs text-blue-950">
               <h4 className="font-bold flex items-center gap-1.5 text-blue-900">
                 <Check className="w-4 h-4 text-blue-600" />
-                Ключевые преимущества для руководства салона:
+                Ключевые преимущества обновлённой версии 3.0:
               </h4>
               <ul className="list-disc list-inside space-y-1 text-slate-700 leading-relaxed pl-1">
-                <li>100% охват входящих и исходящих звонков без необходимости выборочного ручного прослушивания;</li>
-                <li>Мгновенный контроль конверсии первичных и повторных обращений клиентов в запись;</li>
-                <li>Автоматическое выявление претензий, конфликтов и грубых нарушений скрипта обслуживания;</li>
-                <li>Полное юридическое соответствие закону «О персональных данных» № 152-ФЗ РФ.</li>
+                <li>100% охват входящих и исходящих звонков (включая подтверждения записи и обзвоны) без ложных штрафов на коротких/справочных вызовах;</li>
+                <li>Двухпроходная проверка фактов и цитат (Verifier) исключает галлюцинации и некорректную привязку реплик;</li>
+                <li>Ежедневная автоматическая сводка основных KPI в VK после 21:00 и обязательный краткий пересказ диалога в каждом уведомлении VK;</li>
+                <li>Строгое соответствие закону № 152-ФЗ РФ: маскирование номеров, шифрование AES-256-GCM, пакетная синхронизация и архивация в S3.</li>
               </ul>
             </div>
           </div>
@@ -153,7 +154,7 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                 2. Ролевая модель и соблюдение 152-ФЗ
               </h1>
               <p className="text-xs text-slate-500 mt-0.5">
-                Четырехуровневая система разграничения доступа (RBAC) и строгие алгоритмы деперсонализации данных.
+                Четырёхуровневая система разграничения доступа (RBAC) и строгие алгоритмы деперсонализации данных.
               </p>
             </div>
 
@@ -164,7 +165,7 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                     <th className="p-3">Роль</th>
                     <th className="p-3">Телефоны клиентов</th>
                     <th className="p-3">Стенограмма диалога</th>
-                    <th className="p-3">Next Steps и экспорт</th>
+                    <th className="p-3">Next Steps, VK и экспорт</th>
                     <th className="p-3">Системные настройки</th>
                   </tr>
                 </thead>
@@ -173,14 +174,14 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                     <td className="p-3 font-bold text-purple-700">Администратор (Admin)</td>
                     <td className="p-3 text-emerald-700 font-medium">Полный номер (с правами)</td>
                     <td className="p-3 text-emerald-700 font-medium">Полный доступ</td>
-                    <td className="p-3 text-emerald-700 font-medium">Полный доступ (PDF/CSV)</td>
-                    <td className="p-3 text-emerald-700 font-medium">Полный доступ (токены, пароли)</td>
+                    <td className="p-3 text-emerald-700 font-medium">Полный доступ (StatsGrid/реестр PDF/CSV, VK)</td>
+                    <td className="p-3 text-emerald-700 font-medium">Полный доступ (АТС, STT, GigaChat, VK, YClients, S3)</td>
                   </tr>
                   <tr className="bg-slate-50/50">
                     <td className="p-3 font-bold text-indigo-700">Управляющий (Manager)</td>
                     <td className="p-3 text-amber-700 font-medium">Маскирован (+7***4589)</td>
                     <td className="p-3 text-emerald-700 font-medium">Дословный транскрипт</td>
-                    <td className="p-3 text-emerald-700 font-medium">Генерация шагов, экспорт PDF/CSV</td>
+                    <td className="p-3 text-emerald-700 font-medium">Next Steps, экспорт PDF/CSV, выгрузка сводки VK</td>
                     <td className="p-3 text-slate-400">Только чтение маскированных параметров</td>
                   </tr>
                   <tr>
@@ -205,9 +206,9 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
               <h4 className="font-bold text-slate-800">Нормы Федерального закона № 152-ФЗ РФ:</h4>
               <ul className="list-disc list-inside space-y-1 text-slate-600 pl-1 leading-relaxed">
                 <li><strong>Автоматическое автоинформирование:</strong> при соединении озвучивается уведомление о записи для контроля качества;</li>
-                <li><strong>Журнал согласий:</strong> фиксация даты, маскированного номера и хэша согласия на обработку биометрии/речи;</li>
-                <li><strong>Обезличивание:</strong> перед отправкой в нейросеть Сбер GigaChat из текста вырезаются телефоны, фамилии и платежные данные;</li>
-                <li><strong>Автоматическая архивация в S3:</strong> звонки старше TTL_LOG_DAYS дней шифруются (AES-256-GCM) и архивируются в S3-хранилище для соблюдения регламентных сроков хранения персональных данных.</li>
+                <li><strong>Журнал согласий:</strong> фиксация даты, маскированного номера и идентификатора согласия на обработку аудиозаписи;</li>
+                <li><strong>Сквозное обезличивание:</strong> перед отправкой в нейросеть, в экспорт CSV/PDF (StatsGrid и реестры) и в сообщения VK (как по отдельным звонкам, так и в ежедневную сводку) телефоны и персональные данные принудительно маскируются;</li>
+                <li><strong>Шифрование и архивация в S3:</strong> хранилище шифруется (AES-256-GCM), синхронизируется пакетно в S3 Timeweb Cloud, а звонки старше TTL_LOG_DAYS автоматически архивируются.</li>
               </ul>
             </div>
           </div>
@@ -219,10 +220,10 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
             <div className="border-b border-slate-200 pb-3">
               <h1 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                 <SlidersHorizontal className="w-5 h-5 text-indigo-600" />
-                3. Журнал звонков и умная панель фильтрации
+                3. Журнал звонков, фильтры и массовый анализ
               </h1>
               <p className="text-xs text-slate-500 mt-0.5">
-                Мгновенный поиск и сортировка обращений по ключевым управленческим критериям.
+                Мгновенный поиск, сортировка обращений и отказоустойчивый массовый переанализ.
               </p>
             </div>
 
@@ -232,7 +233,7 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                   <span className="w-2 h-2 rounded-full bg-indigo-600" /> Фильтр по дате и периоду
                 </div>
                 <p className="text-slate-600 leading-relaxed">
-                  Пресеты «Сегодня», «Вчера», «7 дней», «30 дней», «Этот месяц», а также выбор точного диапазона дат в местном часовом поясе (Europe/Samara, UTC+4).
+                  Пресеты «Сегодня», «Вчера», «7 дней», «30 дней», «Этот месяц», а также выбор точного диапазона дат в часовом поясе салона (Europe/Samara, UTC+4).
                 </p>
               </div>
 
@@ -250,7 +251,7 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                   <span className="w-2 h-2 rounded-full bg-indigo-600" /> Оценка ИИ (Шкала 1–10)
                 </div>
                 <p className="text-slate-600 leading-relaxed">
-                  Сортировка: «Отличные (8-10)» для премирования, «Средние (5-7)» для анализа точек роста, «Низкие (1-4)» для разбора ошибок.
+                  Сортировка: «Отличные (8-10)», «Средние (5-7)», «Низкие (1-4)». Короткие/пустые вызовы (Класс A) имеют оценку «—» и не искажают средний балл.
                 </p>
               </div>
 
@@ -259,7 +260,7 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                   <span className="w-2 h-2 rounded-full bg-indigo-600" /> Тональность диалога
                 </div>
                 <p className="text-slate-600 leading-relaxed">
-                  Фильтрация по эмоциональному настрою: Позитивная (клиент доволен), Нейтральная (деловой контакт), Негативная / Спорная (жалобы, возражения).
+                  Фильтрация по эмоциональному настрою: Позитивная, Нейтральная, Негативная / Спорная (жалобы, возражения).
                 </p>
               </div>
             </div>
@@ -267,7 +268,14 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
             <div className="p-4 rounded-xl border border-amber-200 bg-amber-50/50 text-xs space-y-1 text-amber-950">
               <span className="font-bold block">Быстрые пресеты (Chips):</span>
               <p className="leading-relaxed text-amber-900">
-                В верхней части панели доступны быстрые кнопки-чипы: «Претензии/Споры», «Запись оформлена», «Отказы», «Низкий балл (&lt;5)», «Высокий балл (8+)», «Пропущенные». Чипы отображают точный счетчик звонков в реальном времени.
+                В верхней части панели доступны быстрые кнопки-чипы: «Претензии/Споры», «Запись оформлена», «Отказы», «Низкий балл (&lt;5)», «Высокий балл (8+)», «Пропущенные» с точным счётчиком звонков.
+              </p>
+            </div>
+
+            <div className="p-4 rounded-xl border border-emerald-200 bg-emerald-50/40 text-xs space-y-1 text-emerald-950">
+              <span className="font-bold block">Устойчивость массового переанализа к рестартам:</span>
+              <p className="leading-relaxed text-emerald-900">
+                Очередь массового анализа сохраняется в хранилище (какие звонки обработаны, а какие ожидают). После перезапуска сервера прогон автоматически продолжается с места остановки, а причина каждого рестарта фиксируется в системном логе.
               </p>
             </div>
           </div>
@@ -279,61 +287,66 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
             <div className="border-b border-slate-200 pb-3">
               <h1 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                 <Activity className="w-5 h-5 text-indigo-600" />
-                4. Анализ диалога, резюме и оценка качества
+                4. Анализ диалога, классы A/B/C, Repair и Verifier
               </h1>
               <p className="text-xs text-slate-500 mt-0.5">
-                Структурированный паспорт вызова, извлечение параметров записи и аналитические выводы.
+                8 обязательных параметров резюме, 10 критериев аудита с цитатами и двухпроходная верификация фактов.
               </p>
             </div>
 
             <div className="space-y-3 text-xs">
               <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/60 space-y-2">
                 <span className="font-bold text-slate-800 text-[11px] uppercase tracking-wider block">
-                  1. Карточка сути обращения (Параметры записи):
+                  1. 8 обязательных параметров резюме звонка:
                 </span>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
-                  <div className="p-2 bg-white rounded-lg border border-slate-200">
-                    <span className="text-[10px] text-slate-400 block font-semibold">Услуга</span>
-                    <span className="font-bold text-slate-800">стрижка, окрашивание</span>
-                  </div>
-                  <div className="p-2 bg-white rounded-lg border border-slate-200">
-                    <span className="text-[10px] text-slate-400 block font-semibold">Дата</span>
-                    <span className="font-bold text-slate-800">завтра / 15 ноября</span>
-                  </div>
-                  <div className="p-2 bg-white rounded-lg border border-slate-200">
-                    <span className="text-[10px] text-slate-400 block font-semibold">Время</span>
-                    <span className="font-bold text-slate-800">14:00</span>
-                  </div>
-                  <div className="p-2 bg-white rounded-lg border border-slate-200">
-                    <span className="text-[10px] text-slate-400 block font-semibold">Мастер</span>
-                    <span className="font-bold text-slate-800">Елена</span>
-                  </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {[
+                    { label: '1. Цель обращения', val: 'без подстановки приветствий' },
+                    { label: '2. Услуга', val: 'стрижка, маникюр, окрашивание' },
+                    { label: '3. Мастер', val: 'сверка со списком YClients' },
+                    { label: '4. Стоимость', val: 'озвученная цена / «не озвучено»' },
+                    { label: '5. Дата и время', val: 'предложенные или итоговые слоты' },
+                    { label: '6. Статус записи', val: 'запись / подтверждение / перенос' },
+                    { label: '7. Причина отказа', val: 'если запись не состоялась' },
+                    { label: '8. Next Steps', val: 'дальнейшие шаги менеджера' },
+                  ].map((item) => (
+                    <div key={item.label} className="p-2 bg-white rounded-lg border border-slate-200">
+                      <span className="text-[10px] text-slate-400 block font-semibold">{item.label}</span>
+                      <span className="font-bold text-slate-800 text-[11px]">{item.val}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
 
               <div className="p-3.5 rounded-xl border border-indigo-200 bg-indigo-50/30 space-y-2">
                 <span className="font-bold text-indigo-950 text-[11px] uppercase tracking-wider block">
-                  2. Четырёхчастное резюме звонка (Регламент аудита):
+                  2. Классификация звонков (Классы A / B / C) и честный аудит по 10 критериям:
                 </span>
                 <ul className="space-y-1.5 text-slate-700 leading-relaxed">
-                  <li><strong>Суть обращения:</strong> кратко фиксирует услугу, дату, время и имя мастера;</li>
-                  <li><strong>Краткий пересказ разговора (2–4 предложения):</strong> связное описание диалога: с чем обратился клиент, какие слоты предложил сотрудник, что согласовано;</li>
-                  <li><strong>Вывод и итог:</strong> финальный результат звонка (запись подтверждена, отказ по причине отъезда, справочная консультация);</li>
-                  <li><strong>Разбор работы менеджера (оценка X/10):</strong>
-                    <div className="mt-1 pl-3 border-l-2 border-rose-300 space-y-1 text-slate-600">
-                      <div><strong className="text-rose-900">• Ошибки и недочёты:</strong> подробный перечень конкретных упущений сотрудника (не предложена альтернатива при отказе, пассивное завершение звонка, отсутствие допродажи сопутствующих услуг, не озвучен регламент напоминания), которые привели к снижению балла. При 10/10 — «Грубых ошибок не допущено».</div>
-                      <div><strong className="text-emerald-900">• Советы по оптимизации:</strong> практические рекомендации для скрипта и регламента общения администратора, составленные строго исходя из выявленных ошибок.</div>
-                    </div>
-                  </li>
+                  <li><strong>Класс A (короткие/пустые вызовы, автоинформатор, «Алло — Алло», «Номер занят»):</strong> статус «Не применимо», оценка <code>null</code>, 0 критериев, без ошибок и без вердикта «требуется обучение». Содержательные короткие звонки с фактами записи («мы пока предварительно забронировали с 12 до 2») защищены и оцениваются как Класс C.</li>
+                  <li><strong>Класс B (частичный контакт / обрыв связи, справочный запрос «Можно Елену? — Её сейчас нет»):</strong> Критерий 9 («Закрытие на запись») не штрафуется, вердикт «требуется обучение» запрещён, формируются практические шаги для перезвона.</li>
+                  <li><strong>Исходящие подтверждения и обзвоны:</strong> при подтверждении существующей записи («да, я буду») Критерий 9 оценивается на 9–10 баллов (формулировки «бронь не оформлена» запрещены). При коротком обзвоне с отказом («не могу говорить») — статус «Консультация / отказ» без жёсткого штрафа и рекомендация повторного обзвона.</li>
+                  <li><strong>ASR-искажения названия салона:</strong> фонетические искажения («лис 28», «от, а, 28», «лик 28») сопоставляются с брендом «LIQ28» — менеджер не штрафуется по Критерию 1.</li>
+                </ul>
+              </div>
+
+              <div className="p-3.5 rounded-xl border border-emerald-200 bg-emerald-50/30 space-y-2">
+                <span className="font-bold text-emerald-950 text-[11px] uppercase tracking-wider block">
+                  3. Программный авто-ремонт (Repair) и фактчекер (Verifier):
+                </span>
+                <ul className="list-disc list-inside space-y-1 text-slate-700 pl-1 leading-relaxed">
+                  <li><strong>Контроль цитат и говорящего:</strong> проверяется, что цитата в резюме реально принадлежит нужному участнику, а фраза-приветствие не подставлена в «Цель обращения»;</li>
+                  <li><strong>Контроль «интерес → отказ»:</strong> при отказе клиента неподтверждённые услуга/дата/время не выдаются за факт;</li>
+                  <li><strong>Подтверждение составных фактов (синтез-полей):</strong> Verifier подтверждает корректные обобщения (например, перенос записи к другому мастеру без изменения цены и времени) без ложных флагов, а неподтверждённые утверждения помечает как «требует проверки».</li>
                 </ul>
               </div>
 
               <div className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-2">
                 <span className="font-bold text-slate-800 text-[11px] uppercase tracking-wider block">
-                  3. Ре-анализ и смена модели:
+                  4. Ре-анализ и модель по умолчанию GigaChat:Ultra:
                 </span>
                 <p className="text-slate-600 leading-relaxed">
-                  Кнопка «Переанализировать» в тулбаре позволяет повторно запустить транскрибацию и анализ звонка с выбором более мощной модели нейросети (GigaChat:Pro или GigaChat:Max) при возникновении спорных ситуаций.
+                  Модель анализа по умолчанию — <strong>GigaChat:Ultra</strong>. Кнопка «Переанализировать» в карточке звонка позволяет повторно запустить анализ с выбором модели (<code>Ultra</code>, <code>Max</code>, <code>Pro</code>, <code>Lite</code>) или перетранскрибацию выбранным STT-провайдером.
                 </p>
               </div>
 
@@ -341,10 +354,10 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
               <div className="p-4 rounded-xl border border-rose-300 bg-gradient-to-br from-rose-50/70 to-amber-50/40 space-y-2.5">
                 <span className="font-bold text-rose-950 text-[11px] uppercase tracking-wider flex items-center gap-1.5">
                   <span className="px-1.5 py-0.5 rounded bg-emerald-600 text-white font-black text-[10px]">AI</span>
-                  <span>4. Кнопка «Уточнить контекст у ИИ» (GigaChat):</span>
+                  <span>5. Кнопка «Уточнить контекст у ИИ» (GigaChat):</span>
                 </span>
                 <p className="text-slate-700 leading-relaxed">
-                  Позволяет задать любой дополнительный вопрос по конкретному диалогу напрямую в <strong>GigaChat</strong> для получения уточненной выжимки, сверки обещаний или проверки фактов.
+                  Позволяет задать любой дополнительный вопрос по конкретному диалогу напрямую в <strong>GigaChat</strong> для получения уточнённой выжимки, сверки обещаний или проверки фактов.
                 </p>
                 <ul className="list-disc list-inside space-y-1 text-slate-600 pl-1 leading-relaxed">
                   <li><strong>Быстрые шаблоны:</strong> готовые подсказки для мгновенной проверки согласованных цен, скидок, реквизитов предоплаты, даты, времени и мастера;</li>
@@ -375,7 +388,7 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                 Как работает генератор Next Steps:
               </h3>
               <p className="text-slate-700 leading-relaxed">
-                Искусственный интеллект GigaChat детально анализирует содержание разговора, зафиксированные договоренности, обещания сотрудника («я уточню у мастера», «отправлю прайс», «перезвоню через час»), статус записи и эмоциональный тон, после чего формирует от 3 до 5 прикладных шагов для администратора салона.
+                Искусственный интеллект GigaChat анализирует содержание разговора, зафиксированные договорённости, обещания сотрудника («уточню у мастера», «отправлю прайс», «перезвоню через час»), статус записи и эмоциональный тон, после чего формирует конкретный список шагов для администратора салона.
               </p>
             </div>
 
@@ -387,25 +400,23 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
               <div className="space-y-2">
                 <div className="p-3 rounded-xl border border-emerald-200 bg-emerald-50/40 space-y-1">
                   <div className="font-bold text-emerald-900 flex items-center gap-1.5">
-                    <Check className="w-4 h-4 text-emerald-600" /> При успешной записи (Согласие):
+                    <Check className="w-4 h-4 text-emerald-600" /> При успешной записи или переносе:
                   </div>
                   <ul className="list-disc list-inside space-y-0.5 text-slate-700 pl-1 leading-relaxed">
-                    <li>Внести подтвержденную запись клиента Ольги в CRM Yclients (стрижка, 15 ноября в 14:00 к Елене);</li>
-                    <li>Отправить клиенту подтверждение бронирования и адрес студии в WhatsApp/SMS;</li>
-                    <li>Проверить график мастера Елены и забронировать расходные материалы;</li>
-                    <li>Установить автоматическое напоминание за 24 часа до визита для подтверждения явки.</li>
+                    <li>Проверить и подтвердить запись клиента в расписании мастера;</li>
+                    <li>Отправить подтверждение бронирования и адрес студии в мессенджер;</li>
+                    <li>Запланировать напоминание за 24 часа до визита (если визит не сегодня).</li>
                   </ul>
                 </div>
 
                 <div className="p-3 rounded-xl border border-rose-200 bg-rose-50/40 space-y-1">
                   <div className="font-bold text-rose-900 flex items-center gap-1.5">
-                    <AlertTriangle className="w-4 h-4 text-rose-600" /> При претензии или споре:
+                    <AlertTriangle className="w-4 h-4 text-rose-600" /> При претензии, обрыве или отказе на обзвоне:
                   </div>
                   <ul className="list-disc list-inside space-y-0.5 text-slate-700 pl-1 leading-relaxed">
-                    <li>Зафиксировать инцидент в журнале претензий и передать управляющему салона «{salonName}»;</li>
-                    <li>Поднять историю предыдущих визитов клиента и подготовить фактуру по замечаниям;</li>
-                    <li>Согласовать вариант сервисной компенсации или скидки для сохранения лояльности;</li>
-                    <li>Связаться с клиентом в течение 2 часов для обратной связи.</li>
+                    <li>При споре: зафиксировать инцидент и передать управляющему салона «{salonName}»;</li>
+                    <li>При обрыве связи или отказе «не могу говорить»: запланировать повторный обзвон;</li>
+                    <li>При отсутствии мастера: перезвонить клиенту, когда мастер будет доступен.</li>
                   </ul>
                 </div>
               </div>
@@ -415,14 +426,12 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                   Интерактивные возможности чек-листа:
                 </h4>
                 <ul className="list-disc list-inside space-y-1 text-slate-600 pl-1 leading-relaxed">
-                  <li><strong>Отметка выполнения:</strong> администратор нажимает на пункт, и задача помечается выполненной со зачеркиванием текста и мгновенным сохранением в БД;</li>
-                  <li><strong>Копирование в буфер:</strong> кнопка «Копировать» форматирует весь список задач для вставки в рабочий чат администраторов;</li>
-                  <li><strong>Ручное добавление:</strong> ссылка «Добавить задачу» позволяет дописать любую нестандартную задачу;</li>
-                  <li><strong>Пересчет ИИ:</strong> кнопка «Обновить ИИ» формирует свежий актуализированный перечень задач.</li>
+                  <li><strong>Отметка выполнения:</strong> клик по пункту помечает задачу выполненной с мгновенным сохранением в БД;</li>
+                  <li><strong>Копирование в буфер:</strong> кнопка «Копировать» форматирует список задач для вставки в рабочий чат;</li>
+                  <li><strong>Ручное добавление и пересчёт ИИ:</strong> добавление своих задач и кнопка «Обновить ИИ».</li>
                 </ul>
               </div>
 
-              {/* Dedicated Tab & Floating Reminders Documentation */}
               <div className="p-4 rounded-xl border border-purple-300 bg-purple-50/50 space-y-3">
                 <h4 className="font-bold text-purple-950 text-xs flex items-center gap-2">
                   <ListTodo className="w-4 h-4 text-purple-600" />
@@ -434,15 +443,15 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                       <ListTodo className="w-3.5 h-3.5 text-purple-600" /> Единая вкладка контроля шагов:
                     </div>
                     <p className="text-[11px] leading-relaxed text-slate-600">
-                      В верхнем меню приложения доступна отдельная вкладка с бейджем незавершенных звонков. На ней сгруппированы карточки всех диалогов, где остались открытые шаги, со строкой поиска, фильтрацией по операторам, прогресс-баром и кнопкой «Отметить все».
+                      В верхнем меню доступна отдельная вкладка с бейджем незавершённых звонков, поиском, фильтрацией по операторам, прогресс-баром и кнопкой «Отметить все».
                     </p>
                   </div>
                   <div className="bg-white p-3 rounded-xl border border-purple-200/80 space-y-1.5">
                     <div className="font-bold text-slate-900 text-xs flex items-center gap-1.5">
-                      <Bell className="w-3.5 h-3.5 text-amber-600" /> Всплывающие напоминания в углу:
+                      <Bell className="w-3.5 h-3.5 text-amber-600" /> Всплывающие напоминания:
                     </div>
                     <p className="text-[11px] leading-relaxed text-slate-600">
-                      В правом нижнем углу экрана автоматически появляется интерактивное уведомление с количеством зависших задач, превью ближайшего действия и кнопками: «Открыть задачи», «+15 мин» (отложить) или «Свернуть» в компактный плавающий бейдж.
+                      В правом нижнем углу экрана автоматически появляется интерактивное уведомление с кнопками «Открыть задачи», «+15 мин» (отложить) и «Свернуть».
                     </p>
                   </div>
                 </div>
@@ -457,10 +466,20 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
             <div className="border-b border-slate-200 pb-3">
               <h1 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                 <Download className="w-5 h-5 text-indigo-600" />
-                6. Экспорт отчетов (CSV & PDF для управляющего)
+                6. Экспорт отчётов (StatsGrid, CSV &amp; PDF по 152-ФЗ)
               </h1>
               <p className="text-xs text-slate-500 mt-0.5">
-                Выгрузка сводных реестров звонков и персональных аудитов в стандартизированных форматах.
+                Выгрузка обезличенной аналитики за период, сводных реестров и персональных аудитов звонков.
+              </p>
+            </div>
+
+            <div className="p-4 rounded-xl border border-indigo-200 bg-indigo-50/40 space-y-1.5 text-xs">
+              <div className="font-bold text-indigo-950 flex items-center gap-2">
+                <BarChart3 className="w-4 h-4 text-indigo-600" />
+                <span>Кнопка «Экспорт отчета» в блоке сводной аналитики (StatsGrid)</span>
+              </div>
+              <p className="text-slate-700 leading-relaxed">
+                В верхней панели статистики администраторам и управляющим доступна кнопка <strong>«Экспорт отчета»</strong> для мгновенного скачивания обезличенных данных аналитики звонков в формате <strong>CSV</strong> или <strong>PDF</strong> (в полном соответствии со 152-ФЗ — без открытых телефонов и ФИО клиентов) для подготовки внутренней отчётности.
               </p>
             </div>
 
@@ -471,36 +490,36 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                   <span>Таблица в CSV (Microsoft Excel)</span>
                 </div>
                 <p className="text-slate-600 leading-relaxed">
-                  Файл формируется с кодировкой UTF-8 BOM и стандартным разделителем точка с запятой (;), что гарантирует открытие в русскоязычном Excel без сбоев кодировки.
+                  Кодировка UTF-8 BOM, разделитель «;» и защита от CSV-инъекций — корректное открытие в русскоязычном Excel без сбоев кодировки.
                 </p>
                 <div className="bg-white p-2.5 rounded-lg border border-emerald-200 text-[11px] text-slate-700 space-y-1">
                   <span className="font-semibold block text-emerald-800">Содержит:</span>
                   <span>• Сводный блок ключевых метрик KPI управляющего;</span><br />
-                  <span>• 27 детальных столбцов паспорта каждого диалога (Самара UTC+4, маскированный телефон, статус записи, мастер, оценка, суть, резюме диалога).</span>
+                  <span>• Обезличенный реестр звонков с датой (UTC+4), статусом записи, мастером, оценкой и резюме диалога.</span>
                 </div>
               </div>
 
               <div className="p-4 rounded-xl border border-rose-200 bg-rose-50/30 space-y-2">
                 <div className="flex items-center gap-2 text-rose-900 font-bold">
                   <FileText className="w-5 h-5 text-rose-600" />
-                  <span>Сводный реестр в PDF (А4 Альбомный)</span>
+                  <span>Официальный отчёт в PDF (А4 Альбомный)</span>
                 </div>
                 <p className="text-slate-600 leading-relaxed">
-                  Официальный презентационный документ для управляющего салоном с фирменным логотипом и названием «{salonName}».
+                  Презентационный документ для руководства салона «{salonName}» со встроенными кириллическими шрифтами LiberationSans.
                 </p>
                 <div className="bg-white p-2.5 rounded-lg border border-rose-200 text-[11px] text-slate-700 space-y-1">
                   <span className="font-semibold block text-rose-800">Содержит:</span>
-                  <span>• 6 сводных KPI-карточек (конверсия %, отказы %, споры %, средний балл);</span><br />
-                  <span>• Таблицу вызовов с цветовой кодировкой статусов и оценок;</span><br />
-                  <span>• Блок согласования и подписи управляющего салоном с датой утверждения.</span>
+                  <span>• Сводные KPI-карточки (конверсия %, отказы %, споры %, средний балл);</span><br />
+                  <span>• Обезличенную таблицу вызовов с цветовой кодировкой статусов и оценок;</span><br />
+                  <span>• Блок согласования и подписи управляющего салоном.</span>
                 </div>
               </div>
             </div>
 
             <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50 space-y-1 text-xs text-slate-700">
-              <span className="font-bold text-slate-900">Как выполнить экспорт:</span>
+              <span className="font-bold text-slate-900">Дополнительные точки экспорта:</span>
               <p className="leading-relaxed">
-                В шапке «Журнала звонков» нажмите кнопку <strong>«Экспорт»</strong>. Выберите нужный объем данных: «Текущая выборка» (с учетом всех фильтров по датам, операторам, тональности) или «Вся таблица» базы данных.
+                Помимо кнопки <strong>«Экспорт отчета»</strong> в панели статистики, экспорт доступен в шапке «Журнала звонков» (по текущей выборке фильтров или всей базе) и внутри карточки каждого отдельного звонка («PDF» и «CSV 152-ФЗ»).
               </p>
             </div>
           </div>
@@ -512,10 +531,10 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
             <div className="border-b border-slate-200 pb-3">
               <h1 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                 <Database className="w-5 h-5 text-indigo-600" />
-                7. Внешние интеграции (МегаФон, Yclients, VK, S3)
+                7. Внешние интеграции (МегаФон, STT, VK, YClients, S3)
               </h1>
               <p className="text-xs text-slate-500 mt-0.5">
-                Автоматический обмен данными между телефонией, CRM и корпоративными мессенджерами.
+                Обмен данными с телефонией, сервисами распознавания речи, VK, YClients и облачным хранилищем S3.
               </p>
             </div>
 
@@ -525,34 +544,44 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                   <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" /> МегаФон Виртуальная АТС
                 </span>
                 <p className="text-slate-600 leading-relaxed">
-                  Поддержка протоколов JSON-RPC и REST WCGP. Прием вебхуков о завершении вызовов, скачивание аудиозаписей диалогов и автоматический запуск транскрибации.
+                  Поддержка протоколов JSON-RPC и REST WCGP. Приём вебхуков о завершении вызовов, периодический опрос истории, скачивание аудиозаписей и автоматический запуск анализа.
                 </p>
               </div>
 
               <div className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-1.5 shadow-3xs">
                 <span className="font-bold text-slate-900 flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500" /> Yclients CRM (только чтение мастеров)
+                  <span className="w-2.5 h-2.5 rounded-full bg-indigo-500" /> Распознавание речи (GigaASR / SpeechKit / T-Bank VoiceKit)
                 </span>
                 <p className="text-slate-600 leading-relaxed">
-                  Доступ ограничен режимом «только чтение»: аутентификация по логину и паролю (+ <code className="font-mono">YCLIENTS_PARTNER_TOKEN</code>) используется исключительно для получения актуального списка мастеров салона. Запись и изменение данных в Yclients не производятся.
+                  Поддерживаются три провайдера STT: <strong>GigaASR / GigaAM v3 (Cloud.ru)</strong>, <strong>Yandex Cloud SpeechKit</strong> и <strong>T-Bank VoiceKit</strong>. Работают очередь ASR, автоматические ретраи при сетевых сбоях и изолированный выбор провайдера при ручной перетранскрибации.
+                </p>
+              </div>
+
+              <div className="p-3.5 rounded-xl border border-sky-200 bg-sky-50/30 space-y-1.5 shadow-3xs">
+                <span className="font-bold text-slate-900 flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-sky-500" /> ВКонтакте: карточки звонков и ежедневная сводка после 21:00
+                </span>
+                <ul className="list-disc list-inside space-y-1 text-slate-600 pl-1 leading-relaxed">
+                  <li><strong>Обязательный краткий пересказ диалога:</strong> каждое уведомление по звонку в VK обязательно содержит отдельный блок <code>📝 Краткий пересказ диалога</code> (переменная <code>{'{short_summary}'}</code> — добавляется автоматически даже в пользовательский шаблон) с маскированием телефонов по 152-ФЗ;</li>
+                  <li><strong>Ежедневная сводка KPI после 21:00:</strong> автоматическая выгрузка итогов дня (количество звонков, пропущенные, конверсия, записи по видам услуг и мастерам, средние оценки администраторов). В «Интеграциях» и «Администрировании» доступны настройка времени (от 21:00) и кнопка ручной выгрузки <strong>«Выгрузить итоги дня в VK»</strong>.</li>
+                </ul>
+              </div>
+
+              <div className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-1.5 shadow-3xs">
+                <span className="font-bold text-slate-900 flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500" /> YClients CRM (строго «только чтение» мастеров)
+                </span>
+                <p className="text-slate-600 leading-relaxed">
+                  Доступ ограничен режимом «только чтение»: аутентификация по логину и паролю (+ <code className="font-mono">YCLIENTS_PARTNER_TOKEN</code>) используется исключительно для получения актуального списка мастеров салона. Запись и изменение данных в YClients отключены.
                 </p>
               </div>
 
               <div className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-1.5 shadow-3xs">
                 <span className="font-bold text-slate-900 flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-sky-500" /> ВКонтакте (Закрытый чат)
+                  <span className="w-2.5 h-2.5 rounded-full bg-purple-500" /> S3 Timeweb Cloud (пакетная синхронизация и архивация)
                 </span>
                 <p className="text-slate-600 leading-relaxed">
-                  Мгновенная отправка уведомлений о записавшихся клиентах, низкой оценке администратора или конфликтном разговоре в закрытую беседу управляющих в VK.
-                </p>
-              </div>
-
-              <div className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-1.5 shadow-3xs">
-                <span className="font-bold text-slate-900 flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-purple-500" /> S3 Timeweb Cloud Резервирование
-                </span>
-                <p className="text-slate-600 leading-relaxed">
-                  Автоматическая синхронизация зашифрованного хранилища базы данных (AES-256-GCM) в облачное объектное S3-хранилище каждые 5 минут для предотвращения потери данных.
+                  Зашифрованное хранилище (AES-256-GCM) синхронизируется в S3 <strong>пакетно с дебаунсом</strong> (каждые 30–60 сек или по достижении N изменений), с 3 автоматическими попытками ретрая (5–15–30 сек), подробным логированием ошибок SDK и гарантированным сохранением по завершении очереди и перед рестартом сервера.
                 </p>
               </div>
             </div>
@@ -578,10 +607,10 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
 
             <div className="p-4 rounded-xl border border-indigo-100 bg-indigo-50/40 text-xs text-indigo-900 space-y-2">
               <p className="font-semibold text-indigo-950">
-                Полный технический паспорт системы сохранен в файле <code className="bg-white px-1.5 py-0.5 rounded border border-indigo-200 font-mono">TECHNICAL_DOCUMENTATION.md</code> в корне репозитория.
+                Полный технический паспорт системы сохранён в файле <code className="bg-white px-1.5 py-0.5 rounded border border-indigo-200 font-mono">TECHNICAL_DOCUMENTATION.md</code>, а реестр переменных — в <code className="bg-white px-1.5 py-0.5 rounded border border-indigo-200 font-mono">ENV_VARIABLES.md</code>.
               </p>
               <p className="text-slate-600 leading-relaxed">
-                Ниже приведена сводка по технологическому стеку, механизмам получения записей с АТС МегаФон и последовательности обработки звонков ИИ.
+                Ниже приведена актуальная сводка по технологическому стеку, интеграциям и многоступенчатому конвейеру анализа звонков версии 3.0.
               </p>
             </div>
 
@@ -591,12 +620,12 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                   <Database className="w-4 h-4 text-indigo-600" /> Стек разработки
                 </span>
                 <ul className="text-slate-600 space-y-1 list-disc pl-4 leading-relaxed">
-                  <li><strong>Frontend:</strong> React 18, TypeScript, Tailwind CSS, Lucide React, Vite.</li>
-                  <li><strong>Backend:</strong> Node.js 22, Express, TypeScript, esbuild (bundle <code>dist/server.cjs</code>).</li>
-                  <li><strong>Распознавание речи (STT):</strong> Yandex Cloud SpeechKit (русская речь, диаризация ролей).</li>
-                  <li><strong>Нейросеть (LLM):</strong> Сбер GigaChat (Lite/Pro/Max) через доверенные сертификаты Минцифры РФ.</li>
-                  <li><strong>Безопасность:</strong> AES-256-GCM шифрование локальной базы, маскирование номеров 152-ФЗ.</li>
-                  <li><strong>Резервное копирование и архивация 152-ФЗ:</strong> S3 Timeweb Cloud (@aws-sdk/client-s3), автоматическая архивация звонков старше TTL_LOG_DAYS дней.</li>
+                  <li><strong>Frontend:</strong> React 19, TypeScript, Tailwind CSS, Lucide React, Recharts, Vite.</li>
+                  <li><strong>Backend:</strong> Node.js 22, Express, TypeScript, esbuild (bundle <code>dist/server.cjs</code>), node-cron.</li>
+                  <li><strong>Распознавание речи (STT):</strong> GigaASR / GigaAM v3 (Cloud.ru), Yandex SpeechKit, T-Bank VoiceKit (с очередью и ретраями).</li>
+                  <li><strong>Нейросеть (LLM):</strong> Сбер GigaChat (<code>Ultra</code> по умолчанию, <code>Max</code>/<code>Pro</code>/<code>Lite</code>) через сертификаты Минцифры РФ.</li>
+                  <li><strong>Безопасность:</strong> AES-256-GCM шифрование БД, маскирование 152-ФЗ, журнал согласий и аудита.</li>
+                  <li><strong>Резервирование и надёжность:</strong> пакетный S3-синк с бэкоффом, персистентная очередь массового анализа, логирование причин рестартов.</li>
                 </ul>
               </div>
 
@@ -606,10 +635,10 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                 </span>
                 <div className="text-slate-600 space-y-2 leading-relaxed">
                   <p>
-                    <strong>Версия 1 (Push / Webhooks):</strong> АТС отправляет HTTP POST вебхуки на <code>/crm_integration.php</code> или <code>/api/calls/webhook</code> сразу после звонка (<code>cmd=history</code> с прямой ссылкой на MP3 и <code>cmd=event</code> для входящих звонков).
+                    <strong>Версия 1 (Push / Webhooks):</strong> АТС отправляет HTTP POST вебхуки на <code>/crm_integration.php</code> или <code>/api/calls/webhook</code> сразу после звонка (<code>cmd=history</code> с прямой ссылкой на MP3 и <code>cmd=event</code>).
                   </p>
                   <p>
-                    <strong>Версия 2 (Pull / WCGP REST):</strong> Сервер самостоятельно опрашивает шлюз <code>/sys/crm_api.wcgp</code> по расписанию (раз в 5-15 мин), разбирает CSV-реестр звонков и через команду <code>get.mgf_calls</code> получает прямые ссылки на записи.
+                    <strong>Версия 2 (Pull / WCGP REST):</strong> Сервер самостоятельно опрашивает шлюз <code>/sys/crm_api.wcgp</code> по расписанию (раз в 5–15 мин), разбирает CSV-реестр звонков и получает прямые ссылки на записи.
                   </p>
                 </div>
               </div>
@@ -617,16 +646,16 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
 
             <div className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-2 shadow-3xs text-xs">
               <span className="font-bold text-slate-900 flex items-center gap-1.5">
-                <Sparkles className="w-4 h-4 text-purple-600" /> Конвейер обработки звонка ИИ
+                <Sparkles className="w-4 h-4 text-purple-600" /> Конвейер обработки звонка (v3.0)
               </span>
               <ol className="text-slate-600 space-y-1.5 list-decimal pl-4 leading-relaxed">
-                <li><strong>Валидация длительности:</strong> звонки короче 10 секунд отсекаются (ИИ не галлюцинирует, оценка не ставится).</li>
-                <li><strong>Скачивание MP3:</strong> сервер загружает аудиофайл с медиасервера МегаФон в буфер оперативной памяти.</li>
-                <li><strong>STT Yandex SpeechKit:</strong> аудио преобразуется в текст с разделением «Менеджер» и «Клиент» и устранением дублей.</li>
-                <li><strong>Обезличивание 152-ФЗ:</strong> телефоны маскируются перед передачей во внешнюю нейросеть.</li>
-                <li><strong>Анализ GigaChat:</strong> определение статуса бронирования (согласие/отказ/консультация), сути обращения (услуга, мастер, дата, время), пересказа (2-4 предложения), оценки (1-10) и рекомендаций с учетом настроенного в админ-панели системного промпта.</li>
-                <li><strong>Генерация Next Steps:</strong> составление 3-5 конкретных задач администратору для CRM Yclients и мессенджеров.</li>
-                <li><strong>Журналирование и алерты:</strong> сохранение согласия в ConsentLog, запись в зашифрованную БД и алерт в VK/Telegram при спорах.</li>
+                <li><strong>Приём и скачивание MP3:</strong> дедупликация по ID, загрузка аудиозаписи с медиасервера МегаФон.</li>
+                <li><strong>STT и восстановление ролей:</strong> распознавание через GigaASR / SpeechKit / VoiceKit, склейка подряд идущих реплик и смысловое разделение «Менеджер» / «Клиент».</li>
+                <li><strong>Детекторы классов A/B/C и 152-ФЗ:</strong> отсечение пустых звонков и автоинформаторов без оценки (с защитой коротких содержательных диалогов), обезличивание перед LLM.</li>
+                <li><strong>Анализ GigaChat:Ultra:</strong> 8 параметров резюме, краткий пересказ, 10 критериев аудита с цитатами, ошибки, рекомендации (приоритет «модель → fallback» с логированием причины) и Next Steps.</li>
+                <li><strong>Программный авто-ремонт (Repair):</strong> исправление Критерия 1 при ASR-искажениях салона, Критерия 8 без отказа, Критерия 9 при подтверждении существующей записи, контроль цитат и ролей.</li>
+                <li><strong>Двухпроходный фактчекер (Verifier):</strong> сверка фактов и цитат со стенограммой (включая подтверждение составных фактов переноса записи), маркировка неподтверждённых полей.</li>
+                <li><strong>Сохранение, VK и S3:</strong> запись в зашифрованную БД, отправка в VK с обязательным кратким пересказом диалога, ежедневная сводка KPI после 21:00 и пакетный флаш в S3.</li>
               </ol>
             </div>
 
@@ -636,13 +665,12 @@ export function UserGuide({ salonName = 'Fashion Look Studio' }: UserGuideProps)
                 <SlidersHorizontal className="w-4 h-4 text-emerald-600" /> Настройка системного промпта ИИ в панели администратора
               </span>
               <p className="text-slate-600 leading-relaxed">
-                В панели администратора доступен гибкий редактор <strong>Системного промпта GigaChat</strong>. Он содержит директивы для языковой модели по извлечению параметров звонка:
+                В панели администратора доступен редактор <strong>Системного промпта GigaChat</strong> с поддержкой эталонных примеров (ПРИМЕР 1–17), актуального списка мастеров из YClients (Read-Only) и сброса к заводскому эталону:
               </p>
               <ul className="text-slate-600 space-y-1 list-disc pl-4 leading-relaxed">
-                <li><strong>Строгое написание ФИО с заглавной буквы:</strong> Все фамилии и имена специалистов и клиентов («Елена Валиулова», «Татьяна Валиулова», «Арина Егорова») автоматически извлекаются с прописной буквы, даже если в распознанной речи они звучали строчными буквами.</li>
-                <li><strong>Категорический фильтр паразитных фраз:</strong> Модели запрещено подставлять в поле мастера местоимения, частицы и глаголы вроде «Меня Вот», «Записались», «Будете», «Студио».</li>
-                <li><strong>Параметры услуги, даты и времени:</strong> Поддерживается нормализация устного счета («15 0 0» → «15:00») и фиксация дат («8 ноября», «5 января»).</li>
-                <li><strong>Кнопки быстрого управления:</strong> Быстрая вставка директив, загрузка заводского эталона в редактор и мгновенный сброс к значениям по умолчанию.</li>
+                <li><strong>Оба салона и ASR-искажения:</strong> корректная обработка «Fashion Look Studio» и «LIQ28» (включая фонетические искажения «лис 28», «от, а, 28»);</li>
+                <li><strong>Строгое написание ФИО и фильтр мусорных слов:</strong> автоматическая нормализация имён мастеров и исключение разговорных слов-паразитов;</li>
+                <li><strong>Контроль цитат и классов звонков:</strong> запрет подстановки приветствий в «Цель обращения», корректная работа с исходящими подтверждениями, обзвонами и справочными запросами.</li>
               </ul>
             </div>
           </div>

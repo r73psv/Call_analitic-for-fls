@@ -11,6 +11,7 @@ import {
   Copy, Check, PhoneCall, PhoneForwarded, Users, Info, Radio, Send
 } from 'lucide-react';
 import { SystemConfig, GigaChatModel, MegafonApiVersion } from '../types.js';
+import { DEFAULT_SALON_NAME } from '../services/salonBranding.js';
 import { S3SyncPanel } from './S3SyncPanel.js';
 
 interface IntegrationsPanelProps {
@@ -20,7 +21,7 @@ interface IntegrationsPanelProps {
 }
 
 export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: IntegrationsPanelProps) {
-  const [salonName, setSalonName] = useState(config.salonName || 'Fashion Look Studio');
+  const [salonName, setSalonName] = useState(config.salonName || DEFAULT_SALON_NAME);
   const [defaultModel, setDefaultModel] = useState<GigaChatModel>(
     config.default_gigachat_model || (config.activeModel as GigaChatModel) || 'GigaChat:Lite'
   );
@@ -344,7 +345,7 @@ export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: 
     try {
       const updatedConfig: SystemConfig = {
         ...config,
-        salonName: salonName.trim() || 'Fashion Look Studio',
+        salonName: salonName.trim() || config.salonName || DEFAULT_SALON_NAME,
         activeModel: defaultModel,
         default_gigachat_model: defaultModel,
         megafon: {
@@ -472,7 +473,7 @@ export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: 
               </div>
               <div>
                 <h3 className="text-sm font-bold text-slate-800">GigaChat (Сбер)</h3>
-                <p className="text-xs text-slate-500">Анализ звонков для салона «{salonName || 'Fashion Look Studio'}»</p>
+                <p className="text-xs text-slate-500">Анализ звонков для салона «{salonName || DEFAULT_SALON_NAME}»</p>
               </div>
             </div>
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">

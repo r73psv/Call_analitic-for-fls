@@ -5,6 +5,7 @@
 
 import React, { useState } from 'react';
 import { Lock, KeyRound, ShieldAlert, AlertCircle, X } from 'lucide-react';
+import { DEFAULT_SALON_NAME } from '../services/salonBranding.js';
 
 interface AdminPasswordPromptModalProps {
   isOpen: boolean;
@@ -21,7 +22,7 @@ export function AdminPasswordPromptModal({
   authToken,
   salonName,
 }: AdminPasswordPromptModalProps) {
-  const effectiveSalonName = salonName?.trim() || 'Fashion Look Studio';
+  const effectiveSalonName = salonName?.trim() || DEFAULT_SALON_NAME;
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
