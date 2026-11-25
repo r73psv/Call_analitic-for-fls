@@ -298,6 +298,7 @@ export interface CallRecord {
   summary_source?: 'model' | 'template';
   mistakes_source?: 'model' | 'template' | 'модель → fallback';
   feedback_source?: 'model' | 'template';
+  feedback_reason?: string;
   fallback_reason?: string;
 }
 
@@ -374,6 +375,11 @@ export interface VkConfig {
   chatId: string;
   enabled: boolean;
   template: string;
+  dailyReportEnabled?: boolean;
+  dailyReportTime?: string; // HH:MM (после 21:00, по умолчанию '21:05')
+  lastDailyReportDate?: string; // YYYY-MM-DD в часовом поясе салона
+  lastDailyReportSentAt?: string; // ISO timestamp последней успешной отправки
+  lastDailyReportError?: string; // текст последней ошибки автоотправки
 }
 
 export interface YclientsConfig {
@@ -571,7 +577,32 @@ export interface AnalysisResult {
   summary_source?: 'model' | 'template';
   mistakes_source?: 'model' | 'template' | 'модель → fallback';
   feedback_source?: 'model' | 'template';
+  feedback_reason?: string;
   fallback_reason?: string;
+}
+
+export interface BatchAnalysisQueueFailedItem {
+  callId: string;
+  error: string;
+  failedAt: string;
+}
+
+export interface BatchAnalysisQueueState {
+  id: string;
+  status: 'idle' | 'running' | 'completed' | 'paused';
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  modelOverride?: string;
+  sttProvider?: SttProvider;
+  forceRetranscribe?: boolean;
+  pendingCallIds: string[];
+  processedCallIds: string[];
+  failedCallIds: BatchAnalysisQueueFailedItem[];
+  currentCallId?: string | null;
+  totalCount: number;
+  resumeCount?: number;
+  lastResumedAt?: string;
 }
 
 export type NotificationType = 'call_analyzed' | 'dispute_detected' | 'booking_confirmed' | 'call_failed' | 'incoming_call';

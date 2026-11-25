@@ -1696,6 +1696,34 @@ export async function analyzeWithGigaChat(
     }
   }
 
+  // Гарантируем согласованность блока ошибок с критериями оценки (< 7) и в обычном (не верифицированном) пайплайне
+  if (draft.booking_status !== 'не применимо' && Array.isArray(draft.evaluation?.criteria)) {
+    const visitDateCtx =
+      draft.structured_summary?.offered_date_time ||
+      draft.key_facts?.offered_date_time ||
+      draft.key_facts?.date ||
+      null;
+    const reconciledDraft = reconcileMistakesWithCriteria(
+      draft.operator_mistakes || [],
+      draft.evaluation.criteria,
+      callTimestamp || draft.key_facts?.call_datetime || null,
+      visitDateCtx,
+      draft.formatted_transcript || transcript
+    );
+    if (
+      reconciledDraft.fixedFromCriteria ||
+      JSON.stringify(draft.operator_mistakes || []) !== JSON.stringify(reconciledDraft.mistakes)
+    ) {
+      draft.operator_mistakes = reconciledDraft.mistakes;
+      if (draft.transcript_summary) {
+        draft.transcript_summary = draft.transcript_summary.replace(
+          /(-\s*Ошибки и недочеты:\s*)[^\n]*/i,
+          `$1${reconciledDraft.mistakes.length > 0 ? reconciledDraft.mistakes.join('; ') : 'не выявлены'}`
+        );
+      }
+    }
+  }
+
   return draft;
 }
 
@@ -2736,7 +2764,8 @@ export function parseGigaChatJson(
       parsed.operator_mistakes !== undefined || (parsed.audit && parsed.audit.mistakes !== undefined)
         ? 'model'
         : 'модель → fallback';
-    console.log(`[Summary source: ${summarySrc}] [Mistakes source: ${notHappenedMistakesSrc}] [Feedback source: template]`);
+    const notHappenedFeedbackReason = 'разговор не состоялся (диалог отсутствует)';
+    console.log(`[Summary source: ${summarySrc}] [Mistakes source: ${notHappenedMistakesSrc}] [Feedback source: template (причина: ${notHappenedFeedbackReason})]`);
     return {
       is_conversation: false,
       transcript_summary:
@@ -2779,6 +2808,7 @@ export function parseGigaChatJson(
       summary_source: summarySrc,
       mistakes_source: notHappenedMistakesSrc,
       feedback_source: 'template',
+      feedback_reason: notHappenedFeedbackReason,
     };
   }
 
@@ -3032,13 +3062,48 @@ export function parseGigaChatJson(
     parsed.operator_comment && parsed.operator_comment.trim().length > 0
       ? parsed.operator_comment
       : `Администратор обработал обращение по регламенту салона «${salon}».`;
-  const hasModelRecommendationsField = parsed.recommendations !== undefined && parsed.recommendations !== null;
-  const rawModelRecommendations: string[] = Array.isArray(parsed.recommendations)
-    ? parsed.recommendations.map((r: any) => String(r ?? '').trim()).filter(Boolean)
-    : typeof parsed.recommendations === 'string' && parsed.recommendations.trim().length > 0
-    ? [parsed.recommendations.trim()]
-    : [];
-  const recommendations = hasModelRecommendationsField
+  // Ищем рекомендации модели во всех поддерживаемых полях ответа (recommendations, audit.recommendations, summary.recommendations, advice)
+  const rawRecCandidate =
+    parsed.recommendations !== undefined && parsed.recommendations !== null
+      ? parsed.recommendations
+      : rawAudit?.recommendations !== undefined && rawAudit?.recommendations !== null
+      ? rawAudit.recommendations
+      : rawSummaryObj?.recommendations !== undefined && rawSummaryObj?.recommendations !== null
+      ? rawSummaryObj.recommendations
+      : parsed.advice !== undefined && parsed.advice !== null
+      ? parsed.advice
+      : rawAudit?.advice !== undefined && rawAudit?.advice !== null
+      ? rawAudit.advice
+      : undefined;
+
+  let hasValidModelRecommendations = false;
+  let modelFeedbackInvalidReason: string | undefined;
+  let rawModelRecommendations: string[] = [];
+
+  if (rawRecCandidate === undefined || rawRecCandidate === null) {
+    hasValidModelRecommendations = false;
+    modelFeedbackInvalidReason = 'поле recommendations отсутствует в ответе модели';
+  } else if (Array.isArray(rawRecCandidate)) {
+    rawModelRecommendations = rawRecCandidate
+      .map((r: any) => (typeof r === 'string' || typeof r === 'number' ? String(r).trim() : ''))
+      .filter(Boolean);
+    // Валидный массив от модели (в том числе [] для идеальных/подтверждающих звонков) — приоритет модели!
+    hasValidModelRecommendations = true;
+  } else if (typeof rawRecCandidate === 'string') {
+    const trimmedRec = rawRecCandidate.trim();
+    if (trimmedRec.length > 0 && trimmedRec.toLowerCase() !== 'null') {
+      rawModelRecommendations = [trimmedRec];
+      hasValidModelRecommendations = true;
+    } else {
+      hasValidModelRecommendations = false;
+      modelFeedbackInvalidReason = 'пустая строка recommendations в ответе модели';
+    }
+  } else {
+    hasValidModelRecommendations = false;
+    modelFeedbackInvalidReason = `невалидный тип поля recommendations (${typeof rawRecCandidate})`;
+  }
+
+  const recommendations = hasValidModelRecommendations
     ? rawModelRecommendations
     : [`Соблюдать стандарты сервиса салона «${salon}».`];
 
@@ -3170,6 +3235,7 @@ export function parseGigaChatJson(
   let finalAdvice: string[];
   let mistakesSource: 'model' | 'template' | 'модель → fallback' = 'модель → fallback';
   let feedbackSource: 'model' | 'template' = 'template';
+  let feedbackReason: string | undefined;
 
   if (hasValidModelSummary) {
     // ПРИОРИТЕТ МОДЕЛИ: сохраняем summary.short_summary, summary.booking_done, summary.manager_next_steps,
@@ -3199,8 +3265,6 @@ export function parseGigaChatJson(
     };
 
     const usedModelMistakes = hasModelMistakesField;
-    const usedModelRecommendations =
-      hasModelRecommendationsField && (rawModelRecommendations.length > 0 || Array.isArray(parsed.recommendations));
 
     if (usedModelMistakes) {
       finalMistakes = filterOutdatedReminderMistakes(rawMistakes, callTimestamp, visitDateContext, fullTranscript);
@@ -3224,14 +3288,18 @@ export function parseGigaChatJson(
     );
     finalMistakes = reconciledModelMistakes.mistakes;
 
-    if (usedModelRecommendations) {
+    // Feedback: строгий приоритет «модель → fallback»
+    if (hasValidModelRecommendations) {
       finalAdvice = rawModelRecommendations;
+      feedbackSource = 'model';
+      feedbackReason = undefined;
     } else {
       finalAdvice = getLazyHarmonized().advice;
+      feedbackSource = 'template';
+      feedbackReason = modelFeedbackInvalidReason || 'поле recommendations отсутствует в ответе модели';
     }
 
     mistakesSource = usedModelMistakes ? 'model' : 'модель → fallback';
-    feedbackSource = usedModelMistakes || usedModelRecommendations ? 'model' : 'template';
 
     const serviceStr = essence.service || 'не указана';
     const dateStr = essence.date || 'не указана';
@@ -3358,13 +3426,41 @@ export function parseGigaChatJson(
       fullTranscript
     ).mistakes;
     mistakesSource = hasModelMistakesField ? 'model' : 'модель → fallback';
-    finalAdvice =
-      templateFormatted.advice && templateFormatted.advice.length > 0
-        ? templateFormatted.advice
-        : recArray;
+
+    // Даже если summary ушёл в fallback, валидные рекомендации модели имеют приоритет (кроме «не применимо»)
+    if (bookingStatus !== 'не применимо' && hasValidModelRecommendations) {
+      finalAdvice = rawModelRecommendations;
+      feedbackSource = 'model';
+      feedbackReason = undefined;
+    } else {
+      finalAdvice =
+        templateFormatted.advice && templateFormatted.advice.length > 0
+          ? templateFormatted.advice
+          : recArray;
+      feedbackSource = 'template';
+      feedbackReason =
+        bookingStatus === 'не применимо'
+          ? 'статус звонка «не применимо»'
+          : modelFeedbackInvalidReason || 'поле recommendations отсутствует в ответе модели';
+    }
+
+    // Синхронизируем строки «Ошибки и недочеты» и «Советы по оптимизации» в formattedSummary после reconcileMistakesWithCriteria
+    formattedSummary = formattedSummary
+      .replace(
+        /(-\s*Ошибки и недочеты:\s*)[^\n]*/i,
+        `$1${finalMistakes.length > 0 ? finalMistakes.join('; ') : 'не выявлены'}`
+      )
+      .replace(
+        /(-\s*Советы по оптимизации:\s*)[^\n]*/i,
+        `$1${finalAdvice.length > 0 ? finalAdvice.join('; ') : 'не требуются'}`
+      );
   }
 
-  console.log(`[Summary source: ${summarySource}] [Mistakes source: ${mistakesSource}] [Feedback source: ${feedbackSource}]`);
+  const feedbackLogTag =
+    feedbackSource === 'model'
+      ? '[Feedback source: model]'
+      : `[Feedback source: template (причина: ${feedbackReason || 'не указана'})]`;
+  console.log(`[Summary source: ${summarySource}] [Mistakes source: ${mistakesSource}] ${feedbackLogTag}`);
 
   const result: AnalysisResult = {
     is_conversation: true,
@@ -3416,6 +3512,7 @@ export function parseGigaChatJson(
     summary_source: summarySource,
     mistakes_source: mistakesSource,
     feedback_source: feedbackSource,
+    ...(feedbackReason ? { feedback_reason: feedbackReason } : {}),
   };
 
   // Прокидывание упущенных возможностей из ответа модели (ШАГ 7 системного промпта)
@@ -3441,23 +3538,29 @@ export function parseGigaChatJson(
   }
   result.missed_opportunities = missedOpportunities;
 
-  // Программная проверка согласованности + авто-исправление противоречия mistakes <-> критерии < 7 (приоритет критериев)
+  // Программная проверка согласованности + безусловная синхронизация mistakes <-> критерии < 7 (приоритет критериев)
   const check = validateResult(result, fullTranscript);
   if (!check.valid) {
     console.warn(`[GigaChat] Обнаружены несоответствия в ответе модели: ${check.errors.join('; ')}`);
-    if (check.errors.some((e) => e.includes('противоречие аудита'))) {
-      const fixed = reconcileMistakesWithCriteria(
-        result.operator_mistakes || [],
-        result.evaluation?.criteria || [],
-        callTimestamp,
-        visitDateContext,
-        fullTranscript
-      );
-      if (fixed.fixedFromCriteria && fixed.mistakes.length > 0) {
-        result.operator_mistakes = fixed.mistakes;
+  }
+
+  if (result.booking_status !== 'не применимо' && Array.isArray(result.evaluation?.criteria)) {
+    const fixed = reconcileMistakesWithCriteria(
+      result.operator_mistakes || [],
+      result.evaluation.criteria,
+      callTimestamp,
+      visitDateContext,
+      fullTranscript
+    );
+    if (
+      fixed.fixedFromCriteria ||
+      JSON.stringify(result.operator_mistakes || []) !== JSON.stringify(fixed.mistakes)
+    ) {
+      result.operator_mistakes = fixed.mistakes;
+      if (result.transcript_summary) {
         result.transcript_summary = result.transcript_summary.replace(
           /(-\s*Ошибки и недочеты:\s*)[^\n]*/i,
-          `$1${fixed.mistakes.join('; ')}`
+          `$1${fixed.mistakes.length > 0 ? fixed.mistakes.join('; ') : 'не выявлены'}`
         );
       }
     }
@@ -3490,7 +3593,7 @@ export function generateLocalFallbackAnalysis(
     commentText: string
   ): AnalysisResult => {
     console.warn(`[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${reason}`);
-    console.log('[Summary source: template] [Mistakes source: template] [Feedback source: template]');
+    console.log(`[Summary source: template] [Mistakes source: template] [Feedback source: template (причина: ${reason})]`);
     const nextStepText = `Повторить попытку дозвона клиенту в рабочее время салона «${salon}».`;
     const emptyEval: CallEvaluation = {
       overall_score: null,
@@ -3550,6 +3653,7 @@ export function generateLocalFallbackAnalysis(
       summary_source: 'template',
       mistakes_source: 'template',
       feedback_source: 'template',
+      feedback_reason: reason,
       fallback_reason: reason,
     };
   };
@@ -3691,12 +3795,20 @@ export function generateLocalFallbackAnalysis(
   const CANNED_FALLBACK_MISTAKE_RE =
     /^(?:администратор\s+не\s+назвал\s+собственное\s+имя|не\s+заданы\s+уточняющие\s+вопросы\s+для\s+выявления\s+потребностей|особенности\s+услуги\s+и\s+квалификация\s+мастера\s+не\s+раскрыты|в\s+ходе\s+диалога\s+специалист\s+и\s+особенности\s+услуги\s+подробно\s+не\s+презентовались|администратор\s+не\s+предложил\s+сопутствующие\s+процедуры|сопутствующие\s+процедуры\s+к\s+основной\s+услуге\s+администратором\s+не\s+предлагались)/i;
 
-  const finalMistakes = filterOutdatedReminderMistakes(
+  const cleanedFallbackMistakes = filterOutdatedReminderMistakes(
     mistakes && mistakes.length > 0 ? mistakes : [],
     callTimestamp,
     essence.date,
     formattedTranscript
   ).filter((m) => !CANNED_FALLBACK_MISTAKE_RE.test(String(m || '').trim()));
+
+  const finalMistakes = reconcileMistakesWithCriteria(
+    cleanedFallbackMistakes,
+    evaluation.criteria || [],
+    callTimestamp,
+    essence.date,
+    formattedTranscript
+  ).mistakes;
 
   const finalFormattedSummary = formattedSummary.replace(
     /(-\s*Ошибки и недочеты:\s*)[^\n]*/i,
@@ -3731,7 +3843,7 @@ export function generateLocalFallbackAnalysis(
     ? `Обращение по услуге: ${essence.service}`
     : 'Консультация / обращение в салон';
 
-  console.log('[Summary source: template] [Mistakes source: template] [Feedback source: template]');
+  console.log(`[Summary source: template] [Mistakes source: template] [Feedback source: template (причина: ${finalFallbackReason})]`);
   return {
     is_conversation: true,
     transcript_summary: finalFormattedSummary,
@@ -3771,6 +3883,7 @@ export function generateLocalFallbackAnalysis(
     summary_source: 'template',
     mistakes_source: 'template',
     feedback_source: 'template',
+    feedback_reason: finalFallbackReason,
     fallback_reason: finalFallbackReason,
   };
 }

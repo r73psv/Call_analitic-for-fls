@@ -867,7 +867,7 @@ export function filterOutdatedReminderMistakes(
 }
 
 const ERROR_FREE_MISTAKE_REGEX =
-  /(?:грубых\s+ошибок\s+не\s+допущено|регламент(?:\s+общения)?\s+соблюд[её]н\s+в\s+полном\s+объ[её]ме|существенных\s+нарушений.*не\s+выявлено|ошибок\s+не\s+(?:выявлено|обнаружено|допущено)|ошибки\s+не\s+(?:выявлены|обнаружены)|^(?:не\s+выявлены|отсутствуют|нет|без\s+ошибок|—|-)$)/i;
+  /(?:грубых\s+ошибок\s+не\s+допущено|регламент(?:\s+общения)?\s+соблюд[её]н(?:\s+в\s+полном\s+объ[её]ме)?|существенных\s+нарушений.*не\s+выявлено|нарушений\s+(?:не\s+(?:выявлено|обнаружено|допущено)|нет)|ошибок\s+(?:не\s+(?:выявлено|обнаружено|допущено)|нет)|ошибки\s+(?:не\s+(?:выявлены|обнаружены)|отсутствуют)|замечаний\s+(?:нет|не\s+выявлено)|без\s+(?:ошибок|замечаний|нарушений)|^(?:не\s+выявлены|отсутствуют|нет|—|-)$)/i;
 
 export function isErrorFreeMistakeStatement(text: string): boolean {
   const clean = String(text || '').trim();
@@ -1055,9 +1055,12 @@ export function harmonizeMistakesAndEvaluation(
     });
 
   const overall = evaluation.overall_score;
+  const hasAnyLowCriterion = (evaluation.criteria || []).some(
+    (c) => c && c.is_applicable !== false && typeof c.score === 'number' && !isNaN(c.score) && c.score < 7
+  );
 
-  // Если общий балл >= 9.8 — грубых ошибок нет
-  if (overall !== null && overall >= 9.8) {
+  // Если общий балл >= 9.8 и нет ни одного сниженного критерия (< 7) — грубых ошибок нет
+  if (overall !== null && overall >= 9.8 && !hasAnyLowCriterion) {
     return {
       mistakes: ['Грубых ошибок не допущено, регламент общения соблюден в полном объеме.'],
       advice: filteredAdvice.length > 0
@@ -1148,10 +1151,16 @@ export function harmonizeMistakesAndEvaluation(
     }
   }
 
-  const finalMistakes = filterOutdatedReminderMistakes(filteredMistakes, callTimestamp, visitDateText, transcript);
+  const reconciledFinal = reconcileMistakesWithCriteria(
+    filterOutdatedReminderMistakes(filteredMistakes, callTimestamp, visitDateText, transcript),
+    evaluation.criteria || [],
+    callTimestamp,
+    visitDateText,
+    transcript
+  );
 
   return {
-    mistakes: finalMistakes,
+    mistakes: reconciledFinal.mistakes,
     advice: filteredAdvice
   };
 }

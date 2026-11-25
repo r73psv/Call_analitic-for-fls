@@ -7,11 +7,13 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import v8 from 'v8';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import dotenv from 'dotenv';
 import axios from 'axios';
+import cron from 'node-cron';
 import { CallRecord, LogEntry, SystemConfig, ModelType, DashboardStats, KeyFacts, VkConfig, YclientsConfig, GigaChatModel, SttProvider, SystemNotification, NotificationType, UserRole, ContextClarification } from './src/types.js';
 import { transcribeWithRetry, fixDuplicatedTranscript, refineTranscriptRoles } from './src/services/speechkit.js';
 import { transcribeAudio, resolveActiveSttProvider, getSttProviderLabel, normalizeSttProvider } from './src/services/transcriptionService.js';
@@ -22,18 +24,37 @@ import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, format
 import { clearYclientsCache } from './src/services/yclients.js';
 import { classifyCallContext } from './src/services/summaryUtils.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
-import { readStoreSync, writeStore, getDefaultConfig } from './src/store/store.js';
+import { readStoreSync, writeStore, writeStoreSyncAtomic, flushStoreWrite, getDefaultConfig } from './src/store/store.js';
 import { loadServerEnvironment, persistServerEnvVars, hydrateStoreFromServerEnv } from './src/services/serverEnv.js';
 import { readConsentStoreSync, writeConsentStore } from './src/store/consent-store.js';
 import { ensureAutoConsent, getConsentForPhone, registerConsent, syncConsentsFromCalls } from './src/store/consents.js';
 import { initCleanupScheduler, runCleanupNow } from './src/store/cleanup.js';
 import { consentsRouter } from './src/routes/consents.js';
 import { settingsRouter } from './src/routes/settings.js';
-import { authRouter, adminUsersRouter, getCurrentUserRole, getCurrentUser, logAccess } from './src/routes/auth.js';
+import { authRouter, adminUsersRouter, getCurrentUserRole, getCurrentUser, logAccess, requireRole } from './src/routes/auth.js';
 import { adminRouter } from './src/routes/admin.js';
+import {
+  aggregateDailyCallsReport,
+  formatVkDailyReportMessage,
+  getLocalDateParts,
+  isDailyReportDue,
+  isValidIsoDateString,
+  normalizeDailyReportTime,
+  resolveReportTimeZone,
+  sendVkTextMessage,
+  DailyVkReportMetrics,
+} from './src/services/vkDailyReport.js';
 import { isYandexAuthConfigured } from './src/services/yandex-auth.js';
 import { isGigaChatConfigured, getGigaChatConfigStatus } from './src/services/gigachat-auth.js';
-import { hydrateFromS3, scheduleSyncToS3, manualSync, getSyncStatus } from './src/services/s3-sync.js';
+import { hydrateFromS3, scheduleSyncToS3, flushSyncToS3, manualSync, getSyncStatus, getS3SyncPendingState } from './src/services/s3-sync.js';
+import {
+  createOrMergeBatchQueue,
+  recoverInterruptedBatchQueue,
+  markBatchItemStarted,
+  markBatchItemCompleted,
+  markBatchItemFailed,
+  finalizeBatchQueueIfDone,
+} from './src/services/batchQueue.js';
 import { generateCallAuditPdf, generatePeriodStatsPdf, generateCallsTablePdf, PeriodStatsReportData } from './src/services/pdfReport.js';
 import { generateCallCsv, generateCallsTableCsv, generatePeriodStatsCsv } from './src/services/csvExport.js';
 import { deduplicateCalls } from './src/services/callUtils.js';
@@ -76,6 +97,9 @@ app.use('/api/settings', settingsRouter);
 
 // Paths
 const DATA_FILE = process.env.DATA_PATH || path.join(process.cwd(), 'data', 'data-store.json');
+const DATA_DIR = path.dirname(DATA_FILE);
+const RESTART_DIAG_FILE = path.join(DATA_DIR, 'last-restart-reason.json');
+const RUNNING_PID_FILE = path.join(DATA_DIR, 'server-running.pid');
 const SEED_FILE = path.join(process.cwd(), 'data-store.seed.json');
 const FALLBACK_FILE = path.join(process.cwd(), 'data-store.json');
 const DIST_PATH = path.join(process.cwd(), 'dist');
@@ -90,7 +114,8 @@ function getFullDataForSync() {
     config: db.config || {},
     users: db.users || [],
     consents: consentStore.consents || [],
-    access_log: db.access_log || []
+    access_log: db.access_log || [],
+    batchQueue: db.batchQueue || undefined,
   };
 }
 
@@ -757,7 +782,11 @@ async function executeSingleModelAttempt(
     const customPrompt = db.config?.customSystemPrompt || db.config?.credentials?.customSystemPrompt;
     appendLog('info', 'gigachat', `Отправка запроса на анализ в модель ${gigaModel} (салон «${salonName}»)...`);
     const analysis = await analyzeWithRetry(anonymizedText, gigaModel, (type, msg) => appendLog(type, 'gigachat', msg), undefined, salonName, customPrompt, callTimestamp);
-    appendLog('success', 'gigachat', `Звонок успешно проанализирован моделью ${gigaModel}. [Summary source: ${analysis.summary_source || 'model'}] [Mistakes source: ${analysis.mistakes_source || 'model'}] [Feedback source: ${analysis.feedback_source || 'model'}]`);
+    const feedbackSourceLabel =
+      (analysis.feedback_source || 'model') === 'model'
+        ? '[Feedback source: model]'
+        : `[Feedback source: ${analysis.feedback_source} (причина: ${analysis.feedback_reason || analysis.fallback_reason || 'не указана'})]`;
+    appendLog('success', 'gigachat', `Звонок успешно проанализирован моделью ${gigaModel}. [Summary source: ${analysis.summary_source || 'model'}] [Mistakes source: ${analysis.mistakes_source || 'model'}] ${feedbackSourceLabel}`);
     return {
       success: true,
       result: {
@@ -786,6 +815,7 @@ async function executeSingleModelAttempt(
         summary_source: analysis.summary_source || 'model',
         mistakes_source: analysis.mistakes_source || 'model',
         feedback_source: analysis.feedback_source || 'model',
+        feedback_reason: analysis.feedback_reason,
         model_used: gigaModel
       }
     };
@@ -1107,10 +1137,14 @@ async function analyzeCallTextOrAudio(
       callTimestamp,
       { throwOnUnavailable: Boolean(options?.isManual) }
     );
+    const feedbackSourceLabel =
+      (analysis.feedback_source || 'model') === 'model'
+        ? '[Feedback source: model]'
+        : `[Feedback source: ${analysis.feedback_source} (причина: ${analysis.feedback_reason || analysis.fallback_reason || 'не указана'})]`;
     if (analysis.summary_source === 'template' && analysis.fallback_reason) {
-      appendLog('warning', 'gigachat', `[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${analysis.fallback_reason}`);
+      appendLog('warning', 'gigachat', `[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${analysis.fallback_reason}. ${feedbackSourceLabel}`);
     } else {
-      appendLog('success', 'gigachat', `Анализ звонка успешно выполнен моделью ${modelToUse}. [Summary source: ${analysis.summary_source || 'model'}] [Mistakes source: ${analysis.mistakes_source || 'model'}] [Feedback source: ${analysis.feedback_source || 'model'}]`);
+      appendLog('success', 'gigachat', `Анализ звонка успешно выполнен моделью ${modelToUse}. [Summary source: ${analysis.summary_source || 'model'}] [Mistakes source: ${analysis.mistakes_source || 'model'}] ${feedbackSourceLabel}`);
     }
     return {
       transcript: analysis.formatted_transcript || cleanTranscript,
@@ -1138,6 +1172,7 @@ async function analyzeCallTextOrAudio(
       summary_source: analysis.summary_source || 'model',
       mistakes_source: analysis.mistakes_source || 'model',
       feedback_source: analysis.feedback_source || 'model',
+      feedback_reason: analysis.feedback_reason,
       fallback_reason: analysis.summary_source === 'model' ? undefined : analysis.fallback_reason,
       model_used: modelToUse,
       ...(usedTranscriptionEngine ? { transcription_engine: usedTranscriptionEngine } : {}),
@@ -2854,6 +2889,9 @@ async function performS3Hydration(): Promise<boolean> {
       if (data.config) db.config = { ...db.config, ...data.config };
       if (Array.isArray(data.users) && data.users.length > 0) db.users = data.users;
       if (Array.isArray(data.access_log)) db.access_log = data.access_log;
+      if (data.batchQueue && (!db.batchQueue || db.batchQueue.status === 'idle' || db.batchQueue.status === 'completed')) {
+        db.batchQueue = data.batchQueue;
+      }
       // Deployment server environment variables always take precedence over older S3 backup snapshots
       hydrateStoreFromServerEnv(db);
       await writeStore(db);
@@ -3730,6 +3768,18 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
     );
     if (JSON.stringify(curMistakes) !== JSON.stringify(reconciledTrusted.mistakes)) {
       callCopy.operator_mistakes = reconciledTrusted.mistakes;
+      if (callCopy.summary) {
+        const replacementLine =
+          reconciledTrusted.mistakes.length > 0
+            ? reconciledTrusted.mistakes.join('; ')
+            : 'не выявлены';
+        if (/-\s*Ошибки и недочеты:/i.test(callCopy.summary)) {
+          callCopy.summary = callCopy.summary.replace(
+            /(-\s*Ошибки и недочеты:\s*)[^\n]*/i,
+            `$1${replacementLine}`
+          );
+        }
+      }
       changed = true;
     }
     // Убираем устаревшие флаги «не найдена цитата для "согласие"/"запись"» на словарных полях booking_status / call_outcome
@@ -3850,6 +3900,12 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
     );
     if (JSON.stringify(rawMistakes) !== JSON.stringify(reconciled.mistakes)) {
       callCopy.operator_mistakes = reconciled.mistakes;
+      if (callCopy.summary && /-\s*Ошибки и недочеты:/i.test(callCopy.summary)) {
+        callCopy.summary = callCopy.summary.replace(
+          /(-\s*Ошибки и недочеты:\s*)[^\n]*/i,
+          `$1${reconciled.mistakes.length > 0 ? reconciled.mistakes.join('; ') : 'не выявлены'}`
+        );
+      }
       changed = true;
     }
   }
@@ -5434,6 +5490,125 @@ async function performCallReanalysis(
   }
 }
 
+// ============================================================================
+// PERSISTED BATCH REANALYSIS QUEUE (survives server restarts & flushes S3)
+// ============================================================================
+let batchQueueRunnerActive = false;
+
+async function runPersistedBatchQueue(triggerReason: 'manual' | 'resume_after_restart' = 'manual'): Promise<void> {
+  if (batchQueueRunnerActive) {
+    return;
+  }
+  batchQueueRunnerActive = true;
+  try {
+    let initialDb = readDb();
+    if (!initialDb.batchQueue || initialDb.batchQueue.status !== 'running') {
+      return;
+    }
+
+    const activeStt = resolveActiveSttProvider(initialDb.batchQueue.sttProvider);
+    const activeSttLabel = getSttProviderLabel(activeStt);
+    if (triggerReason === 'resume_after_restart') {
+      const q = initialDb.batchQueue;
+      appendLog(
+        'info',
+        'speechkit',
+        `[BatchQueue] Возобновление прерванного массового прогона (${q.id}) после рестарта: осталось ${q.pendingCallIds.length}, уже обработано ${q.processedCallIds.length}, ошибок ${q.failedCallIds.length}.`
+      );
+      console.log(
+        `[BatchQueue] Resuming interrupted batch queue ${q.id}: pending=${q.pendingCallIds.length}, processed=${q.processedCallIds.length}, failed=${q.failedCallIds.length}`
+      );
+    }
+
+    while (!isServerShuttingDown) {
+      const loopDb = readDb();
+      const q = loopDb.batchQueue;
+      if (!q || q.status !== 'running') {
+        break;
+      }
+
+      if (q.pendingCallIds.length === 0) {
+        loopDb.batchQueue = finalizeBatchQueueIfDone(q);
+        writeDb(loopDb);
+        const doneQ = loopDb.batchQueue;
+        appendLog(
+          'success',
+          'speechkit',
+          `Пакетный переанализ (${activeSttLabel}) завершен: успешно обработано ${doneQ.processedCallIds.length} из ${doneQ.totalCount} звонков (ошибок: ${doneQ.failedCallIds.length}).`
+        );
+        try {
+          await flushStoreWrite();
+          await flushSyncToS3('batch_queue_complete', getFullDataForSync);
+        } catch (flushErr: any) {
+          console.warn('[BatchQueue] Предупреждение при финальном флаше S3:', flushErr?.message || flushErr);
+        }
+        break;
+      }
+
+      const nextCallId = q.pendingCallIds[0];
+      const modelOverride = q.modelOverride;
+      const sttProvider = resolveActiveSttProvider(q.sttProvider);
+      const forceRetranscribe = q.forceRetranscribe !== false;
+
+      loopDb.batchQueue = markBatchItemStarted(q, nextCallId);
+      writeDb(loopDb);
+
+      try {
+        await performCallReanalysis(nextCallId, modelOverride, {
+          sttProvider,
+          forceRetranscribe,
+        });
+        const afterDb = readDb();
+        if (afterDb.batchQueue) {
+          afterDb.batchQueue = markBatchItemCompleted(afterDb.batchQueue, nextCallId);
+          writeDb(afterDb);
+        }
+      } catch (err: any) {
+        const errMsg = err?.message || String(err);
+        console.warn(`[BatchReanalyze] Ошибка обработки звонка ${nextCallId}:`, errMsg);
+        const afterDb = readDb();
+        if (afterDb.batchQueue) {
+          afterDb.batchQueue = markBatchItemFailed(afterDb.batchQueue, nextCallId, errMsg);
+          writeDb(afterDb);
+        }
+      }
+
+      if (isServerShuttingDown) {
+        break;
+      }
+
+      await new Promise(r => setTimeout(r, 600));
+    }
+  } finally {
+    batchQueueRunnerActive = false;
+  }
+}
+
+// Status endpoint for persisted batch reanalysis queue
+app.get('/api/calls/batch-reanalyze/status', requireRole(['admin', 'manager']), (_req, res) => {
+  const db = readDb();
+  const q = db.batchQueue || null;
+  res.json({
+    running: batchQueueRunnerActive,
+    queue: q
+      ? {
+          id: q.id,
+          status: q.status,
+          totalCount: q.totalCount,
+          pendingCount: q.pendingCallIds.length,
+          processedCount: q.processedCallIds.length,
+          failedCount: q.failedCallIds.length,
+          currentCallId: q.currentCallId,
+          startedAt: q.startedAt,
+          updatedAt: q.updatedAt,
+          completedAt: q.completedAt,
+          resumeCount: q.resumeCount,
+        }
+      : null,
+    s3SyncPending: getS3SyncPendingState(),
+  });
+});
+
 // Batch re-analyze all un-transcribed calls or calls with audio (REST API)
 app.post('/api/calls/batch-reanalyze', async (req, res) => {
   const userRole = getCurrentUserRole(req);
@@ -5464,30 +5639,31 @@ app.post('/api/calls/batch-reanalyze', async (req, res) => {
 
   const batchStt = resolveActiveSttProvider(req.body?.sttProvider);
   const activeSttLabel = getSttProviderLabel(batchStt);
-  appendLog('info', 'speechkit', `Запущен пакетный переанализ (${activeSttLabel}) для ${candidates.length} звонков...`);
 
-  // Start background queue processing
-  (async () => {
-    let successCount = 0;
-    for (const c of candidates) {
-      try {
-        await performCallReanalysis(c.call_id, modelOverride, {
-          sttProvider: batchStt,
-          forceRetranscribe: true,
-        });
-        successCount++;
-        await new Promise(r => setTimeout(r, 600));
-      } catch (err: any) {
-        console.warn(`[BatchReanalyze] Ошибка обработки звонка ${c.call_id}:`, err.message);
-      }
-    }
-    appendLog('success', 'speechkit', `Пакетный переанализ (${activeSttLabel}) завершен: успешно обработано ${successCount} из ${candidates.length} звонков.`);
-  })();
+  const candidateIds = candidates.map((c: any) => c.call_id).filter(Boolean);
+  db.batchQueue = createOrMergeBatchQueue(db.batchQueue, candidateIds, {
+    modelOverride,
+    sttProvider: batchStt,
+    forceRetranscribe: true,
+  });
+  writeDb(db);
+
+  appendLog(
+    'info',
+    'speechkit',
+    `Запущен пакетный переанализ (${activeSttLabel}) для ${db.batchQueue.pendingCallIds.length} звонков (очередь ${db.batchQueue.id} сохранена в хранилище)...`
+  );
+
+  // Start persisted background queue processing
+  runPersistedBatchQueue('manual').catch((err: any) => {
+    console.error('[BatchQueue] Непредвиденная ошибка фоновой очереди:', err?.message || err);
+  });
 
   res.json({
     success: true,
-    totalQueued: candidates.length,
-    message: `Запущен фоновый переанализ для ${candidates.length} звонков через ${activeSttLabel} и GigaChat.`
+    queueId: db.batchQueue.id,
+    totalQueued: db.batchQueue.pendingCallIds.length,
+    message: `Запущен фоновый переанализ для ${db.batchQueue.pendingCallIds.length} звонков через ${activeSttLabel} и GigaChat.`
   });
 });
 
@@ -5682,6 +5858,16 @@ app.post('/api/config', (req, res) => {
       db.config.credentials.vkChatId = vc;
       envUpdates.VK_CHAT_ID = vc;
     }
+    if (body.vk.dailyReportEnabled !== undefined) {
+      const enabledFlag = Boolean(body.vk.dailyReportEnabled);
+      body.vk.dailyReportEnabled = enabledFlag;
+      envUpdates.VK_DAILY_REPORT_ENABLED = enabledFlag ? 'true' : 'false';
+    }
+    if (body.vk.dailyReportTime !== undefined) {
+      const normalizedTime = normalizeDailyReportTime(String(body.vk.dailyReportTime));
+      body.vk.dailyReportTime = normalizedTime;
+      envUpdates.VK_DAILY_REPORT_TIME = normalizedTime;
+    }
   }
 
   let yclientsChanged = false;
@@ -5868,6 +6054,255 @@ app.post('/api/calls/:id/send-vk', async (req, res) => {
   }
   const force = req.query.force === 'true' || req.body?.force === true || true; // Manual direct button click forces sending
   const result = await sendToVk(call, db.config.vk, force);
+  res.json(result);
+});
+
+// 9.1. DAILY KPI REPORT TO VK (scheduled after 21:00 local salon time + manual trigger/preview)
+let vkDailyReportInProgress = false;
+let vkDailyReportCronTask: ReturnType<typeof cron.schedule> | null = null;
+
+async function runVkDailyReport(options: {
+  date?: string;
+  force?: boolean;
+  trigger?: 'cron' | 'manual';
+  tokenOverride?: string;
+  chatIdOverride?: string;
+} = {}): Promise<{
+  success: boolean;
+  skipped?: boolean;
+  reason?: string;
+  date: string;
+  timeZone: string;
+  metrics?: DailyVkReportMetrics;
+  message?: string;
+  error?: string;
+}> {
+  const trigger = options.trigger || 'manual';
+  const timeZone = resolveReportTimeZone();
+  const now = new Date();
+  const todayStr = getLocalDateParts(now, timeZone).dateStr;
+  const targetDate = options.date && isValidIsoDateString(options.date) ? options.date : todayStr;
+
+  if (vkDailyReportInProgress) {
+    return {
+      success: false,
+      skipped: true,
+      reason: 'already_running',
+      date: targetDate,
+      timeZone,
+      error: 'Выгрузка дневного отчёта в VK уже выполняется.',
+    };
+  }
+
+  vkDailyReportInProgress = true;
+  try {
+    const db = readDb();
+    const vkCfg: VkConfig = db.config?.vk || { token: '', chatId: '', enabled: false, template: '' };
+    const creds = db.config?.credentials || {};
+    const token = (options.tokenOverride || vkCfg.token || creds.vkToken || process.env.VK_TOKEN || '').trim();
+    const chatId = (options.chatIdOverride || vkCfg.chatId || creds.vkChatId || process.env.VK_CHAT_ID || '').trim();
+    const dailyEnabled = vkCfg.dailyReportEnabled !== false;
+    const reportTime = normalizeDailyReportTime(vkCfg.dailyReportTime || process.env.VK_DAILY_REPORT_TIME);
+
+    if (trigger === 'cron' && !options.force) {
+      if (!vkCfg.enabled || !dailyEnabled || !token || !chatId) {
+        return {
+          success: true,
+          skipped: true,
+          reason: !dailyEnabled ? 'daily_report_disabled' : 'vk_not_configured_or_disabled',
+          date: targetDate,
+          timeZone,
+        };
+      }
+
+      const dueCheck = isDailyReportDue(now, {
+        reportTime,
+        timeZone,
+        lastSentDate: vkCfg.lastDailyReportDate,
+      });
+
+      if (!dueCheck.due) {
+        return {
+          success: true,
+          skipped: true,
+          reason: dueCheck.reason,
+          date: targetDate,
+          timeZone,
+        };
+      }
+    }
+
+    if (!token || !chatId) {
+      const errMsg = 'Не настроены VK_TOKEN или VK_CHAT_ID для отправки ежедневного отчёта в VK.';
+      if (trigger === 'manual') {
+        appendLog('warning', 'vk', `[VK Daily Report] ${errMsg}`);
+      }
+      return { success: false, date: targetDate, timeZone, error: errMsg };
+    }
+
+    const salonName = getEffectiveSalonName(db.config);
+    const metrics = aggregateDailyCallsReport(db.calls || [], targetDate, {
+      timeZone,
+      salonName,
+    });
+    const message = formatVkDailyReportMessage(metrics);
+
+    appendLog(
+      'info',
+      'vk',
+      `[VK Daily Report] Формирование и отправка итогов дня за ${metrics.formattedDate} (${trigger === 'cron' ? 'авто после 21:00' : 'вручную'}): звонков ${metrics.totalCalls}, пропущено ${metrics.missedCalls}, записей ${metrics.bookingsCount}.`
+    );
+
+    const sendRes = await sendVkTextMessage(message, token, chatId);
+
+    const latestDb = readDb();
+    if (!latestDb.config.vk) {
+      latestDb.config.vk = { token, chatId, enabled: true, template: '' };
+    }
+
+    if (sendRes.success) {
+      if (targetDate === todayStr || trigger === 'cron') {
+        latestDb.config.vk.lastDailyReportDate = targetDate;
+      }
+      latestDb.config.vk.lastDailyReportSentAt = new Date().toISOString();
+      latestDb.config.vk.lastDailyReportError = '';
+      writeDb(latestDb);
+      appendLog(
+        'success',
+        'vk',
+        `[VK Daily Report] Итоги дня за ${metrics.formattedDate} успешно выгружены в VK (звонков: ${metrics.totalCalls}, пропущено: ${metrics.missedCalls}, записей: ${metrics.bookingsCount}).`
+      );
+      return {
+        success: true,
+        date: targetDate,
+        timeZone,
+        metrics,
+        message,
+      };
+    }
+
+    latestDb.config.vk.lastDailyReportError = sendRes.error || 'Неизвестная ошибка отправки в VK';
+    writeDb(latestDb);
+    appendLog('error', 'vk', `[VK Daily Report] Ошибка выгрузки за ${metrics.formattedDate}: ${sendRes.error}`);
+    return {
+      success: false,
+      date: targetDate,
+      timeZone,
+      metrics,
+      message,
+      error: sendRes.error,
+    };
+  } catch (err: any) {
+    const errMsg = err?.message || String(err);
+    appendLog('error', 'vk', `[VK Daily Report] Исключение при формировании отчёта: ${errMsg}`);
+    return {
+      success: false,
+      date: targetDate,
+      timeZone,
+      error: errMsg,
+    };
+  } finally {
+    vkDailyReportInProgress = false;
+  }
+}
+
+function initVkDailyReportScheduler(): void {
+  if (vkDailyReportCronTask) return;
+
+  // Check every 5 minutes so custom time (>= 21:00) works without restart
+  // and missed ticks after a server restart between 21:00 and 23:59 still deliver once per day.
+  vkDailyReportCronTask = cron.schedule('*/5 * * * *', () => {
+    runVkDailyReport({ trigger: 'cron' }).catch((err) => {
+      console.error('[VK Daily Report Cron Error]', err?.message || err);
+    });
+  });
+
+  // Also run a one-time check shortly after startup in case server booted after 21:00
+  setTimeout(() => {
+    runVkDailyReport({ trigger: 'cron' }).catch((err) => {
+      console.error('[VK Daily Report Startup Check Error]', err?.message || err);
+    });
+  }, 15000);
+
+  const db = readDb();
+  const reportTime = normalizeDailyReportTime(db.config?.vk?.dailyReportTime || process.env.VK_DAILY_REPORT_TIME);
+  const tz = resolveReportTimeZone();
+  console.log(`[VK Daily Report] Планировщик ежедневной сводки в VK запущен (после ${reportTime}, ${tz})`);
+}
+
+app.get('/api/vk/daily-report/preview', requireRole(['admin', 'manager']), (req, res) => {
+  const timeZone = resolveReportTimeZone();
+  const rawDate = typeof req.query?.date === 'string' ? req.query.date.trim() : '';
+  if (rawDate && !isValidIsoDateString(rawDate)) {
+    return res.status(400).json({ success: false, error: 'Некорректный формат даты. Используйте YYYY-MM-DD.' });
+  }
+  const targetDate = rawDate || getLocalDateParts(new Date(), timeZone).dateStr;
+  const db = readDb();
+  const salonName = getEffectiveSalonName(db.config);
+  const metrics = aggregateDailyCallsReport(db.calls || [], targetDate, { timeZone, salonName });
+  const message = formatVkDailyReportMessage(metrics);
+  const vkCfg = db.config?.vk;
+
+  res.json({
+    success: true,
+    date: targetDate,
+    timeZone,
+    metrics,
+    message,
+    schedule: {
+      enabled: vkCfg?.dailyReportEnabled !== false,
+      vkEnabled: !!vkCfg?.enabled,
+      time: normalizeDailyReportTime(vkCfg?.dailyReportTime || process.env.VK_DAILY_REPORT_TIME),
+      lastDailyReportDate: vkCfg?.lastDailyReportDate || '',
+      lastDailyReportSentAt: vkCfg?.lastDailyReportSentAt || '',
+      lastDailyReportError: vkCfg?.lastDailyReportError || '',
+    },
+  });
+});
+
+app.post('/api/vk/daily-report/send', requireRole(['admin', 'manager']), async (req, res) => {
+  const body = req.body || {};
+  const rawDate = typeof body.date === 'string' ? body.date.trim() : '';
+  if (rawDate && !isValidIsoDateString(rawDate)) {
+    return res.status(400).json({ success: false, error: 'Некорректный формат даты. Используйте YYYY-MM-DD.' });
+  }
+
+  const tokenOverride =
+    typeof body.token === 'string' && body.token.trim() && body.token !== '••••••••'
+      ? body.token.trim()
+      : undefined;
+  const chatIdOverride =
+    typeof body.chatId === 'string' && body.chatId.trim()
+      ? body.chatId.trim()
+      : undefined;
+
+  const result = await runVkDailyReport({
+    date: rawDate || undefined,
+    force: body.force !== false,
+    trigger: 'manual',
+    tokenOverride,
+    chatIdOverride,
+  });
+
+  const currentUser = getCurrentUser(req);
+  logAccess(
+    currentUser?.name || 'Администратор',
+    'export',
+    `Выгрузка итогов дня в VK (${result.date})`,
+    req.ip || '127.0.0.1',
+    {
+      category: 'settings',
+      role: currentUser?.role,
+      userId: currentUser?.id,
+      details: result.success
+        ? `Отправлено в VK: звонков ${result.metrics?.totalCalls ?? 0}, записей ${result.metrics?.bookingsCount ?? 0}`
+        : `Ошибка отправки: ${result.error || 'неизвестно'}`,
+    }
+  ).catch(() => {});
+
+  if (!result.success) {
+    return res.status(400).json(result);
+  }
   res.json(result);
 });
 
@@ -6181,6 +6616,13 @@ function runPostStartupMaintenance() {
     console.error('[152-ФЗ] Ошибка запуска планировщика очистки:', cleanErr.message);
   }
 
+  // Initialize daily VK KPI report scheduler (after 21:00 salon local time)
+  try {
+    initVkDailyReportScheduler();
+  } catch (vkCronErr: any) {
+    console.error('[VK Daily Report] Ошибка запуска планировщика:', vkCronErr.message);
+  }
+
   // 152-ФЗ: Синхронизация реестра согласий со всеми звонками в базе
   try {
     const db = readDb();
@@ -6343,8 +6785,296 @@ function runPostStartupMaintenance() {
     console.error('[Migration] Ошибка миграции дублированных стенограмм:', mErr.message);
   }
 
-  // Hydrate database from S3 timeweb.cloud if configured
-  performS3Hydration().catch(err => console.error('[S3 Boot Sync Error]', err));
+  // Hydrate database from S3 timeweb.cloud if configured, then check for interrupted batch queue
+  performS3Hydration()
+    .catch(err => console.error('[S3 Boot Sync Error]', err))
+    .finally(() => {
+      setTimeout(() => {
+        try {
+          const db = readDb();
+          const { queue, recovered } = recoverInterruptedBatchQueue(db.batchQueue);
+          if (recovered && queue) {
+            db.batchQueue = queue;
+            writeDb(db);
+            runPersistedBatchQueue('resume_after_restart').catch((err: any) => {
+              console.error('[BatchQueue] Ошибка автовозобновления после рестарта:', err?.message || err);
+            });
+          }
+        } catch (resumeErr: any) {
+          console.error('[BatchQueue] Ошибка проверки прерванной очереди при старте:', resumeErr?.message || resumeErr);
+        }
+      }, 4000);
+    });
 }
 
+// ============================================================================
+// PROCESS LIFECYCLE, RESTART-CAUSE DIAGNOSTICS, MEMORY WATCHDOG & S3 FLUSH
+// ============================================================================
+let isServerShuttingDown = false;
+
+interface MemorySnapshot {
+  rssMb: number;
+  heapUsedMb: number;
+  heapTotalMb: number;
+  heapLimitMb: number;
+  heapPercent: number;
+  externalMb: number;
+  uptimeSec: number;
+}
+
+function captureMemorySnapshot(): MemorySnapshot {
+  const mem = process.memoryUsage();
+  const heapStats = v8.getHeapStatistics();
+  const heapLimitMb = Math.round((heapStats.heap_size_limit / 1024 / 1024) * 10) / 10;
+  const heapUsedMb = Math.round((mem.heapUsed / 1024 / 1024) * 10) / 10;
+  return {
+    rssMb: Math.round((mem.rss / 1024 / 1024) * 10) / 10,
+    heapUsedMb,
+    heapTotalMb: Math.round((mem.heapTotal / 1024 / 1024) * 10) / 10,
+    heapLimitMb,
+    heapPercent: heapLimitMb > 0 ? Math.round((heapUsedMb / heapLimitMb) * 1000) / 10 : 0,
+    externalMb: Math.round((mem.external / 1024 / 1024) * 10) / 10,
+    uptimeSec: Math.round(process.uptime()),
+  };
+}
+
+function writeRestartDiagnosticRecord(record: Record<string, any>) {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(RESTART_DIAG_FILE, JSON.stringify(record, null, 2), 'utf8');
+  } catch (err: any) {
+    console.error('[Lifecycle] Не удалось записать файл диагностики рестарта:', err?.message || err);
+  }
+}
+
+function removeRunningPidMarker() {
+  try {
+    if (fs.existsSync(RUNNING_PID_FILE)) {
+      fs.unlinkSync(RUNNING_PID_FILE);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function inspectPreviousRestartAndArmLifecycle() {
+  let prevDiag: any = null;
+  let hadUncleanPidMarker = false;
+  let prevPidInfo: any = null;
+
+  try {
+    if (fs.existsSync(RESTART_DIAG_FILE)) {
+      prevDiag = JSON.parse(fs.readFileSync(RESTART_DIAG_FILE, 'utf8'));
+    }
+  } catch {
+    prevDiag = null;
+  }
+
+  try {
+    if (fs.existsSync(RUNNING_PID_FILE)) {
+      hadUncleanPidMarker = true;
+      prevPidInfo = JSON.parse(fs.readFileSync(RUNNING_PID_FILE, 'utf8'));
+    }
+  } catch {
+    hadUncleanPidMarker = fs.existsSync(RUNNING_PID_FILE);
+  }
+
+  const startupMem = captureMemorySnapshot();
+  if (hadUncleanPidMarker) {
+    const lastWatermark = prevDiag?.memory || prevPidInfo?.memory || null;
+    const watermarkText = lastWatermark
+      ? `RSS=${lastWatermark.rssMb}MB, Heap=${lastWatermark.heapUsedMb}/${lastWatermark.heapLimitMb}MB (${lastWatermark.heapPercent}%), uptime=${lastWatermark.uptimeSec}s`
+      : 'метрики памяти недоступны';
+    const inferredCause =
+      prevDiag?.reason && prevDiag.reason !== 'memory_watermark'
+        ? `причина=${prevDiag.reason} (${prevDiag.detail || 'без деталей'})`
+        : 'вероятно аварийное завершение ОС (OOM-kill / SIGKILL / внезапный перезапуск контейнера без SIGTERM)';
+    const msg = `[Lifecycle] Обнаружен нештатный предыдущий рестарт (PID=${prevPidInfo?.pid ?? '?'}): ${inferredCause}; последний снимок памяти: ${watermarkText}. Текущий PID=${process.pid}, RSS=${startupMem.rssMb}MB.`;
+    console.warn(msg);
+    try {
+      appendLog('warning', 'system', msg);
+    } catch {
+      // ignore if store not ready yet
+    }
+  } else if (prevDiag && prevDiag.reason) {
+    const prevMem = prevDiag.memory
+      ? `RSS=${prevDiag.memory.rssMb}MB, Heap=${prevDiag.memory.heapUsedMb}/${prevDiag.memory.heapLimitMb}MB (${prevDiag.memory.heapPercent}%), uptime=${prevDiag.memory.uptimeSec}s`
+      : 'н/д';
+    const msg = `[Lifecycle] Причина предыдущего рестарта (${prevDiag.timestamp || 'н/д'}): ${prevDiag.reason}${prevDiag.detail ? ` — ${prevDiag.detail}` : ''}. Память перед остановкой: ${prevMem}. Текущий PID=${process.pid}.`;
+    console.log(msg);
+    try {
+      appendLog('info', 'system', msg);
+    } catch {
+      // ignore
+    }
+  } else {
+    console.log(
+      `[Lifecycle] Чистый старт процесса PID=${process.pid} (RSS=${startupMem.rssMb}MB, Heap=${startupMem.heapUsedMb}/${startupMem.heapLimitMb}MB).`
+    );
+  }
+
+  // Write active PID lock file for abrupt-death / OOM detection on next boot
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(
+      RUNNING_PID_FILE,
+      JSON.stringify({
+        pid: process.pid,
+        startedAt: new Date().toISOString(),
+        memory: startupMem,
+      }),
+      'utf8'
+    );
+  } catch (err: any) {
+    console.warn('[Lifecycle] Не удалось записать маркер активного процесса:', err?.message || err);
+  }
+
+  // Periodic memory watchdog (every 60s): detects memory pressure & saves watermark before potential OOM-kill
+  setInterval(() => {
+    const snap = captureMemorySnapshot();
+    const highHeap = snap.heapPercent >= 75;
+    const highRss = snap.rssMb >= 1400;
+    try {
+      if (fs.existsSync(DATA_DIR)) {
+        fs.writeFileSync(
+          RUNNING_PID_FILE,
+          JSON.stringify({
+            pid: process.pid,
+            updatedAt: new Date().toISOString(),
+            memory: snap,
+          }),
+          'utf8'
+        );
+      }
+    } catch {
+      // ignore
+    }
+    if (highHeap || highRss) {
+      const warnMsg = `[Lifecycle][MemoryWatchdog] Высокое потребление памяти (риск OOM): RSS=${snap.rssMb}MB, Heap=${snap.heapUsedMb}/${snap.heapLimitMb}MB (${snap.heapPercent}%), External=${snap.externalMb}MB, uptime=${snap.uptimeSec}s`;
+      console.warn(warnMsg);
+      writeRestartDiagnosticRecord({
+        timestamp: new Date().toISOString(),
+        pid: process.pid,
+        reason: 'memory_watermark',
+        detail: warnMsg,
+        memory: snap,
+      });
+      try {
+        appendLog('warning', 'system', warnMsg);
+      } catch {
+        // ignore
+      }
+    }
+  }, 60_000).unref();
+}
+
+async function handleGracefulShutdownOrCrash(
+  reason: 'SIGTERM' | 'SIGINT' | 'uncaughtException' | 'unhandledRejection',
+  errOrDetail?: unknown,
+  exitCode: number = 0
+) {
+  if (isServerShuttingDown) {
+    return;
+  }
+  isServerShuttingDown = true;
+
+  const snap = captureMemorySnapshot();
+  const detail =
+    errOrDetail instanceof Error
+      ? `${errOrDetail.name}: ${errOrDetail.message}`
+      : errOrDetail
+      ? String(errOrDetail)
+      : '';
+  const stack = errOrDetail instanceof Error ? errOrDetail.stack : undefined;
+
+  const summaryMsg = `[Lifecycle] Остановка/рестарт сервера: причина=${reason}${detail ? ` (${detail})` : ''}. Память: RSS=${snap.rssMb}MB, Heap=${snap.heapUsedMb}/${snap.heapLimitMb}MB (${snap.heapPercent}%), uptime=${snap.uptimeSec}s.`;
+  if (exitCode === 0) {
+    console.warn(summaryMsg);
+  } else {
+    console.error(summaryMsg, stack || '');
+  }
+
+  writeRestartDiagnosticRecord({
+    timestamp: new Date().toISOString(),
+    pid: process.pid,
+    reason,
+    detail: detail || undefined,
+    stack: stack ? stack.slice(0, 2000) : undefined,
+    memory: snap,
+  });
+
+  // Synchronously persist the restart reason & latest state to local encrypted store
+  try {
+    const db = readStoreSync();
+    db.logs.unshift({
+      id: `log-${Date.now()}-lifecycle`,
+      timestamp: new Date().toISOString(),
+      type: exitCode === 0 ? 'warning' : 'error',
+      module: 'system',
+      message: summaryMsg,
+      details: stack ? stack.slice(0, 1000) : undefined,
+    });
+    if (db.logs.length > 150) {
+      db.logs = db.logs.slice(0, 150);
+    }
+    writeStoreSyncAtomic(db);
+  } catch (storeErr: any) {
+    console.error('[Lifecycle] Ошибка аварийного сохранения локального хранилища:', storeErr?.message || storeErr);
+  }
+
+  // Guarantee S3 flush before exiting (bounded by 8s timeout so container stop isn't hung)
+  try {
+    await Promise.race([
+      (async () => {
+        await flushStoreWrite();
+        await flushSyncToS3(`shutdown:${reason}`, getFullDataForSync);
+      })(),
+      new Promise(resolve => setTimeout(resolve, 8000)),
+    ]);
+  } catch (s3Err: any) {
+    console.error('[Lifecycle] Ошибка финального флаша S3 перед остановкой:', s3Err?.message || s3Err);
+  }
+
+  removeRunningPidMarker();
+  process.exit(exitCode);
+}
+
+process.on('SIGTERM', () => {
+  void handleGracefulShutdownOrCrash('SIGTERM', 'Получен сигнал SIGTERM от ОС/контейнера', 0);
+});
+
+process.on('SIGINT', () => {
+  void handleGracefulShutdownOrCrash('SIGINT', 'Получен сигнал SIGINT', 0);
+});
+
+process.on('uncaughtException', (err: Error) => {
+  void handleGracefulShutdownOrCrash('uncaughtException', err, 1);
+});
+
+process.on('unhandledRejection', (reason: unknown) => {
+  const snap = captureMemorySnapshot();
+  const detail = reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason);
+  const stack = reason instanceof Error ? reason.stack : undefined;
+  const msg = `[Lifecycle] Необработанное отклонение промиса (unhandledRejection): ${detail}. Память: RSS=${snap.rssMb}MB, Heap=${snap.heapUsedMb}/${snap.heapLimitMb}MB (${snap.heapPercent}%).`;
+  console.error(msg, stack || '');
+  writeRestartDiagnosticRecord({
+    timestamp: new Date().toISOString(),
+    pid: process.pid,
+    reason: 'unhandledRejection',
+    detail,
+    stack: stack ? stack.slice(0, 2000) : undefined,
+    memory: snap,
+  });
+  try {
+    appendLog('error', 'system', msg, stack ? stack.slice(0, 1000) : undefined);
+  } catch {
+    // ignore
+  }
+});
+
+inspectPreviousRestartAndArmLifecycle();
 startServer();

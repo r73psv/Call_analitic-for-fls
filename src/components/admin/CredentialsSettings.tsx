@@ -9,7 +9,7 @@ import {
   HelpCircle, Calendar, RefreshCw, Clock, Globe, Zap, 
   CheckCircle2, AlertTriangle, Trash2, Cpu, Eye, EyeOff, Save, AlertCircle,
   Upload, FileCode, Folder, Copy, Check, FileCheck, ChevronDown, ChevronUp,
-  Building2, RotateCcw, Users, PhoneCall, Radio, Sparkles, FileText, Mic
+  Building2, RotateCcw, Users, PhoneCall, Radio, Sparkles, FileText, Mic, Send, BarChart3
 } from 'lucide-react';
 import { GigaChatModel, MegafonApiVersion, SttProvider, GigaamModelVariant } from '../../types.js';
 import { S3SyncPanel } from '../S3SyncPanel.js';
@@ -171,8 +171,19 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
   const [vkChatId, setVkChatId] = useState('');
   const [vkTemplate, setVkTemplate] = useState('');
   const [vkEnabled, setVkEnabled] = useState(true);
+  const [vkDailyReportEnabled, setVkDailyReportEnabled] = useState(true);
+  const [vkDailyReportTime, setVkDailyReportTime] = useState('21:05');
+  const [vkLastDailyReportDate, setVkLastDailyReportDate] = useState('');
+  const [vkLastDailyReportSentAt, setVkLastDailyReportSentAt] = useState('');
+  const [vkLastDailyReportError, setVkLastDailyReportError] = useState('');
+  const [salonTimeZone, setSalonTimeZone] = useState('Europe/Samara');
   const [testingVk, setTestingVk] = useState(false);
   const [vkTestResult, setVkTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [sendingDailyVk, setSendingDailyVk] = useState(false);
+  const [dailyVkResult, setDailyVkResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [loadingDailyVkPreview, setLoadingDailyVkPreview] = useState(false);
+  const [dailyVkPreview, setDailyVkPreview] = useState<string | null>(null);
+  const [dailyVkDate, setDailyVkDate] = useState('');
 
   // YClients (строго чтение списка мастеров: логин, пароль + YCLIENTS_PARTNER_TOKEN)
   const [yclientsLogin, setYclientsLogin] = useState('');
@@ -269,6 +280,12 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
       setVkChatId(data.vkChatId || '');
       setVkTemplate(data.vkTemplate || '');
       setVkEnabled(!!data.vkEnabled);
+      setVkDailyReportEnabled(data.vkDailyReportEnabled !== false);
+      setVkDailyReportTime(data.vkDailyReportTime || '21:05');
+      setVkLastDailyReportDate(data.vkLastDailyReportDate || '');
+      setVkLastDailyReportSentAt(data.vkLastDailyReportSentAt || '');
+      setVkLastDailyReportError(data.vkLastDailyReportError || '');
+      if (data.salonTimeZone) setSalonTimeZone(data.salonTimeZone);
 
       setYclientsLogin(data.yclientsLogin || '');
       setYclientsPassword(data.yclientsPassword || '');
@@ -357,6 +374,8 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
         vkChatId,
         vkTemplate,
         vkEnabled,
+        vkDailyReportEnabled,
+        vkDailyReportTime,
         yclientsLogin,
         yclientsPassword,
         yclientsPartnerToken,
@@ -798,6 +817,62 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
       setVkTestResult({ ok: false, msg: err.message });
     } finally {
       setTestingVk(false);
+    }
+  };
+
+  const handlePreviewDailyVk = async () => {
+    setLoadingDailyVkPreview(true);
+    setDailyVkResult(null);
+    try {
+      const qs = dailyVkDate ? `?date=${encodeURIComponent(dailyVkDate)}` : '';
+      const res = await fetch(`/api/vk/daily-report/preview${qs}`, {
+        headers: getHeaders(),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setDailyVkPreview(data.message || '');
+        if (!dailyVkDate && data.date) setDailyVkDate(data.date);
+      } else {
+        setDailyVkResult({ ok: false, msg: data.error || 'Не удалось сформировать предпросмотр' });
+      }
+    } catch (err: any) {
+      setDailyVkResult({ ok: false, msg: err.message || 'Ошибка соединения' });
+    } finally {
+      setLoadingDailyVkPreview(false);
+    }
+  };
+
+  const handleSendDailyVkNow = async () => {
+    setSendingDailyVk(true);
+    setDailyVkResult(null);
+    try {
+      const res = await fetch('/api/vk/daily-report/send', {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({
+          date: dailyVkDate || undefined,
+          force: true,
+          token: vkToken,
+          chatId: vkChatId,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setDailyVkResult({
+          ok: true,
+          msg: `Итоги дня за ${data.metrics?.formattedDate || data.date} отправлены в VK (звонков: ${data.metrics?.totalCalls ?? 0}, записей: ${data.metrics?.bookingsCount ?? 0}).`,
+        });
+        if (data.message) setDailyVkPreview(data.message);
+        if (data.date) setVkLastDailyReportDate(data.date);
+        setVkLastDailyReportSentAt(new Date().toISOString());
+        setVkLastDailyReportError('');
+      } else {
+        setDailyVkResult({ ok: false, msg: data.error || 'Ошибка отправки дневного отчёта в VK' });
+      }
+    } catch (err: any) {
+      setDailyVkResult({ ok: false, msg: err.message || 'Ошибка соединения' });
+    } finally {
+      setSendingDailyVk(false);
     }
   };
 
@@ -2841,6 +2916,120 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
               <span className={`text-[11px] font-medium ${vkTestResult.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
                 {vkTestResult.msg}
               </span>
+            )}
+          </div>
+
+          {/* Ежедневная автовыгрузка показателей в VK (после 21:00) */}
+          <div className="mt-3 pt-3 border-t border-slate-100 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <BarChart3 className="w-4 h-4 text-blue-600" />
+                <div>
+                  <h5 className="text-xs font-bold text-slate-800">Ежедневная сводка показателей в VK (после 21:00)</h5>
+                  <p className="text-[11px] text-slate-500">
+                    Звонки, пропущенные, записи по видам услуг, мастерам и оценки администраторов (обезличено по 152-ФЗ)
+                  </p>
+                </div>
+              </div>
+              <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-700 cursor-pointer shrink-0">
+                <input
+                  type="checkbox"
+                  checked={vkDailyReportEnabled}
+                  onChange={(e) => setVkDailyReportEnabled(e.target.checked)}
+                  className="rounded-sm text-blue-600 focus:ring-blue-500 w-4 h-4"
+                />
+                Авто после 21:00
+              </label>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                  Время автоотправки ({salonTimeZone === 'Europe/Samara' ? 'UTC+4, Самара' : salonTimeZone})
+                </label>
+                <select
+                  value={vkDailyReportTime}
+                  onChange={(e) => setVkDailyReportTime(e.target.value)}
+                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono"
+                >
+                  <option value="21:00">21:00</option>
+                  <option value="21:05">21:05 (по умолчанию)</option>
+                  <option value="21:15">21:15</option>
+                  <option value="21:30">21:30</option>
+                  <option value="22:00">22:00</option>
+                  <option value="22:30">22:30</option>
+                  <option value="23:00">23:00</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                  Дата для ручной выгрузки / предпросмотра
+                </label>
+                <input
+                  type="date"
+                  value={dailyVkDate}
+                  onChange={(e) => setDailyVkDate(e.target.value)}
+                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono"
+                />
+              </div>
+            </div>
+
+            {(vkLastDailyReportSentAt || vkLastDailyReportError) && (
+              <div className="text-[11px] text-slate-600 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 space-y-0.5">
+                {vkLastDailyReportSentAt && (
+                  <p>
+                    Последняя выгрузка: <span className="font-semibold text-slate-800">{vkLastDailyReportDate || '—'}</span>{' '}
+                    ({new Date(vkLastDailyReportSentAt).toLocaleString('ru-RU', { timeZone: salonTimeZone || 'Europe/Samara' })})
+                  </p>
+                )}
+                {vkLastDailyReportError && (
+                  <p className="text-rose-700 font-medium">Последняя ошибка: {vkLastDailyReportError}</p>
+                )}
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleSendDailyVkNow}
+                disabled={sendingDailyVk}
+                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5"
+              >
+                <Send className="w-3.5 h-3.5" />
+                {sendingDailyVk ? 'Выгрузка...' : 'Выгрузить итоги дня в VK сейчас'}
+              </button>
+              <button
+                type="button"
+                onClick={handlePreviewDailyVk}
+                disabled={loadingDailyVkPreview}
+                className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5"
+              >
+                <Eye className="w-3.5 h-3.5 text-slate-600" />
+                {loadingDailyVkPreview ? 'Загрузка...' : 'Предпросмотр отчёта'}
+              </button>
+              {dailyVkResult && (
+                <span className={`text-[11px] font-medium ${dailyVkResult.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
+                  {dailyVkResult.msg}
+                </span>
+              )}
+            </div>
+
+            {dailyVkPreview && (
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[11px] font-bold text-slate-700">Предпросмотр сообщения VK</span>
+                  <button
+                    type="button"
+                    onClick={() => setDailyVkPreview(null)}
+                    className="text-[11px] text-slate-500 hover:text-slate-700"
+                  >
+                    Скрыть
+                  </button>
+                </div>
+                <pre className="whitespace-pre-wrap text-[11px] text-slate-800 font-sans leading-relaxed">
+                  {dailyVkPreview}
+                </pre>
+              </div>
             )}
           </div>
         </div>

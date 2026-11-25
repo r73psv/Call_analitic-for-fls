@@ -68,6 +68,8 @@ export const MANAGED_SERVER_ENV_KEYS = new Set<string>([
   'S3_BUCKET_NAME',
   'S3_KEY_PREFIX',
   'S3_REGION',
+  'S3_SYNC_DEBOUNCE_MS',
+  'S3_SYNC_BATCH_SIZE',
 
   // Megafon VATS
   'MEGAFON_API_VERSION',
@@ -78,9 +80,12 @@ export const MANAGED_SERVER_ENV_KEYS = new Set<string>([
   'MEGAFON_LK_LOGIN',
   'MEGAFON_LK_PASSWORD',
 
-  // VK notifications
+  // VK notifications & daily KPI report
   'VK_TOKEN',
   'VK_CHAT_ID',
+  'VK_DAILY_REPORT_ENABLED',
+  'VK_DAILY_REPORT_TIME',
+  'SALON_TIMEZONE',
 
   // YClients CRM (строго чтение списка мастеров)
   'YCLIENTS_LOGIN',

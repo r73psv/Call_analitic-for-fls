@@ -24,6 +24,7 @@ import { testGigaAmConnection, getGigaAmConfig, isGigaAmConfigured, normalizeGig
 import { resolveActiveSttProvider, normalizeSttProvider } from '../services/transcriptionService.js';
 import { persistServerEnvVars, getServerEnvStatus, getEnvValue } from '../services/serverEnv.js';
 import { clearYclientsCache, fetchYclientsMasters, testYclientsReadOnlyConnection } from '../services/yclients.js';
+import { normalizeDailyReportTime, resolveReportTimeZone } from '../services/vkDailyReport.js';
 import { SystemCredentials, GigaChatModel, AutoCleanupSettings, LogEntry } from '../types.js';
 
 export const adminRouter = Router();
@@ -129,6 +130,14 @@ adminRouter.get('/credentials', async (req: Request, res: Response) => {
       vkChatId: getEnvValue('VK_CHAT_ID') || creds.vkChatId || store.config.vk.chatId || '',
       vkTemplate: store.config.vk.template || '',
       vkEnabled: !!store.config.vk.enabled,
+      vkDailyReportEnabled: store.config.vk.dailyReportEnabled !== false,
+      vkDailyReportTime: normalizeDailyReportTime(
+        store.config.vk.dailyReportTime || getEnvValue('VK_DAILY_REPORT_TIME') || '21:05'
+      ),
+      vkLastDailyReportDate: store.config.vk.lastDailyReportDate || '',
+      vkLastDailyReportSentAt: store.config.vk.lastDailyReportSentAt || '',
+      vkLastDailyReportError: store.config.vk.lastDailyReportError || '',
+      salonTimeZone: resolveReportTimeZone(),
 
       // YClients (строго чтение списка мастеров: логин, пароль + YCLIENTS_PARTNER_TOKEN)
       yclientsLogin: getEnvValue('YCLIENTS_LOGIN') || creds.yclientsLogin || store.config.yclients.login || '',
@@ -478,6 +487,15 @@ adminRouter.post('/credentials', async (req: Request, res: Response) => {
     }
     if (body.vkTemplate !== undefined) store.config.vk.template = String(body.vkTemplate);
     if (body.vkEnabled !== undefined) store.config.vk.enabled = Boolean(body.vkEnabled);
+    if (body.vkDailyReportEnabled !== undefined) {
+      store.config.vk.dailyReportEnabled = Boolean(body.vkDailyReportEnabled);
+      envUpdates.VK_DAILY_REPORT_ENABLED = store.config.vk.dailyReportEnabled ? 'true' : 'false';
+    }
+    if (body.vkDailyReportTime !== undefined) {
+      const normalizedTime = normalizeDailyReportTime(String(body.vkDailyReportTime));
+      store.config.vk.dailyReportTime = normalizedTime;
+      envUpdates.VK_DAILY_REPORT_TIME = normalizedTime;
+    }
 
     // 6. YClients (строго чтение списка мастеров: логин, пароль + YCLIENTS_PARTNER_TOKEN)
     let yclientsUpdated = false;

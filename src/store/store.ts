@@ -7,7 +7,7 @@ import * as fs from 'fs/promises';
 import { existsSync, mkdirSync, readFileSync, copyFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import { encrypt, decrypt } from './crypto-store.js';
-import { CallRecord, LogEntry, SystemConfig, AccessLogEntry, User, SystemNotification, ConsentRecord } from '../types.js';
+import { CallRecord, LogEntry, SystemConfig, AccessLogEntry, User, SystemNotification, ConsentRecord, BatchAnalysisQueueState } from '../types.js';
 import { getInitialUsers } from './user-store.js';
 import { readConsentStoreSync, setConsentStoreDirect } from './consent-store.js';
 import { deduplicateCalls } from '../services/callUtils.js';
@@ -25,6 +25,7 @@ export interface AppDatabase {
   notifications?: SystemNotification[];
   config: SystemConfig;
   consents?: ConsentRecord[];
+  batchQueue?: BatchAnalysisQueueState;
 }
 
 export function getDefaultConfig(): SystemConfig {
@@ -76,6 +77,8 @@ export function getDefaultConfig(): SystemConfig {
       token: vkToken,
       chatId: vkChatId,
       enabled: Boolean(vkToken && vkChatId),
+      dailyReportEnabled: process.env.VK_DAILY_REPORT_ENABLED !== 'false',
+      dailyReportTime: (process.env.VK_DAILY_REPORT_TIME || '21:05').trim(),
       template: `🔔 *Анализ звонка #{call_id}*\n📅 *Дата:* {call_date_time}\n⏱️ *Длительность:* {duration}\n👤 *Клиент:* {client_name}\n📞 *Оценка оператора:* {operator_score}\n💬 *Резюме:* {summary}\n⚠️ *Конфликт:* {is_dispute_text}\n💡 *Рекомендации:* {recommendations}`,
     },
     yclients: {
@@ -557,4 +560,30 @@ export async function writeStore(data: AppDatabase): Promise<void> {
   });
 
   await writeQueue;
+}
+
+/**
+ * Waits for all queued async store writes to hit disk (used during graceful shutdown).
+ */
+export async function flushStoreWrite(): Promise<void> {
+  await writeQueue;
+}
+
+/**
+ * Synchronous atomic fallback write used right before process exit on uncaughtException / SIGTERM.
+ */
+export function writeStoreSyncAtomic(data: AppDatabase): void {
+  try {
+    memCache = data;
+    const dir = path.dirname(DATA_PATH_ENC);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+    const jsonStr = JSON.stringify(data, null, 2);
+    const payload = encrypt(jsonStr);
+    const encStr = JSON.stringify(payload, null, 2);
+    writeFileSync(DATA_PATH_ENC, encStr, 'utf-8');
+  } catch (err: any) {
+    console.error('[Store] Ошибка синхронной записи перед завершением:', err?.message || err);
+  }
 }

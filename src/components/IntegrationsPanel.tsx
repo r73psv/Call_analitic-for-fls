@@ -8,7 +8,7 @@ import {
   Settings, Save, Server, Shield, MessageCircle, Database, 
   HelpCircle, Calendar, RefreshCw, Clock, Globe, Zap, 
   Key, Lock, CheckCircle2, AlertTriangle, Trash2, Cpu, Building2,
-  Copy, Check, PhoneCall, PhoneForwarded, Users, Info, Radio
+  Copy, Check, PhoneCall, PhoneForwarded, Users, Info, Radio, Send
 } from 'lucide-react';
 import { SystemConfig, GigaChatModel, MegafonApiVersion } from '../types.js';
 import { S3SyncPanel } from './S3SyncPanel.js';
@@ -123,6 +123,10 @@ export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: 
   const [vkToken, setVkToken] = useState(config.vk?.token || '');
   const [vkChatId, setVkChatId] = useState(config.vk?.chatId || '');
   const [vkTemplate, setVkTemplate] = useState(config.vk?.template || '');
+  const [vkDailyReportEnabled, setVkDailyReportEnabled] = useState(config.vk?.dailyReportEnabled !== false);
+  const [vkDailyReportTime, setVkDailyReportTime] = useState(config.vk?.dailyReportTime || '21:05');
+  const [sendingDailyVk, setSendingDailyVk] = useState(false);
+  const [dailyVkStatus, setDailyVkStatus] = useState<{ ok: boolean; msg: string } | null>(null);
   
   const [ycEnabled, setYcEnabled] = useState(config.yclients?.enabled ?? true);
   const [ycLogin, setYcLogin] = useState(config.yclients?.login || '');
@@ -153,6 +157,8 @@ export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: 
       setVkToken(config.vk?.token || '');
       setVkChatId(config.vk?.chatId || '');
       setVkTemplate(config.vk?.template || '');
+      setVkDailyReportEnabled(config.vk?.dailyReportEnabled !== false);
+      setVkDailyReportTime(config.vk?.dailyReportTime || '21:05');
 
       setYcEnabled(config.yclients?.enabled ?? true);
       setYcLogin(config.yclients?.login || '');
@@ -361,6 +367,8 @@ export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: 
           token: vkToken,
           chatId: vkChatId,
           template: vkTemplate,
+          dailyReportEnabled: vkDailyReportEnabled,
+          dailyReportTime: vkDailyReportTime,
         },
         yclients: {
           ...config.yclients,
@@ -1126,6 +1134,75 @@ export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: 
               <p className="mt-1 text-[11px] text-slate-500">
                 Переменные: <code className="bg-slate-100 px-1 py-0.5 rounded text-sky-700 font-semibold">{'{duration}'}</code> (длительность звонка), <code className="bg-slate-100 px-1 py-0.5 rounded text-slate-700">{'{call_date_time}'}</code>, <code className="bg-slate-100 px-1 py-0.5 rounded text-slate-700">{'{client_name}'}</code>, <code className="bg-slate-100 px-1 py-0.5 rounded text-slate-700">{'{operator_score}'}</code>, <code className="bg-slate-100 px-1 py-0.5 rounded text-slate-700">{'{summary}'}</code>, <code className="bg-slate-100 px-1 py-0.5 rounded text-slate-700">{'{is_dispute_text}'}</code>, <code className="bg-slate-100 px-1 py-0.5 rounded text-slate-700">{'{recommendations}'}</code>
               </p>
+            </div>
+
+            <div className="mt-3 pt-3 border-t border-slate-100 space-y-2.5 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <label className="flex items-center gap-2 font-medium text-slate-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={vkDailyReportEnabled}
+                    onChange={(e) => setVkDailyReportEnabled(e.target.checked)}
+                    className="w-4 h-4 rounded text-sky-600"
+                  />
+                  Ежедневная сводка показателей в VK после 21:00 (звонки, пропущенные, записи по услугам и мастерам)
+                </label>
+                <select
+                  value={vkDailyReportTime}
+                  onChange={(e) => setVkDailyReportTime(e.target.value)}
+                  className="px-2 py-1 border border-slate-200 rounded-lg text-xs font-mono bg-slate-50"
+                >
+                  <option value="21:00">21:00</option>
+                  <option value="21:05">21:05</option>
+                  <option value="21:15">21:15</option>
+                  <option value="21:30">21:30</option>
+                  <option value="22:00">22:00</option>
+                  <option value="22:30">22:30</option>
+                  <option value="23:00">23:00</option>
+                </select>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={sendingDailyVk}
+                  onClick={async () => {
+                    setSendingDailyVk(true);
+                    setDailyVkStatus(null);
+                    try {
+                      const res = await fetch('/api/vk/daily-report/send', {
+                        method: 'POST',
+                        headers: {
+                          'Content-Type': 'application/json',
+                          'x-user-role': userRole,
+                        },
+                        body: JSON.stringify({ force: true, chatId: vkChatId }),
+                      });
+                      const data = await res.json();
+                      if (res.ok && data.success) {
+                        setDailyVkStatus({
+                          ok: true,
+                          msg: `Итоги дня (${data.metrics?.formattedDate || data.date}) отправлены в VK: звонков ${data.metrics?.totalCalls ?? 0}, записей ${data.metrics?.bookingsCount ?? 0}.`,
+                        });
+                      } else {
+                        setDailyVkStatus({ ok: false, msg: data.error || 'Не удалось отправить сводку в VK' });
+                      }
+                    } catch (err: any) {
+                      setDailyVkStatus({ ok: false, msg: err?.message || 'Ошибка соединения' });
+                    } finally {
+                      setSendingDailyVk(false);
+                    }
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white rounded-lg text-xs font-medium transition-colors"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  {sendingDailyVk ? 'Выгрузка...' : 'Выгрузить итоги дня в VK'}
+                </button>
+                {dailyVkStatus && (
+                  <span className={`text-[11px] font-medium ${dailyVkStatus.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
+                    {dailyVkStatus.msg}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
 
