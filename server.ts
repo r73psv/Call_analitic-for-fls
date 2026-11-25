@@ -773,7 +773,7 @@ async function executeSingleModelAttempt(
 ): Promise<{ success: boolean; result?: Partial<CallRecord>; errorReason?: string }> {
   try {
     const anonymizedText = anonymizeTranscript(cleanTranscript);
-    let gigaModel: GigaChatModel = 'GigaChat:Lite';
+    let gigaModel: GigaChatModel = 'GigaChat:Ultra';
     if (model === 'GigaChat:Pro' || model === 'GigaChat:Max' || model === 'GigaChat:Lite' || model === 'GigaChat:Ultra') {
       gigaModel = model;
     }
@@ -1118,9 +1118,9 @@ async function analyzeCallTextOrAudio(
 
   // 3. Select GigaChat model
   const db = readDb();
-  let modelToUse: GigaChatModel = (requestedModel as GigaChatModel) || db.config.default_gigachat_model || 'GigaChat:Lite';
+  let modelToUse: GigaChatModel = (requestedModel as GigaChatModel) || db.config.default_gigachat_model || 'GigaChat:Ultra';
   if (!modelToUse.startsWith('GigaChat')) {
-    modelToUse = 'GigaChat:Lite';
+    modelToUse = 'GigaChat:Ultra';
   }
 
   const currentSalon = getEffectiveSalonName(db.config);
@@ -1281,7 +1281,7 @@ function getFallbackAnalysis(transcript: string, errorReason?: string, callDurat
   }
 
   const reason = 'вызов резервного генератора getFallbackAnalysis';
-  const fallbackRes = generateLocalFallbackAnalysis(transcript, 'GigaChat:Lite', callDurationSeconds, currentSalon, reason);
+  const fallbackRes = generateLocalFallbackAnalysis(transcript, 'GigaChat:Ultra', callDurationSeconds, currentSalon, reason);
   appendLog('info', 'gigachat', `[GigaChat FALLBACK] Анализ выполнен локальным резервом. Причина: ${fallbackRes.fallback_reason || reason}`);
   return {
     transcript: fallbackRes.formatted_transcript || transcript,
@@ -2456,7 +2456,7 @@ async function importCallRecord(extCall: any): Promise<boolean> {
       call_id: extCall.call_id,
       timestamp: extCall.timestamp,
       duration_seconds: 0,
-      model_used: db.config.activeModel || 'GigaChat:Lite',
+      model_used: db.config.activeModel || 'GigaChat:Ultra',
       transcript: 'Звонок не состоялся. Длительность разговора 00:00 (пропущенный вызов или сброс). Запись разговора и стенограмма отсутствуют.',
       summary: isIncoming ? 'Пропущенный входящий звонок (00:00)' : 'Исходящий звонок, абонент не ответил (00:00)',
       key_facts: {
@@ -2520,7 +2520,7 @@ async function importCallRecord(extCall: any): Promise<boolean> {
       call_id: extCall.call_id,
       timestamp: extCall.timestamp,
       duration_seconds: extCall.duration_seconds,
-      model_used: db.config.activeModel || 'GigaChat:Lite',
+      model_used: db.config.activeModel || 'GigaChat:Ultra',
       transcript: 'Разговор не состоялся (длительность менее 10 сек, диалог отсутствует).',
       summary: `Разговор не состоялся: длительность вызова ${extCall.duration_seconds} сек (менее 10 секунд), диалог между оператором и клиентом отсутствует.`,
       key_facts: {
@@ -2586,7 +2586,7 @@ async function importCallRecord(extCall: any): Promise<boolean> {
       call_id: extCall.call_id,
       timestamp: resolvedTimestamp,
       duration_seconds: extCall.duration_seconds,
-      model_used: db.config.default_gigachat_model || 'GigaChat:Lite',
+      model_used: db.config.default_gigachat_model || 'GigaChat:Ultra',
       transcript: extCall.transcript || 'Загрузка аудиозаписи...',
       summary: 'Анализ звонка...',
       key_facts: {
@@ -2650,7 +2650,7 @@ async function importCallRecord(extCall: any): Promise<boolean> {
         }
 
         const analysisResult = await analyzeCallTextOrAudio(
-          db.config.activeModel || 'GigaChat:Lite',
+          db.config.activeModel || 'GigaChat:Ultra',
           extCall.transcript,
           audioBase64,
           audioDownloadFailed,
@@ -4484,7 +4484,7 @@ app.post('/api/calls/webhook', async (req, res) => {
       call_id: callId,
       timestamp: payload.timestamp || new Date().toISOString(),
       duration_seconds: duration,
-      model_used: db.config.activeModel || 'GigaChat:Lite',
+      model_used: db.config.activeModel || 'GigaChat:Ultra',
       transcript: payload.transcript || (status === 'missed' ? 'Звонок пропущен или сброшен до ответа' : 'Поступил звонок через АТС. Текст стенограммы...'),
       summary: payload.summary || (status === 'missed' ? (direction === 'incoming' ? 'Пропущенный входящий звонок через АТС' : 'Непринятый исходящий звонок через АТС') : 'Обращение клиента через телефонию АТС'),
       client_name: clientName,
@@ -4514,7 +4514,7 @@ app.post('/api/calls/webhook', async (req, res) => {
 
     if (payload.transcript && status !== 'missed' && payload.transcript.length > 50) {
       try {
-        const gModel = (db.config.default_gigachat_model || 'GigaChat:Lite') as GigaChatModel;
+        const gModel = (db.config.default_gigachat_model || 'GigaChat:Ultra') as GigaChatModel;
         const currentSalon = getEffectiveSalonName(db.config);
         const customPrompt = db.config?.customSystemPrompt || db.config?.credentials?.customSystemPrompt;
         const analysis = await analyzeWithRetry(payload.transcript, gModel, undefined, undefined, currentSalon, customPrompt, newCall.timestamp);
@@ -4987,7 +4987,7 @@ app.post('/api/calls/:id/clarify-context', async (req, res) => {
 app.post('/api/calls/analyze', async (req, res) => {
   const { transcript, client_name, operator_name, duration_seconds, model, audioBase64, timestamp } = req.body;
   const db = readDb();
-  const selectedModel = model || db.config.activeModel || 'GigaChat:Lite';
+  const selectedModel = model || db.config.activeModel || 'GigaChat:Ultra';
   const resolvedTimestamp = (typeof timestamp === 'string' && timestamp.trim()) ? timestamp.trim() : new Date().toISOString();
 
   const durationSec = duration_seconds !== undefined ? Number(duration_seconds) : 120;
@@ -5214,7 +5214,7 @@ async function performCallReanalysis(
   // If the call has audio, prioritize fresh transcription, but retain valid existing transcript as fallback
   const existingTranscript = (!isErroneousTranscript && call.transcript && call.transcript.length > 20) ? call.transcript : '';
 
-  const selectedModel = (modelOverride as GigaChatModel) || db.config.default_gigachat_model || db.config.activeModel || 'GigaChat:Lite';
+  const selectedModel = (modelOverride as GigaChatModel) || db.config.default_gigachat_model || db.config.activeModel || 'GigaChat:Ultra';
   const previousCompletedSnapshot: CallRecord | null =
     call.status === 'completed' ? JSON.parse(JSON.stringify(call)) : null;
 
@@ -5438,7 +5438,7 @@ async function performCallReanalysis(
           : {}),
         is_demo: false,
         model_used: selectedModel,
-        gigachat_model: selectedModel.startsWith('GigaChat') ? (selectedModel as GigaChatModel) : 'GigaChat:Lite'
+        gigachat_model: selectedModel.startsWith('GigaChat') ? (selectedModel as GigaChatModel) : 'GigaChat:Ultra'
       };
       if (audioUrl) {
         finalDb.calls[finalCallIdx].audio_url = audioUrl;
@@ -5968,7 +5968,7 @@ app.post("/api/routerai/test", async (_req, res) => {
 // 8.3. TEST GIGACHAT CONNECTION (Russian Sovereign LLM)
 app.post('/api/gigachat/test', async (req, res) => {
   const { model } = req.body || {};
-  const targetModel: GigaChatModel = model || 'GigaChat:Lite';
+  const targetModel: GigaChatModel = model || 'GigaChat:Ultra';
   appendLog('info', 'gigachat', `Тестирование соединения с Сбер GigaChat API (${targetModel})...`);
 
   try {
@@ -6587,7 +6587,7 @@ async function startServer() {
     try {
       const bootDb = readDb();
       const gigaStatus = getGigaChatConfigStatus();
-      const defaultModel = bootDb.config?.default_gigachat_model || process.env.GIGACHAT_MODEL || 'GigaChat:Lite';
+      const defaultModel = bootDb.config?.default_gigachat_model || process.env.GIGACHAT_MODEL || 'GigaChat:Ultra';
       if (gigaStatus.configured) {
         console.log(
           `[GigaChat INIT] конфигурация: ок (источник ключа: ${gigaStatus.source}, scope: ${gigaStatus.scope}, модель: ${defaultModel})`
@@ -6709,7 +6709,7 @@ function runPostStartupMaintenance() {
           const anonymized = anonymizeTranscript(call.transcript);
           const currentSalon = getEffectiveSalonName(db.config);
           const customPrompt = db.config?.customSystemPrompt || db.config?.credentials?.customSystemPrompt;
-          analyzeWithRetry(anonymized, 'GigaChat:Lite', (l, m) => console.log(`[GigaChat AutoSync] ${m}`), call.duration_seconds, currentSalon, customPrompt, call.timestamp)
+          analyzeWithRetry(anonymized, (db.config.default_gigachat_model || 'GigaChat:Ultra') as GigaChatModel, (l, m) => console.log(`[GigaChat AutoSync] ${m}`), call.duration_seconds, currentSalon, customPrompt, call.timestamp)
             .then(analysis => {
               const updatedDb = readDb();
               const idx = updatedDb.calls.findIndex((c: any) => c.call_id === 'megafon-real-84462946');

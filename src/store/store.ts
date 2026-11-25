@@ -44,7 +44,7 @@ export function getDefaultConfig(): SystemConfig {
   const yclientsPartnerToken = getEnvValue('YCLIENTS_PARTNER_TOKEN');
   const yclientsSalonId = getEnvValue('YCLIENTS_SALON_ID');
   const gigachatAuthKey = getEnvValue('GIGACHAT_AUTH_KEY', 'GIGACHAT_CREDENTIALS');
-  const gigachatModel = (getEnvValue('GIGACHAT_MODEL', 'GIGACHAT_DEFAULT_MODEL') || 'GigaChat:Lite') as any;
+  const gigachatModel = (getEnvValue('GIGACHAT_MODEL', 'GIGACHAT_DEFAULT_MODEL') || 'GigaChat:Ultra') as any;
   const gigachatScope = (getEnvValue('GIGACHAT_SCOPE') || 'GIGACHAT_API_PERS') as 'GIGACHAT_API_PERS' | 'GIGACHAT_API_B2B' | 'GIGACHAT_API_CORP';
   const sttProvider =
     process.env.STT_PROVIDER === 'tbank_voicekit' || process.env.STT_PROVIDER === 'gigaam_v3'

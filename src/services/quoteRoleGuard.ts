@@ -41,6 +41,10 @@ export interface GeneratorSummaryFieldsInput {
   manager_next_steps?: string[] | null;
   operator_comment?: string;
   quotes_support?: string[];
+  /** Explicit quotes bound to specific summary fields (e.g., from facts.* or summary metadata) */
+  field_quotes?: Partial<Record<string, string | null | undefined>>;
+  /** Skip checking requested_service quote ownership on existing-booking confirmation calls where manager reminds client of booked service */
+  skip_service_field_quote_check?: boolean;
 }
 
 export interface GeneratorQuoteRoleControlResult {
@@ -49,7 +53,38 @@ export interface GeneratorQuoteRoleControlResult {
   mismatches: QuoteRoleMismatch[];
 }
 
+export interface FieldQuoteSpeakerCheckResult {
+  valid: boolean;
+  field: string;
+  fieldLabelRu: string;
+  expectedRole: CanonicalSpeakerRole;
+  actualRole: CanonicalSpeakerRole | null;
+  quote: string;
+}
+
 export const NEEDS_VERIFICATION_LABEL = 'требует проверки';
+
+/**
+ * Maps summary fields to the speaker role they describe and their Russian display label
+ * used in `[Generator WARNING]` diagnostics.
+ */
+export const SUMMARY_FIELD_SPEAKER_META: Record<
+  string,
+  { expectedRole: CanonicalSpeakerRole; labelRu: string }
+> = {
+  call_purpose: { expectedRole: 'client', labelRu: 'цель' },
+  goal: { expectedRole: 'client', labelRu: 'цель' },
+  requested_service: { expectedRole: 'client', labelRu: 'желаемая услуга' },
+  service: { expectedRole: 'client', labelRu: 'желаемая услуга' },
+  unbooked_reason: { expectedRole: 'client', labelRu: 'причина отказа' },
+  reason_if_not: { expectedRole: 'client', labelRu: 'причина отказа' },
+  offered_master: { expectedRole: 'manager', labelRu: 'предложенный мастер' },
+  master: { expectedRole: 'manager', labelRu: 'предложенный мастер' },
+  offered_price: { expectedRole: 'manager', labelRu: 'цена' },
+  price: { expectedRole: 'manager', labelRu: 'цена' },
+  offered_date_time: { expectedRole: 'manager', labelRu: 'дата и время' },
+  date_time: { expectedRole: 'manager', labelRu: 'дата и время' },
+};
 
 function normalizeQuoteText(text: string): string {
   return String(text || '')
@@ -235,11 +270,137 @@ export function extractAttributedQuotes(text?: string | null): AttributedQuoteMa
 }
 
 /**
+ * Extracts all quoted fragments («...», "...", „...“) from a summary field value,
+ * ignoring brand/salon names immediately preceded by «салон»/«студия»/«бренд».
+ */
+export function extractQuotedSnippets(text?: string | null): string[] {
+  if (!text || typeof text !== 'string') return [];
+  const results: string[] = [];
+  const re = new RegExp(QUOTED_TEXT_CAPTURE, 'giu');
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const quote = (m[1] || m[2] || m[3] || '').trim();
+    if (!quote || quote.length < 2) continue;
+    const before = text.slice(Math.max(0, m.index - 24), m.index);
+    if (/(?:салон[ауе]?|студи[яиюей]|бренда?)\s*$/iu.test(before)) {
+      continue;
+    }
+    results.push(quote);
+  }
+  return results;
+}
+
+/**
+ * Verifies a quote bound to a specific summary field against the utterances of the speaker
+ * that the field describes (e.g. `call_purpose`/`goal` -> client, `offered_price` -> manager).
+ * If the quote belongs to the opposite speaker, logs:
+ *   `[Generator WARNING] цитата «...» привязана к полю «цель», но принадлежит реплике менеджера.`
+ */
+export function verifyFieldQuoteSpeaker(
+  fieldName: string,
+  quote: string,
+  transcript?: string | null,
+  precomputedRoles?: RoleUtterancesMap
+): FieldQuoteSpeakerCheckResult {
+  const meta = SUMMARY_FIELD_SPEAKER_META[fieldName];
+  if (!meta || !quote || !quote.trim()) {
+    return {
+      valid: true,
+      field: fieldName,
+      fieldLabelRu: meta?.labelRu || fieldName,
+      expectedRole: meta?.expectedRole || 'client',
+      actualRole: null,
+      quote: (quote || '').trim(),
+    };
+  }
+
+  const roleUtterances = precomputedRoles || extractRoleUtterances(transcript);
+  if (!roleUtterances.hasRoleLabels) {
+    return {
+      valid: true,
+      field: fieldName,
+      fieldLabelRu: meta.labelRu,
+      expectedRole: meta.expectedRole,
+      actualRole: null,
+      quote: quote.trim(),
+    };
+  }
+
+  const cleanQuote = quote.trim();
+  const expectedUtterances = meta.expectedRole === 'client' ? roleUtterances.client : roleUtterances.manager;
+  const oppositeRole: CanonicalSpeakerRole = meta.expectedRole === 'client' ? 'manager' : 'client';
+  const oppositeUtterances = oppositeRole === 'client' ? roleUtterances.client : roleUtterances.manager;
+  const oppositeGenitive = oppositeRole === 'manager' ? 'менеджера' : 'клиента';
+
+  const inExpected = doesRoleUtterancesContainQuote(expectedUtterances, cleanQuote);
+  if (inExpected) {
+    return {
+      valid: true,
+      field: fieldName,
+      fieldLabelRu: meta.labelRu,
+      expectedRole: meta.expectedRole,
+      actualRole: meta.expectedRole,
+      quote: cleanQuote,
+    };
+  }
+
+  const inOpposite = doesRoleUtterancesContainQuote(oppositeUtterances, cleanQuote);
+  if (inOpposite) {
+    console.warn(
+      `[Generator WARNING] цитата «${cleanQuote}» привязана к полю «${meta.labelRu}», но принадлежит реплике ${oppositeGenitive}.`
+    );
+    return {
+      valid: false,
+      field: fieldName,
+      fieldLabelRu: meta.labelRu,
+      expectedRole: meta.expectedRole,
+      actualRole: oppositeRole,
+      quote: cleanQuote,
+    };
+  }
+
+  return {
+    valid: true,
+    field: fieldName,
+    fieldLabelRu: meta.labelRu,
+    expectedRole: meta.expectedRole,
+    actualRole: null,
+    quote: cleanQuote,
+  };
+}
+
+const GREETING_QUOTE_GOAL_SUBSTANCE_RE =
+  /(?:запис[а-яё]*|брон[а-яё]*|стрижк|окрашив|маникюр|педикюр|укладк|макияж|бров|ресниц|завивк|уход|услуг|процедур|мастер|специалист|цен[ауы]|стоимост|прайс|перенес|перенос|отмен|опозда|подтверд|консультац|обзвон|жалоб|претенз|вопрос|уточн|узнат|справк|звоню\s+по\s+поводу|хотел[аи]?\s+бы|хочу\s+|можно\s+[А-ЯЁ][а-яё]+)/iu;
+
+const GREETING_ONLY_RE =
+  /^(?:(?:алло|ало|ау|да|здравствуйте|здрасте|добрый\s+(?:день|вечер)|доброе\s+утро|приветствую|привет|слушаю(?:\s+вас)?|чем\s+могу\s+помочь|салон(?:\s+красоты)?|студия(?:\s+красоты)?|fashion\s+look(?:\s+studio)?|фэшн\s+лук(?:\s+студио)?|фешен\s+лук(?:\s+студио)?|лук\s+студи[яи]|ли[кqс]\s*28|liq\s*28|от[,\s]+а[,\s]+28|администратор(?:\s+[А-ЯЁа-яё]+)?|меня\s+зовут\s+[А-ЯЁа-яё]+|это\s+[А-ЯЁа-яё]+|вас\s+слушает(?:\s+[А-ЯЁа-яё]+)?|до\s+свидания|всего\s+доброго|спасибо)[\s,!.?:;\-–—«»"„“”]*)+$/iu;
+
+/**
+ * Checks whether a string or quote is purely a greeting / salon intro / «Алло»
+ * and therefore MUST NOT be placed into the «Цель обращения» (`call_purpose`) field.
+ */
+export function isGreetingOnlyQuote(text?: string | null): boolean {
+  if (!text || typeof text !== 'string') return false;
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (/^(?:не\s+озвучено|не\s+указано|не\s+применимо|разговор\s+не\s+состоялся|звонок\s+не\s+(?:состоялся|дош[её]л)|требует\s+проверки)$/iu.test(trimmed)) {
+    return false;
+  }
+  const stripped = trimmed.replace(/[«»„“”"''`]/g, '').trim();
+  if (!stripped) return false;
+  if (GREETING_QUOTE_GOAL_SUBSTANCE_RE.test(stripped)) {
+    return false;
+  }
+  return GREETING_ONLY_RE.test(stripped);
+}
+
+/**
  * Controls speaker-bound quotes in generator fields BEFORE forming final summary fields.
  * If a quote is bound to a specific speaker (e.g., «клиент сказал X») and the utterances
  * with that role label do NOT contain X:
  *   - logs `[Generator WARNING] цитата не совпадает с меткой роли ...`
  *   - marks the field as `требует проверки` and suppresses the mismatched quote.
+ * Also blocks greeting-only quotes («Добрый день, салон ...», «Алло») from being placed into `call_purpose`.
  */
 export function enforceSummaryQuoteRoleControl(
   inputFields: GeneratorSummaryFieldsInput,
@@ -259,8 +420,37 @@ export function enforceSummaryQuoteRoleControl(
   const flaggedSet = new Set<string>();
   const mismatches: QuoteRoleMismatch[] = [];
 
+  // Запрет подстановки цитаты-приветствия в поле «Цель обращения» (работает независимо от наличия меток ролей)
+  if (typeof fields.call_purpose === 'string' && fields.call_purpose.trim()) {
+    const rawPurpose = fields.call_purpose.trim();
+    const purposeQuotedSnippets = extractQuotedSnippets(rawPurpose);
+    const boundPurposeQuote =
+      typeof inputFields.field_quotes?.call_purpose === 'string'
+        ? inputFields.field_quotes.call_purpose.trim()
+        : '';
+
+    const badGreetingSnippet =
+      (isGreetingOnlyQuote(rawPurpose) ? rawPurpose : null) ||
+      purposeQuotedSnippets.find((s) => isGreetingOnlyQuote(s)) ||
+      (boundPurposeQuote && isGreetingOnlyQuote(boundPurposeQuote) ? boundPurposeQuote : null);
+
+    if (badGreetingSnippet) {
+      flaggedSet.add('call_purpose');
+      mismatches.push({
+        field: 'call_purpose',
+        attributedRole: 'Клиент',
+        quote: badGreetingSnippet.replace(/^[«»„“”"]+|[«»„“”"]+$/g, '').trim() || badGreetingSnippet,
+        foundInOppositeRole: true,
+      });
+      console.warn(
+        `[Generator WARNING] цитата-приветствие «${badGreetingSnippet.replace(/^[«»„“”"]+|[«»„“”"]+$/g, '').trim()}» не может быть подставлена в поле «цель».`
+      );
+      fields.call_purpose = NEEDS_VERIFICATION_LABEL;
+    }
+  }
+
   if (!roleUtterances.hasRoleLabels) {
-    return { fields, flaggedFields: [], mismatches };
+    return { fields, flaggedFields: Array.from(flaggedSet), mismatches };
   }
 
   const checkText = (fieldName: string, text: string, atomicReplace: boolean): string => {
@@ -335,7 +525,62 @@ export function enforceSummaryQuoteRoleControl(
   for (const key of atomicKeys) {
     const val = fields[key];
     if (typeof val === 'string' && val.trim()) {
-      fields[key] = checkText(key, val, true);
+      let checked = checkText(key, val, true);
+
+      // Проверка цитаты и говорящего, которого описывает поле (даже без явной подписи «клиент сказал ...»)
+      const fieldMeta = SUMMARY_FIELD_SPEAKER_META[key];
+      const skipForService = key === 'requested_service' && Boolean(inputFields.skip_service_field_quote_check);
+      if (fieldMeta && !skipForService) {
+        const quotedSnippets = extractQuotedSnippets(val);
+        for (const snippet of quotedSnippets) {
+          const fieldCheck = verifyFieldQuoteSpeaker(key, snippet, transcript, roleUtterances);
+          if (!fieldCheck.valid) {
+            flaggedSet.add(key);
+            const alreadyRecorded = mismatches.some(
+              (m) => m.field === key && normalizeQuoteText(m.quote) === normalizeQuoteText(snippet)
+            );
+            if (!alreadyRecorded) {
+              mismatches.push({
+                field: key,
+                attributedRole: fieldMeta.expectedRole === 'client' ? 'Клиент' : 'Менеджер',
+                quote: snippet,
+                foundInOppositeRole: true,
+              });
+            }
+            checked = NEEDS_VERIFICATION_LABEL;
+          }
+        }
+      }
+
+      fields[key] = checked;
+    }
+
+    // Проверка явно привязанной к полю цитаты (например, из facts.*.quote или field_quotes)
+    const boundQuote = inputFields.field_quotes?.[key];
+    const skipForServiceBound = key === 'requested_service' && Boolean(inputFields.skip_service_field_quote_check);
+    if (
+      typeof boundQuote === 'string' &&
+      boundQuote.trim() &&
+      SUMMARY_FIELD_SPEAKER_META[key] &&
+      !skipForServiceBound
+    ) {
+      const boundCheck = verifyFieldQuoteSpeaker(key, boundQuote, transcript, roleUtterances);
+      if (!boundCheck.valid) {
+        flaggedSet.add(key);
+        const fieldMeta = SUMMARY_FIELD_SPEAKER_META[key];
+        const alreadyRecorded = mismatches.some(
+          (m) => m.field === key && normalizeQuoteText(m.quote) === normalizeQuoteText(boundQuote)
+        );
+        if (!alreadyRecorded) {
+          mismatches.push({
+            field: key,
+            attributedRole: fieldMeta.expectedRole === 'client' ? 'Клиент' : 'Менеджер',
+            quote: boundQuote.trim(),
+            foundInOppositeRole: true,
+          });
+        }
+        fields[key] = NEEDS_VERIFICATION_LABEL;
+      }
     }
   }
 

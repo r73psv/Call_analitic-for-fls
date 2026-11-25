@@ -60,7 +60,7 @@ adminRouter.get('/credentials', async (req: Request, res: Response) => {
 
       // GigaChat
       gigachatAuthKey: effectiveGigaKey,
-      gigachatModel: getEnvValue('GIGACHAT_MODEL', 'GIGACHAT_DEFAULT_MODEL') || creds.gigachatModel || store.config.default_gigachat_model || 'GigaChat:Lite',
+      gigachatModel: getEnvValue('GIGACHAT_MODEL', 'GIGACHAT_DEFAULT_MODEL') || creds.gigachatModel || store.config.default_gigachat_model || 'GigaChat:Ultra',
       gigachatScope: getEnvValue('GIGACHAT_SCOPE') || creds.gigachatScope || 'GIGACHAT_API_PERS',
       gigachatConfigured: !!effectiveGigaKey,
       customSystemPrompt: store.config.customSystemPrompt || creds.customSystemPrompt || '',

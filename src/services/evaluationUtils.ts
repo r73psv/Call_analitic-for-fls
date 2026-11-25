@@ -4,7 +4,7 @@
  */
 
 import { CallEvaluationCriterion, CallEvaluation } from '../types.js';
-import { stripIvrFromTranscript } from './transcriptUtils.js';
+import { stripIvrFromTranscript, isShortNoTopicCall, classifyPartialOrInquiryCall } from './transcriptUtils.js';
 import { classifyCallContext, CallContextClassification } from './summaryUtils.js';
 
 export interface CriterionDefinition {
@@ -232,6 +232,63 @@ export function splitSpeakerLines(transcript: string): DialogueUtterances {
 }
 
 /**
+ * Контроль «интерес → отказ»: проверяет наличие в репликах клиента явной фразы отказа
+ * («нет», «увы, сейчас нет», «не могу», «не могу говорить», «не сейчас», «не надо», «не подходит» и т. п.).
+ */
+export function hasClientRefusalPhrase(transcript?: string | null): boolean {
+  if (!transcript || typeof transcript !== 'string') return false;
+  const { clientText, fullText } = splitSpeakerLines(transcript);
+  const target = (clientText || fullText || '').trim();
+  if (!target) return false;
+
+  const EXPLICIT_REFUSAL_RE =
+    /(?:^|[\s,!.?«»"—\-])(?:увы[,\s]+сейчас\s+нет|сейчас\s+нет|пока\s+нет|не\s+могу(?:\s+(?:говорить|разговаривать|прийти|подойти|сейчас|записаться))?|не\s+сейчас|неудобно\s+(?:говорить|разговаривать)|не\s+удобно\s+(?:говорить|разговаривать)|нет[,\s]+спасибо|нет[,\s]+не\s+(?:надо|нужно|буду|смогу|сейчас)|тогда\s+не\s+надо|не\s+надо|не\s+нужно|не\s+подходит|не\s+смогу|не\s+получится|не\s+получается|передумал[аи]?|отказываюсь|отмените\s+запись|отменить\s+запись|пока\s+не\s+планиру[юе]|не\s+актуально)(?:$|[\s,!.?«»"—\-])/iu;
+  if (EXPLICIT_REFUSAL_RE.test(target)) {
+    return true;
+  }
+
+  // Короткое или самостоятельное «нет» в реплике клиента (не внутри слова)
+  const STANDALONE_NO_RE =
+    /(?:^|[.!?\n]\s*)(?:увы[,\s]+|ой[,\s]+|ну[,\s]+|к\s+сожалению[,\s]+)?нет(?:\s*[.,!?]|\s+(?:сейчас|пока|спасибо|увы|не\s+|до\s+свидания|всего\s+доброго)|$)/iu;
+  return STANDALONE_NO_RE.test(target);
+}
+
+/**
+ * Распознаёт короткий исходящий звонок-обзвон с быстрым отказом клиента
+ * («Это салон X, администратор Y, звоню по поводу записи» -> «увы, сейчас нет», «не могу говорить»).
+ */
+export function isShortOutboundRefusalCall(transcript?: string | null): boolean {
+  if (!transcript || typeof transcript !== 'string') return false;
+  const clean = stripIvrFromTranscript(transcript);
+  if (!clean) return false;
+
+  const { managerText, clientText, fullText } = splitSpeakerLines(clean);
+  const managerPart = managerText || fullText;
+  const clientPart = clientText || fullText;
+
+  const hasOutboundInitiation =
+    /(?:это\s+(?:салон|студи[яи])|звон(?:ю|им)\s+(?:вам\s+)?(?:из\s+салона|по\s+поводу\s+записи|по\s+записи|напомнить|предложить)|беспоко(?:ю|ят|им)\s+(?:вас\s+)?из\s+салона|администратор\s+[А-ЯЁа-яё]+[^.!?\n]{0,40}звон(?:ю|им)|хотел[аи]?\s+(?:предложить\s+запись|пригласить\s+вас|напомнить)|вы\s+давно\s+у\s+нас\s+не\s+были)/iu.test(
+      managerPart
+    );
+  if (!hasOutboundInitiation) return false;
+
+  const hasRefusal = hasClientRefusalPhrase(clean);
+  if (!hasRefusal) return false;
+
+  // Убеждаемся, что запись в итоге НЕ была подтверждена
+  const ctx = classifyCallContext(clean);
+  if (ctx.isConfirmedBooking) return false;
+
+  // И клиент действительно ответил коротко / отказался без полноценного подбора услуги
+  const clientWords = clientPart
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  return clientWords.length <= 28;
+}
+
+/**
  * Извлекает или формирует детальную оценку по 10 критериям
  * СТРОГО на основе содержания разговора без додумывания и фантазий.
  */
@@ -262,8 +319,8 @@ export function extractCallEvaluation(
     const openCheck = (mgrTxtCheck || fullTxtCheck).slice(0, 160);
     const openHasGreetingWithClientAndSalon =
       /(?:добрый день|здравствуйте|доброе утро|добрый вечер)/iu.test(openCheck) &&
-      /(?:[Дд]обр(?:ый\s+(?:день|вечер)|ое\s+утро)|[Зз]дравствуйте)[,\s]+(?!(?:Салон|Студ|Лик|Фэшн|Фешен|Fashion))[А-ЯЁ][а-яё]+/u.test(openCheck) &&
-      /(?:студи|салон|fashion|фешен|фэшн|лук\s*студ|лик)/iu.test(openCheck);
+      /(?:[Дд]обр(?:ый\s+(?:день|вечер)|ое\s+утро)|[Зз]дравствуйте)[,\s]+(?!(?:Салон|Студ|Лик|Лис|Лиq|Liq|Фэшн|Фешен|Fashion))[А-ЯЁ][а-яё]+/u.test(openCheck) &&
+      /(?:студи|салон|fashion|фешен|фэшн|лук\s*студ|ли[кqс](?:\s*28)?|liq\s*28|от[,\s]+а[,\s]+28)/iu.test(openCheck);
     const hasFalseGreetingPenalty = Boolean(
       openHasGreetingWithClientAndSalon &&
         critGreeting &&
@@ -324,8 +381,8 @@ export function extractCallEvaluation(
     }
   }
 
-  // Разговор не состоялся
-  if (ctx.category === 'not_happened') {
+  // Разговор не состоялся (включая Класс A — короткий вызов <= 4 реплик без темы записи/услуги)
+  if (ctx.category === 'not_happened' || isShortNoTopicCall(transcript)) {
     const failedCriteria: CallEvaluationCriterion[] = EVALUATION_CRITERIA_DEFINITIONS.map(def => ({
       id: def.id,
       name: def.name,
@@ -352,10 +409,10 @@ export function extractCallEvaluation(
   // 1. Приветствие и представление (строго по стартовой реплике приветствия менеджера)
   const rawOpeningManager = (managerText || fullText).slice(0, 160).trim();
   const openingManagerText = rawOpeningManager.split(/(?<=[.!?])\s+(?=[А-ЯЁA-Z])/).slice(0, 2).join(' ') || rawOpeningManager;
-    const hasGreeting = /(?:добрый день|здравствуйте|доброе утро|добрый вечер|приветствую|алло)/iu.test(openingManagerText);
-    const hasManagerNameIntro = /(?:меня зовут|администратор(?:\s+салона[^.!?]{0,40})?\s+[А-ЯЁа-яё]+|это\s+[А-ЯЁа-яё]+)/iu.test(openingManagerText);
-    const hasClientNameGreeting = /(?:[Дд]обр(?:ый\s+(?:день|вечер)|ое\s+утро)|[Зз]дравствуйте)[,\s]+(?!(?:Салон|Студ|Лик|Фэшн|Фешен|Fashion))[А-ЯЁ][а-яё]+/u.test(openingManagerText);
-    const hasSalonName = /(?:студи|салон|fashion|фешен|фэшн|лук\s*студ|лик(?:\s*28)?|от[,\s]+а[,\s]+28)/iu.test(openingManagerText);
+  const hasGreeting = /(?:добрый день|здравствуйте|доброе утро|добрый вечер|приветствую|алло)/iu.test(openingManagerText);
+  const hasManagerNameIntro = /(?:меня зовут|администратор(?:\s+салона[^.!?]{0,40})?\s+[А-ЯЁа-яё]+|это\s+[А-ЯЁа-яё]+)/iu.test(openingManagerText);
+  const hasClientNameGreeting = /(?:[Дд]обр(?:ый\s+(?:день|вечер)|ое\s+утро)|[Зз]дравствуйте)[,\s]+(?!(?:Салон|Студ|Лик|Лис|Лиq|Liq|Фэшн|Фешен|Fashion))[А-ЯЁ][а-яё]+/u.test(openingManagerText);
+  const hasSalonName = /(?:студи|салон|fashion|фешен|фэшн|лук\s*студ|ли[кqс](?:\s*28)?|liq\s*28|от[,\s]+а[,\s]+28)/iu.test(openingManagerText);
   const isClippedIntroInStt =
     !hasGreeting &&
     !hasManagerNameIntro &&
@@ -494,12 +551,59 @@ export function extractCallEvaluation(
     ]);
   }
 
+  // Спец-ветка 4: Класс B — «Частичный контакт» (обрыв связи) или «Справочный запрос» («Можно Елену? — Её сейчас нет»)
+  // Без штрафа по Критерию 9 за неоформленную бронь и без вердикта «Требуется обучение»
+  const classBType = classifyPartialOrInquiryCall(ctx.cleanTranscript);
+  if (classBType) {
+    const hasPoliteTone = /(?:до свидания|всего доброго|хорошего дня|спасибо|пожалуйста|добрый|здравствуйте|перезвон|подскаж)/iu.test(managerEffective);
+    const classBReason =
+      classBType === 'master_inquiry'
+        ? 'Справочный запрос о наличии мастера: оформление брони не предполагалось, критерий не применим (не снижает оценку).'
+        : 'Частичный контакт (разговор прервался до обсуждения записи): критерий не применим (не снижает оценку).';
+
+    const classBEval = buildCallEvaluation([
+      greetingCriterion,
+      { id: 'needs_identification', is_applicable: false, score: null, explanation: classBReason },
+      { id: 'service_presentation', is_applicable: false, score: null, explanation: classBReason },
+      { id: 'price_presentation', is_applicable: false, score: null, explanation: classBReason },
+      { id: 'objections', is_applicable: false, score: null, explanation: classBReason },
+      { id: 'upsell', is_applicable: false, score: null, explanation: classBReason },
+      { id: 'parallel_booking', is_applicable: false, score: null, explanation: classBReason },
+      { id: 'alternatives', is_applicable: false, score: null, explanation: classBReason },
+      { id: 'closing', is_applicable: false, score: null, explanation: classBReason },
+      {
+        id: 'communication',
+        is_applicable: true,
+        score: hasPoliteTone ? 8 : 7,
+        explanation:
+          classBType === 'master_inquiry'
+            ? `Администратор вежливо ответил на справочный вопрос о мастере${closingQuoteSuffix}.`
+            : `Корректное общение до обрыва/завершения частичного контакта${closingQuoteSuffix}.`,
+        ...(lastUtteranceQuote ? { evidence_quote: lastUtteranceQuote.slice(0, 180) } : {}),
+      },
+    ]);
+
+    if (/требуется\s+обучение/i.test(classBEval.summary_verdict || '')) {
+      classBEval.summary_verdict =
+        classBType === 'master_inquiry'
+          ? 'Справочный запрос обработан корректно; оформление записи не требовалось.'
+          : 'Частичный контакт: диалог прервался до оформления записи, требуется повторный дозвон.';
+    }
+    return classBEval;
+  }
+
   // Клиентские обращения (первичная запись, перенос, спор, отказ, отсутствие услуги, консультация)
   const isDispute = ctx.isDispute;
   const isRescheduleOrCheck = ctx.isRescheduleOrCheck;
   const isBookingConfirmationCall =
     /(?:запись\s+подтверд|подтверд[а-яё]*\s+(?:свою\s+)?(?:запис|визит)|подтвержда(?:ю|ем|ете)(?:\s+(?:запис|визит))?|подойд[её]те|обратный\s+звонок|будем\s+ожидать|(?:вы|я)\s+(?:к\s+нам\s+|к\s+вам\s+)?записан[аы]?(?:\s+(?:на|к))?|(?:ваша|моя)\s+запись\s+(?:на|к)|напомина(?:ем|ю)\s+о\s+(?:вашей\s+)?записи)/iu.test(ctx.cleanTranscript) &&
     !/(?:сколько\s+стоит|хочу\s+записаться|какую\s+услугу|цен[ауы]|прайс)/iu.test(ctx.cleanTranscript);
+
+  const isShortOutboundRefusal = isShortOutboundRefusalCall(ctx.cleanTranscript);
+  const isClientRefusalControl =
+    !ctx.isConfirmedBooking &&
+    !isBookingConfirmationCall &&
+    (hasClientRefusalPhrase(ctx.cleanTranscript) || isShortOutboundRefusal);
 
   // 2. Выявление потребности гостя
   const hasNeedsQuestions = /(?:какую услугу|на какую|когда вам|в какое время|в какие дни|какой мастер|что именно|подскажите|хотели бы|планируете|на какое число|какой эффект|какие волосы|на что именно|необходимо будет|верно,?\s*да)/iu.test(managerEffective);
@@ -513,13 +617,15 @@ export function extractCallEvaluation(
   const isPriceApplicable =
     !isRescheduleOrCheck &&
     !isBookingConfirmationCall &&
+    !isShortOutboundRefusal &&
     (!ctx.isUnavailableServiceRefusal || hasPriceMention || priceAskedByClient) &&
     (ctx.category !== 'consultation' || hasPriceMention || priceAskedByClient);
 
   // 5. Работа с возражениями
   const hasObjections =
-    ctx.isUnavailableServiceRefusal ||
-    /(?:дорого|не могу|не успе|не удобн|неудобно|отъезд|не получ|занят|пораньше нельзя|не подходит|почему отменили|издеваетесь|претензи|жалоб|(?:^|[^\p{L}])нет,\s+[^\n.!?]*(?:надо|нужно)(?:[^\p{L}]|$))/iu.test(clientEffective);
+    !isShortOutboundRefusal &&
+    (ctx.isUnavailableServiceRefusal ||
+      /(?:дорого|не могу|не успе|не удобн|неудобно|отъезд|не получ|занят|пораньше нельзя|не подходит|почему отменили|издеваетесь|претензи|жалоб|(?:^|[^\p{L}])нет,\s+[^\n.!?]*(?:надо|нужно)(?:[^\p{L}]|$))/iu.test(clientEffective));
   const handledObjectionWell = /(?:могу предложить|давайте посмотрим|лист ожидания|другой мастер|альтернатив|перенесем|в субботу|в воскресенье|скидк|компенсац|извините|понимаем вас|могли бы предложить)/iu.test(managerEffective);
 
   // 6. Предложение дополнительных услуг (допродажа / сопутствующие процедуры)
@@ -534,6 +640,7 @@ export function extractCallEvaluation(
     !isDispute &&
     !isRescheduleOrCheck &&
     !isBookingConfirmationCall &&
+    !isShortOutboundRefusal &&
     !ctx.isUnavailableServiceRefusal &&
     ctx.category !== 'declined';
 
@@ -545,6 +652,7 @@ export function extractCallEvaluation(
     .filter(line => !/(?:была\s+(?:на|у)|укладывала|делала|передам\s+трубку|трубку\s+передам|спрошу\s+подруг)/iu.test(line))
     .join(' ');
   const isMultipleServices =
+    !isShortOutboundRefusal &&
     !ctx.isUnavailableServiceRefusal &&
     !hasExplicitSingleServiceConfirm &&
     /(?:маникюр\s+и\s+педикюр|педикюр\s+и\s+маникюр|макияж\s+и\s+укладк|укладк[а-яё]*\s+и\s+макияж|2\s+макияжа|два\s+макияжа|вдво[её]м|для\s+подруг[и]|и\s+подруг[у]\s+запис|на\s+двоих|для\s+двоих|2\s+человек)/iu.test(activeMultiServiceText);
@@ -552,9 +660,10 @@ export function extractCallEvaluation(
 
   // 8. Предложение альтернативных вариантов
   const isSlotConflict =
-    ctx.isUnavailableServiceRefusal ||
-    ctx.category === 'declined' ||
-    /(?:занят|забронирован|не\s+работает|нет\s+мест|нет\s+свободного|не\s+могу|не\s+успе|не\s+подходит\s+время|не\s+получается|пораньше\s+нельзя)/iu.test(fullText);
+    !isShortOutboundRefusal &&
+    (ctx.isUnavailableServiceRefusal ||
+      ctx.category === 'declined' ||
+      /(?:занят|забронирован|не\s+работает|нет\s+мест|нет\s+свободного|не\s+могу|не\s+успе|не\s+подходит\s+время|не\s+получается|пораньше\s+нельзя)/iu.test(fullText));
   const hasAlternativesOffered = /(?:или\s+на|есть\s+ещ[её]|могу\s+предложить|могл[иа]\s+бы\s+предложить|можем\s+(?:сейчас\s+)?предложить|самое\s+ближайшее|дневн[а-яё]+\s+время\s+и\s+вечерн|с\s+\d{1,2}[:.]\d{2}\s+до\s+\d{1,2}[:.]\d{2}|любое\s+время\s+можно\s+выбрать|а\s+если|в\s+\d{1,2}:\d{2}\s+или\s+в\s+\d{1,2}:\d{2}|на\s+субботу|на\s+воскресенье|к\s+другому\s+мастеру|лист\s+ожидания|химическ[а-яё]*\s+завивк|запись\s+на\s+консультацию|предложить\s+консультацию)/iu.test(managerEffective);
 
   // 9. Закрытие на запись
@@ -573,6 +682,8 @@ export function extractCallEvaluation(
   const hasPoliteClosing = /(?:до свидания|всего доброго|хорошего дня|ждем вас|спасибо|до встречи|комфортно)/iu.test(managerEffective);
   const hasReminderMention = /(?:напоминание|whatsapp|ватсап|смс|накануне|за полчаса|за 24 часа|сообщени)/iu.test(managerEffective);
 
+  const isNeedsApplicable = !isBookingConfirmationCall && !isClientRefusalControl;
+
   const criteria: CallEvaluationCriterion[] = [
     greetingCriterion,
 
@@ -580,9 +691,11 @@ export function extractCallEvaluation(
     {
       id: 'needs_identification',
       name: 'Выявление потребности гостя',
-      is_applicable: !isBookingConfirmationCall,
-      score: isBookingConfirmationCall ? null : (hasNeedsQuestions ? 9 : (ctx.isUnavailableServiceRefusal ? 6 : 7)),
-      explanation: isBookingConfirmationCall
+      is_applicable: isNeedsApplicable,
+      score: !isNeedsApplicable ? null : (hasNeedsQuestions ? 9 : (ctx.isUnavailableServiceRefusal ? 6 : 7)),
+      explanation: isClientRefusalControl
+        ? 'Не применимо: в стенограмме зафиксирован отказ клиента (контроль «интерес → отказ»).'
+        : isBookingConfirmationCall
         ? 'Звонок направлен на подтверждение уже согласованного визита (не снижает оценку).'
         : hasNeedsQuestions
         ? 'Администратор задавал уточняющие вопросы, выявляя пожелания гостя по услуге, времени или деталям визита.'
@@ -595,13 +708,15 @@ export function extractCallEvaluation(
     {
       id: 'service_presentation',
       name: 'Презентация услуги и мастера',
-      is_applicable: !isBookingConfirmationCall,
-      score: isBookingConfirmationCall
+      is_applicable: !isBookingConfirmationCall && !isShortOutboundRefusal,
+      score: isBookingConfirmationCall || isShortOutboundRefusal
         ? null
         : ctx.isUnavailableServiceRefusal
         ? (hasNeedsQuestions && hasMasterPresented ? 8 : 6)
         : (hasMasterPresented ? 9 : 7),
-      explanation: isBookingConfirmationCall
+      explanation: isShortOutboundRefusal
+        ? 'Короткий исходящий обзвон: клиент сразу отказалась / не смогла разговаривать, презентация услуги не требовалась (не снижает оценку).'
+        : isBookingConfirmationCall
         ? 'Услуга и мастер в коротком подтверждении визита не требовали отдельной презентации (не снижает оценку).'
         : ctx.isUnavailableServiceRefusal
         ? 'Администратор назвал доступную в салоне услугу (химическая завивка) и предложил консультацию, однако не раскрыл особенности процедуры и не представил мастера.'
@@ -617,7 +732,9 @@ export function extractCallEvaluation(
       is_applicable: isPriceApplicable,
       score: !isPriceApplicable ? null : (hasPriceMention ? 10 : 6),
       explanation: !isPriceApplicable
-        ? (isRescheduleOrCheck
+        ? (isShortOutboundRefusal
+            ? 'Короткий исходящий обзвон с быстрым отказом: обсуждение стоимости не состоялось (не снижает оценку).'
+            : isRescheduleOrCheck
             ? 'Звонок посвящен согласованию расписания действующей записи, озвучивание цен не требовалось (не снижает оценку).'
             : ctx.isUnavailableServiceRefusal
             ? 'Обсуждение стоимости не состоялось: запрашиваемая услуга отсутствует в салоне, и клиент отказался от альтернативы (не снижает оценку).'
@@ -680,13 +797,15 @@ export function extractCallEvaluation(
     {
       id: 'alternatives',
       name: 'Предложение альтернативных вариантов',
-      is_applicable: isSlotConflict || !isBookingAgreed,
-      score: (isSlotConflict || !isBookingAgreed)
+      is_applicable: !isShortOutboundRefusal && (isSlotConflict || !isBookingAgreed),
+      score: !isShortOutboundRefusal && (isSlotConflict || !isBookingAgreed)
         ? (hasAlternativesOffered
             ? (isBookingAgreed && !ctx.isUnavailableServiceRefusal ? 9 : 7)
             : 4)
         : null,
-      explanation: (isSlotConflict || !isBookingAgreed)
+      explanation: isShortOutboundRefusal
+        ? 'Короткий исходящий обзвон: клиент сразу отказалась / не смогла разговаривать, подбор альтернатив не применим (не снижает оценку).'
+        : (isSlotConflict || !isBookingAgreed)
         ? ctx.isUnavailableServiceRefusal && hasAlternativesOffered
           ? 'При отсутствии запрошенной техники администратор предложил альтернативную процедуру и консультацию, однако клиент не заинтересовался вариантом.'
           : hasAlternativesOffered && isBookingAgreed
@@ -701,9 +820,15 @@ export function extractCallEvaluation(
     {
       id: 'closing',
       name: 'Закрытие на запись',
-      is_applicable: true,
-      score: isBookingAgreed ? 10 : (isBookingConfirmationCall && !ctx.isDeclined ? 9 : (hasBookingAttempt ? 5 : 4)),
-      explanation: isOutboundConfirmationAgreed || (isBookingConfirmationCall && isBookingAgreed)
+      is_applicable: !isShortOutboundRefusal,
+      score: isShortOutboundRefusal
+        ? null
+        : isBookingAgreed
+        ? 10
+        : (isBookingConfirmationCall && !ctx.isDeclined ? 9 : (hasBookingAttempt ? 5 : 4)),
+      explanation: isShortOutboundRefusal
+        ? 'Короткий исходящий обзвон: клиент отказался / не смогла разговаривать, жёсткий штраф за неоформленную запись не применяется.'
+        : isOutboundConfirmationAgreed || (isBookingConfirmationCall && isBookingAgreed)
         ? 'Существующая запись успешно подтверждена клиентом в ходе звонка-подтверждения (бронь существовала до звонка).'
         : isBookingAgreed
         ? 'Запись успешно подтверждена и зафиксирована с согласованием условий визита.'

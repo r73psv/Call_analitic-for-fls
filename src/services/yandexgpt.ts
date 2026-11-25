@@ -133,7 +133,7 @@ async function queryGigaChatFallback(
 ): Promise<{ text: string; tokens?: TokenUsage }> {
   const token = await getGigaChatToken();
   const gigachatApiUrl = process.env.GIGACHAT_API_URL || 'https://gigachat.devices.sberbank.ru/api/v1/chat/completions';
-  const model = (process.env.GIGACHAT_DEFAULT_MODEL as any) || 'GigaChat:Lite';
+  const model = (process.env.GIGACHAT_MODEL as any) || (process.env.GIGACHAT_DEFAULT_MODEL as any) || 'GigaChat:Ultra';
 
   const res = await axios.post(
     gigachatApiUrl,

@@ -20,7 +20,7 @@ export const settingsRouter = Router();
 settingsRouter.get('/', async (req: Request, res: Response) => {
   try {
     const store = await readStore();
-    const defaultModel = store.config.default_gigachat_model || (process.env.GIGACHAT_DEFAULT_MODEL as GigaChatModel) || 'GigaChat:Lite';
+    const defaultModel = store.config.default_gigachat_model || (process.env.GIGACHAT_DEFAULT_MODEL as GigaChatModel) || 'GigaChat:Ultra';
     const salonName = store.config.salonName || process.env.SALON_NAME || 'Fashion Look Studio';
     const defaultPrompt = getDefaultSystemPrompt(salonName);
     const transcriptionModel = resolveActiveSttProvider();

@@ -97,6 +97,102 @@ const CONSTITUENT_FACT_FIELDS = new Set([
   'master',
 ]);
 
+const SYNTHESIS_STOP_WORDS = new Set([
+  'без', 'при', 'для', 'или', 'что', 'как', 'вас', 'вам', 'нам', 'нас', 'все', 'всё',
+  'это', 'уже', 'еще', 'ещё', 'был', 'была', 'были', 'будет', 'быть', 'только', 'просто',
+  'запись', 'визит', 'звонок', 'клиент', 'менеджер', 'администратор', 'салон', 'салона',
+]);
+
+/**
+ * Для синтез-полей (`booking_done`, `booking_status_text`, `short_summary`) проверяет,
+ * подтверждены ли составные факты (имя мастера, перенос / «без изменения», дата/время, подтверждение)
+ * непосредственно в стенограмме — даже если точная сводная формулировка не входит в текст одной подстрокой.
+ */
+export function findSynthesisSupportQuoteInTranscript(
+  transcript: string,
+  draftValue?: string | null
+): string | null {
+  if (!transcript || !draftValue || isAbsenceValue(draftValue)) return null;
+  const normTranscript = normalizeForQuoteMatch(transcript);
+  const normDraft = normalizeForQuoteMatch(draftValue);
+  if (!normTranscript || !normDraft) return null;
+
+  if (isQuotePresentInTranscript(transcript, draftValue)) {
+    return draftValue.trim();
+  }
+
+  const draftTokens = Array.from(
+    new Set(
+      normDraft
+        .split(' ')
+        .filter((w) => w.length >= 3 && !SYNTHESIS_STOP_WORDS.has(w))
+    )
+  );
+  if (draftTokens.length === 0) return null;
+
+  const tWords = normTranscript.split(' ').filter(Boolean);
+  const matchesToken = (tok: string): boolean => {
+    if (normTranscript.includes(tok)) return true;
+    // Морфологическое совпадение по основе (длина >= 5, например: «перенесена» <-> «перенесли», «изменения» <-> «изменении», «мастеру» <-> «мастера»)
+    if (tok.length >= 5) {
+      const stem = tok.slice(0, Math.min(tok.length - 1, 6));
+      if (tWords.some((tw) => tw.startsWith(stem))) return true;
+    }
+    return false;
+  };
+
+  let matchedCount = 0;
+  for (const tok of draftTokens) {
+    if (matchesToken(tok)) matchedCount++;
+  }
+
+  // Дополнительный маркер переноса/подтверждения без изменения (например, «без изменения в цене, без изменения времени, просто к другому мастеру»)
+  const isTransferNoChangeDraft =
+    /(?:перенес|друго[муй]\s+мастер|без\s+изменен)/i.test(normDraft);
+  const transcriptHasTransferNoChange =
+    /(?:без\s+изменен|к\s+друго[муй]\s+мастер|перенес)/i.test(normTranscript);
+
+  const ratio = matchedCount / draftTokens.length;
+  const isSupported =
+    (matchedCount >= 2 && ratio >= 0.5) ||
+    (isTransferNoChangeDraft && transcriptHasTransferNoChange && matchedCount >= 1);
+
+  if (!isSupported) return null;
+
+  // Возвращаем наиболее релевантный фрагмент из стенограммы в качестве подтверждающей цитаты
+  const candidateLines = transcript
+    .split(/\n+/)
+    .map((l) => l.replace(/^(?:менеджер|клиент|администратор|оператор|гость|автоинформатор)\s*:\s*/i, '').trim())
+    .filter((l) => l.length >= 4);
+
+  let bestLine = '';
+  let bestScore = -1;
+  for (const line of candidateLines) {
+    const normLine = normalizeForQuoteMatch(line);
+    if (!normLine) continue;
+    const lineWords = normLine.split(' ').filter(Boolean);
+    let score = 0;
+    for (const tok of draftTokens) {
+      const stem = tok.length >= 5 ? tok.slice(0, Math.min(tok.length - 1, 6)) : tok;
+      if (normLine.includes(tok) || (stem.length >= 5 && lineWords.some((w) => w.startsWith(stem)))) {
+        score += 2;
+      }
+    }
+    if (/(?:без\s+изменен|к\s+друго[муй]\s+мастер|перенес|подтвержда|записан|забронировал)/i.test(normLine)) {
+      score += 2;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestLine = line;
+    }
+  }
+
+  if (bestLine && isQuotePresentInTranscript(transcript, bestLine)) {
+    return bestLine;
+  }
+  return candidateLines[0] || transcript.trim().slice(0, 160);
+}
+
 function normalizeWhitespaceLower(s: string): string {
   return s
     .toLowerCase()
@@ -579,6 +675,16 @@ export async function verifySummary(
     if (draftSummary?.date_time_offered_quote) {
       candidateQuotes.push(String(draftSummary.date_time_offered_quote));
     }
+    for (const extraVal of [
+      draftSummary?.offered_master,
+      draftSummary?.master,
+      draftSummary?.offered_date_time,
+      draftSummary?.date_time,
+    ]) {
+      if (typeof extraVal === 'string' && extraVal.trim() && !isAbsenceValue(extraVal)) {
+        candidateQuotes.push(extraVal.trim());
+      }
+    }
     return candidateQuotes.find((q) => isQuotePresentInTranscript(transcript, q)) || null;
   })();
 
@@ -601,16 +707,20 @@ export async function verifySummary(
     if (
       SYNTHESIS_FIELDS.has(fn) &&
       f.verdict !== 'contradicts' &&
-      !hasContradictingConstituentFact &&
-      constituentSupportQuote
+      !hasContradictingConstituentFact
     ) {
-      return {
-        ...f,
-        verdict: 'confirmed',
-        quote: f.quote || constituentSupportQuote,
-        rejected_quote: null,
-        hallucinated_quote: false,
-      };
+      const synthesisSupport =
+        constituentSupportQuote ||
+        findSynthesisSupportQuoteInTranscript(transcript, f.draft_value);
+      if (synthesisSupport) {
+        return {
+          ...f,
+          verdict: 'confirmed',
+          quote: f.quote || synthesisSupport,
+          rejected_quote: null,
+          hallucinated_quote: false,
+        };
+      }
     }
     return f;
   });
@@ -828,14 +938,21 @@ export function applyVerdicts(
     const fn = normalizedItem.field.trim();
 
     if (SYNTHESIS_FIELDS.has(fn)) {
-      if (normalizedItem.verdict !== 'contradicts' && !hasContradictingConstituent && verifiedConstituentQuote) {
-        return {
-          ...normalizedItem,
-          verdict: 'confirmed',
-          quote: normalizedItem.quote || verifiedConstituentQuote,
-          rejected_quote: null,
-          hallucinated_quote: false,
-        };
+      if (normalizedItem.verdict !== 'contradicts' && !hasContradictingConstituent) {
+        const synthesisQuote =
+          verifiedConstituentQuote ||
+          (effectiveTranscript
+            ? findSynthesisSupportQuoteInTranscript(effectiveTranscript, normalizedItem.draft_value)
+            : null);
+        if (synthesisQuote) {
+          return {
+            ...normalizedItem,
+            verdict: 'confirmed',
+            quote: normalizedItem.quote || synthesisQuote,
+            rejected_quote: null,
+            hallucinated_quote: false,
+          };
+        }
       }
       return normalizedItem;
     }
