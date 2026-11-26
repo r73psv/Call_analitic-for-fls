@@ -22,6 +22,11 @@ interface CallListProps {
   onSelectCall: (id: string) => void;
   onClearDemoCalls?: () => Promise<void>;
   userRole?: string;
+  authToken?: string | null;
+  salonId?: string;
+  dateRange?: string;
+  onDateRangeChange?: (nextDateRange: string) => void;
+  isDateRangeLoading?: boolean;
 }
 
 const STATUS_BADGES: Record<string, { label: string; className: string }> = {
@@ -142,13 +147,25 @@ export const POPULAR_KEYWORDS = [
   'Отказ'
 ];
 
-export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls, userRole }: CallListProps) {
+export function CallList({
+  calls,
+  selectedCallId,
+  onSelectCall,
+  onClearDemoCalls,
+  userRole,
+  authToken,
+  salonId,
+  dateRange = 'all',
+  onDateRangeChange,
+  isDateRangeLoading = false,
+}: CallListProps) {
   const [searchTerm, setSearchTerm] = useState('');
   
   // Primary Filter Criteria: Date Range, Star Rating (1-5), and Keywords
   const [datePreset, setDatePreset] = useState<string>('all');
   const [startDate, setStartDate] = useState<string>('');
   const [endDate, setEndDate] = useState<string>('');
+  const [isCalendarDropdownOpen, setIsCalendarDropdownOpen] = useState<boolean>(false);
   const [starFilter, setStarFilter] = useState<number | 'all' | 'none'>('all');
   const [starFilterMode, setStarFilterMode] = useState<'exact' | 'min'>('exact');
   const [keywordFilter, setKeywordFilter] = useState<string>('');
@@ -282,9 +299,25 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
     return `${d}.${m}.${y}`;
   };
 
-  // Date preset helper synchronizing preset with startDate/endDate (Europe/Samara)
+  // Map internal datePreset to canonical API `date_range` query parameter
+  const emitApiDateRange = (nextRange: string) => {
+    if (onDateRangeChange) {
+      onDateRangeChange(nextRange || 'all');
+    }
+  };
+
+  // Keep local preset/dates synchronized if parent resets or updates `dateRange`
+  React.useEffect(() => {
+    const normalized = (dateRange || 'all').trim();
+    if (normalized === 'all' && datePreset !== 'all' && !startDate && !endDate) {
+      setDatePreset('all');
+    }
+  }, [dateRange]);
+
+  // Date preset helper synchronizing preset with startDate/endDate (Europe/Samara) and API `date_range`
   const handleDatePresetChange = (preset: string) => {
-    setDatePreset(preset);
+    const canonicalPreset = preset === 'day' ? 'today' : preset;
+    setDatePreset(canonicalPreset);
     const todayYmd = formatDateInSalonTz(new Date());
     const [yStr, mStr, dStr] = todayYmd.split('-');
     const baseUtc = new Date(Date.UTC(Number(yStr), Number(mStr) - 1, Number(dStr)));
@@ -293,43 +326,72 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
       return dt.toISOString().slice(0, 10);
     };
 
-    if (preset === 'all') {
+    if (canonicalPreset === 'all') {
       setStartDate('');
       setEndDate('');
-    } else if (preset === 'today') {
+      emitApiDateRange('all');
+    } else if (canonicalPreset === 'today') {
       setStartDate(todayYmd);
       setEndDate(todayYmd);
-    } else if (preset === 'yesterday') {
+      emitApiDateRange('day');
+    } else if (canonicalPreset === 'yesterday') {
       const yestStr = shiftDays(-1);
       setStartDate(yestStr);
       setEndDate(yestStr);
-    } else if (preset === 'week') {
+      emitApiDateRange('yesterday');
+    } else if (canonicalPreset === 'week') {
       setStartDate(shiftDays(-6));
       setEndDate(todayYmd);
-    } else if (preset === 'this_month') {
+      emitApiDateRange('week');
+    } else if (canonicalPreset === 'this_month') {
       setStartDate(`${yStr}-${mStr}-01`);
       setEndDate(todayYmd);
-    } else if (preset === 'month') {
+      emitApiDateRange('this_month');
+    } else if (canonicalPreset === 'month') {
       setStartDate(shiftDays(-29));
       setEndDate(todayYmd);
+      emitApiDateRange('month');
     }
   };
 
   const handleStartDateChange = (val: string) => {
+    let nextEnd = endDate;
     setStartDate(val);
-    if (val && endDate && val > endDate) {
-      setEndDate(val);
+    if (val && nextEnd && val > nextEnd) {
+      nextEnd = val;
+      setEndDate(nextEnd);
     }
-    setDatePreset(val || endDate ? 'custom' : 'all');
+    const nextPreset = val || nextEnd ? 'custom' : 'all';
+    setDatePreset(nextPreset);
+    emitApiDateRange(val || nextEnd ? `${val}:${nextEnd}` : 'all');
   };
 
   const handleEndDateChange = (val: string) => {
+    let nextStart = startDate;
     setEndDate(val);
-    if (val && startDate && val < startDate) {
-      setStartDate(val);
+    if (val && nextStart && val < nextStart) {
+      nextStart = val;
+      setStartDate(nextStart);
     }
-    setDatePreset(startDate || val ? 'custom' : 'all');
+    const nextPreset = nextStart || val ? 'custom' : 'all';
+    setDatePreset(nextPreset);
+    emitApiDateRange(nextStart || val ? `${nextStart}:${val}` : 'all');
   };
+
+  const calendarDropdownLabel = useMemo(() => {
+    if (datePreset === 'today' || dateRange === 'day') return 'День';
+    if (datePreset === 'yesterday' || dateRange === 'yesterday') return 'Вчера';
+    if (datePreset === 'week' || dateRange === 'week') return 'Неделя';
+    if (datePreset === 'month' || dateRange === 'month') return 'Месяц';
+    if (datePreset === 'this_month' || dateRange === 'this_month') return 'Этот месяц';
+    if (startDate || endDate) {
+      if (startDate && endDate && startDate === endDate) return formatYmdToRu(startDate);
+      return `${startDate ? formatYmdToRu(startDate) : '…'} — ${endDate ? formatYmdToRu(endDate) : '…'}`;
+    }
+    return 'Период';
+  }, [datePreset, dateRange, startDate, endDate]);
+
+  const isDateFilterActive = datePreset !== 'all' || startDate !== '' || endDate !== '' || (dateRange !== '' && dateRange !== 'all');
 
   // Tone matching logic helper
   const matchesTone = (call: CallRecord, toneChoice: string): boolean => {
@@ -571,6 +633,7 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
     setDatePreset('all');
     setStartDate('');
     setEndDate('');
+    emitApiDateRange('all');
     setStarFilter('all');
     setStarFilterMode('exact');
     setOperatorFilter('all');
@@ -628,12 +691,23 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
         : `Полный реестр (${targetCalls.length} звонков)`;
 
       const callIds = targetCalls.map(c => c.call_id);
-      const response = await fetch(endpoint, {
+      const exportHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+      const effectiveToken = authToken || (typeof localStorage !== 'undefined' ? localStorage.getItem('callqa_auth_token') : null);
+      if (effectiveToken) exportHeaders['Authorization'] = `Bearer ${effectiveToken}`;
+      if (userRole) exportHeaders['x-user-role'] = userRole;
+      if (salonId) exportHeaders['x-salon-id'] = salonId;
+      const exportParams = new URLSearchParams();
+      if (salonId) exportParams.set('salon_id', salonId);
+      if (dateRange && dateRange !== 'all') exportParams.set('date_range', dateRange);
+      const endpointWithParams = exportParams.toString() ? `${endpoint}?${exportParams.toString()}` : endpoint;
+      const response = await fetch(endpointWithParams, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: exportHeaders,
         body: JSON.stringify({
           call_ids: scope === 'filtered' ? callIds : undefined,
           filterTitle: filterDesc,
+          salon_id: salonId || undefined,
+          date_range: dateRange && dateRange !== 'all' ? dateRange : undefined,
         }),
       });
 
@@ -674,8 +748,14 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
       const endpoint = format === 'pdf'
         ? `/api/calls/${selectedCallId}/export-pdf`
         : `/api/calls/${selectedCallId}/export-csv`;
+      const exportHeaders: Record<string, string> = {};
+      const effectiveToken = authToken || (typeof localStorage !== 'undefined' ? localStorage.getItem('callqa_auth_token') : null);
+      if (effectiveToken) exportHeaders['Authorization'] = `Bearer ${effectiveToken}`;
+      if (userRole) exportHeaders['x-user-role'] = userRole;
+      if (salonId) exportHeaders['x-salon-id'] = salonId;
+      const endpointWithSalon = salonId ? `${endpoint}?salon_id=${encodeURIComponent(salonId)}` : endpoint;
 
-      const response = await fetch(endpoint);
+      const response = await fetch(endpointWithSalon, { headers: exportHeaders });
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
         throw new Error(err.error || `Ошибка сервера (${response.status})`);
@@ -718,13 +798,144 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
             </span>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            {/* Calendar Period Dropdown Filter (день / неделя / месяц / произвольный период -> date_range API) */}
+            <div className="relative">
+              <button
+                type="button"
+                id="btn-calendar-date-range-dropdown"
+                onClick={() => {
+                  setIsCalendarDropdownOpen(prev => !prev);
+                  setIsExportMenuOpen(false);
+                }}
+                className={`text-xs px-2.5 py-1.5 rounded-xl border flex items-center gap-1.5 font-semibold transition-all cursor-pointer ${
+                  isCalendarDropdownOpen || isDateFilterActive
+                    ? 'bg-indigo-600 text-white border-indigo-600 shadow-3xs'
+                    : 'bg-white text-slate-700 hover:bg-slate-50 border-slate-200 shadow-3xs'
+                }`}
+                title="Календарный фильтр периода (отправляет date_range в API)"
+              >
+                {isDateRangeLoading ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Calendar className={`w-3.5 h-3.5 ${isCalendarDropdownOpen || isDateFilterActive ? 'text-white' : 'text-indigo-600'}`} />
+                )}
+                <span>{calendarDropdownLabel}</span>
+                <ChevronDown className={`w-3.5 h-3.5 opacity-80 transition-transform ${isCalendarDropdownOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {isCalendarDropdownOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-40"
+                    onClick={() => setIsCalendarDropdownOpen(false)}
+                  />
+                  <div
+                    id="calendar-date-range-popover"
+                    className="absolute right-0 mt-1.5 w-72 bg-white rounded-xl shadow-xl border border-slate-200 z-50 p-3 text-xs space-y-2.5 animate-in fade-in zoom-in-95 duration-100"
+                  >
+                    <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                      <span className="font-bold text-slate-900 flex items-center gap-1.5">
+                        <Calendar className="w-3.5 h-3.5 text-indigo-600" /> Период звонков
+                      </span>
+                      {isDateFilterActive && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            handleDatePresetChange('all');
+                            setIsCalendarDropdownOpen(false);
+                          }}
+                          className="text-[11px] font-semibold text-rose-600 hover:text-rose-800 cursor-pointer"
+                        >
+                          Сбросить
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="space-y-1">
+                      {[
+                        { id: 'today', apiVal: 'day', label: 'День', sub: 'Звонки за сегодня' },
+                        { id: 'week', apiVal: 'week', label: 'Неделя', sub: 'Последние 7 дней' },
+                        { id: 'month', apiVal: 'month', label: 'Месяц', sub: 'Последние 30 дней' },
+                        { id: 'all', apiVal: 'all', label: 'Весь период', sub: 'Все доступные звонки' },
+                      ].map((opt) => {
+                        const isSelected =
+                          (opt.id === 'today' && (datePreset === 'today' || dateRange === 'day')) ||
+                          (opt.id === 'week' && (datePreset === 'week' || dateRange === 'week')) ||
+                          (opt.id === 'month' && (datePreset === 'month' || dateRange === 'month')) ||
+                          (opt.id === 'all' && !isDateFilterActive);
+                        return (
+                          <button
+                            key={opt.apiVal}
+                            type="button"
+                            id={`calendar-dropdown-option-${opt.apiVal}`}
+                            onClick={() => {
+                              handleDatePresetChange(opt.id);
+                              setIsCalendarDropdownOpen(false);
+                            }}
+                            className={`w-full text-left px-2.5 py-2 rounded-lg transition-colors flex items-center justify-between cursor-pointer ${
+                              isSelected
+                                ? 'bg-indigo-50 text-indigo-900 border border-indigo-200 font-semibold'
+                                : 'text-slate-700 hover:bg-slate-50 border border-transparent'
+                            }`}
+                          >
+                            <div>
+                              <div className="leading-tight">{opt.label}</div>
+                              <div className="text-[10px] text-slate-400 font-normal">{opt.sub}</div>
+                            </div>
+                            {isSelected && <Check className="w-3.5 h-3.5 text-indigo-600 shrink-0" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-100 space-y-2">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                        Выбрать даты в календаре
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label htmlFor="calendar-dropdown-start" className="block text-[10px] font-semibold text-slate-500 mb-1">
+                            С
+                          </label>
+                          <input
+                            id="calendar-dropdown-start"
+                            type="date"
+                            value={startDate}
+                            max={endDate || undefined}
+                            onChange={(e) => handleStartDateChange(e.target.value)}
+                            className="w-full text-[11px] px-2 py-1 bg-slate-50 border border-slate-200 rounded-lg text-slate-700 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                          />
+                        </div>
+                        <div>
+                          <label htmlFor="calendar-dropdown-end" className="block text-[10px] font-semibold text-slate-500 mb-1">
+                            По
+                          </label>
+                          <input
+                            id="calendar-dropdown-end"
+                            type="date"
+                            value={endDate}
+                            min={startDate || undefined}
+                            onChange={(e) => handleEndDateChange(e.target.value)}
+                            className="w-full text-[11px] px-2 py-1 bg-slate-50 border border-slate-200 rounded-lg text-slate-700 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+
             {/* Export Reports Dropdown Button & Menu */}
             <div className="relative">
               <button
                 type="button"
                 id="btn-export-reports-menu"
-                onClick={() => setIsExportMenuOpen(!isExportMenuOpen)}
+                onClick={() => {
+                  setIsExportMenuOpen(!isExportMenuOpen);
+                  setIsCalendarDropdownOpen(false);
+                }}
                 className={`text-xs px-2.5 py-1.5 rounded-xl border flex items-center gap-1.5 font-semibold transition-all cursor-pointer ${
                   isExportMenuOpen
                     ? 'bg-indigo-600 text-white border-indigo-600 shadow-3xs'

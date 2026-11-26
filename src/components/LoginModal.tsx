@@ -9,7 +9,7 @@ import { UserRole } from '../types.js';
 import { DEFAULT_SALON_NAME, LOGIN_FORM_TITLE, SalonThemeId, detectSalonTheme } from '../services/salonBranding.js';
 
 interface LoginModalProps {
-  onLoginSuccess: (user: { id: string; username: string; name: string; role: UserRole }, token: string) => void;
+  onLoginSuccess: (user: { id: string; username: string; name: string; role: UserRole; salon_id?: string }, token: string) => void;
   isOpen: boolean;
   onOpenChangePassword?: () => void;
   salonName?: string;

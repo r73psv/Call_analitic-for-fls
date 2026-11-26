@@ -7,6 +7,7 @@ import crypto from 'crypto';
 import { normalizeWcgpDomain } from './megafonRest.js';
 
 export interface SalonIsolationContext {
+  salonId?: string;
   salonName?: string;
   apiVersion?: string;
   restDomain?: string;
@@ -29,9 +30,17 @@ export interface WcgpWebhookValidationResult {
 
 export interface CallOwnershipResult {
   belongs: boolean;
-  reason?: 'ok' | 'foreign_vats_domain' | 'foreign_record_host' | 'foreign_salon_scope';
+  reason?: 'ok' | 'foreign_salon_id' | 'foreign_vats_domain' | 'foreign_record_host' | 'foreign_salon_scope';
   detectedHost?: string;
   expectedHost?: string;
+}
+
+export interface AuthorizedSalonResolution {
+  allowed: boolean;
+  effectiveSalonId: string;
+  requestedSalonId?: string;
+  httpStatus?: 403;
+  error?: string;
 }
 
 export interface S3SnapshotValidationResult {
@@ -82,6 +91,86 @@ export function normalizeSalonScope(salonName?: string | null): string {
     return 'liq28';
   }
   return slug;
+}
+
+/**
+ * Normalizes a salon identifier (e.g. `LIQ28`, `Лик 28`, `liq-28`) to a canonical ASCII slug.
+ */
+export function normalizeSalonId(rawSalonId?: string | null): string {
+  return normalizeSalonScope(rawSalonId);
+}
+
+/**
+ * Resolves the canonical `salon_id` for the current deployment/salon from env and config.
+ */
+export function resolveEffectiveSalonId(params: {
+  envSalonId?: string | null;
+  salonName?: string | null;
+  restDomain?: string | null;
+  yclientsSalonId?: string | null;
+}): string {
+  const explicitId = normalizeSalonId(params.envSalonId);
+  if (explicitId) {
+    return explicitId;
+  }
+
+  const nameSlug = normalizeSalonId(params.salonName);
+  if (nameSlug && nameSlug !== 'salon-krasoty') {
+    return nameSlug;
+  }
+
+  const vatsId = extractVatsNumericId(params.restDomain);
+  if (vatsId) {
+    return `vats${vatsId}`;
+  }
+
+  const ycId = String(params.yclientsSalonId || '').trim();
+  if (/^\d{1,15}$/.test(ycId)) {
+    return `yclients-${ycId}`;
+  }
+
+  return 'default';
+}
+
+/**
+ * Server-side authorization check for `salon_id` on `/api/calls` and related endpoints.
+ * The authenticated user's `salon_id` is authoritative: if the client passes a `salon_id`
+ * filter for a DIFFERENT salon, access is rejected with HTTP 403.
+ */
+export function resolveAuthorizedSalonId(params: {
+  userSalonId?: string | null;
+  requestedSalonId?: string | null;
+  instanceSalonId?: string | null;
+}): AuthorizedSalonResolution {
+  const effectiveSalonId =
+    normalizeSalonId(params.userSalonId) ||
+    normalizeSalonId(params.instanceSalonId) ||
+    'default';
+
+  const rawRequested = String(params.requestedSalonId || '').trim();
+  if (!rawRequested) {
+    return {
+      allowed: true,
+      effectiveSalonId,
+    };
+  }
+
+  const normalizedRequested = normalizeSalonId(rawRequested);
+  if (!normalizedRequested || normalizedRequested !== effectiveSalonId) {
+    return {
+      allowed: false,
+      effectiveSalonId,
+      requestedSalonId: normalizedRequested || rawRequested,
+      httpStatus: 403,
+      error: `Доступ к записям другого салона запрещён (запрошен salon_id "${rawRequested}", текущий салон "${effectiveSalonId}")`,
+    };
+  }
+
+  return {
+    allowed: true,
+    effectiveSalonId,
+    requestedSalonId: normalizedRequested,
+  };
 }
 
 /**
@@ -225,6 +314,7 @@ export function validateWcgpWebhookOrigin(params: {
  */
 export function validateCallBelongsToSalon(
   call: {
+    salon_id?: string | null;
     vats_domain?: string | null;
     salon_scope?: string | null;
     audio_url?: string | null;
@@ -236,6 +326,17 @@ export function validateCallBelongsToSalon(
   // Demo calls are synthetic local fixtures
   if (call.is_demo) {
     return { belongs: true, reason: 'ok' };
+  }
+
+  const expectedSalonId = normalizeSalonId(context.salonId) || normalizeSalonScope(context.salonName);
+  const callSalonId = normalizeSalonId(call.salon_id);
+  if (expectedSalonId && callSalonId && expectedSalonId !== callSalonId) {
+    return {
+      belongs: false,
+      reason: 'foreign_salon_id',
+      detectedHost: callSalonId,
+      expectedHost: expectedSalonId,
+    };
   }
 
   const expectedHost = extractVatsHostFromUrl(context.restDomain);
@@ -275,7 +376,7 @@ export function validateCallBelongsToSalon(
     };
   }
 
-  const expectedScope = normalizeSalonScope(context.salonName);
+  const expectedScope = normalizeSalonScope(context.salonName) || normalizeSalonId(context.salonId);
   const callScope = normalizeSalonScope(call.salon_scope);
   if (expectedScope && callScope && expectedScope !== callScope) {
     return {

@@ -22,6 +22,7 @@ export const MANAGED_SERVER_ENV_KEYS = new Set<string>([
   'ADMIN_PASSWORD',
   'ADMIN_INITIAL_PASSWORD',
   'STORE_ENCRYPTION_KEY',
+  'SALON_ID',
   'SALON_NAME',
 
   // GigaChat (Sber)
@@ -105,6 +106,7 @@ export const MANAGED_SERVER_ENV_KEYS = new Set<string>([
  * (prevents cross-salon ATS/S3 credential leakage between salon deployments).
  */
 const DEPLOY_ENV_ISOLATION_KEYS = new Set<string>([
+  'SALON_ID',
   'SALON_NAME',
   'S3_KEY_PREFIX',
   'S3_BUCKET_NAME',

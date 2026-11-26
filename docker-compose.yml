@@ -16,6 +16,7 @@ services:
       - PORT=3000
       - HOST=0.0.0.0
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - SALON_ID=${SALON_ID}
       - SALON_NAME=${SALON_NAME}
       - STORE_ENCRYPTION_KEY=${STORE_ENCRYPTION_KEY}
       - DATA_PATH=/app/data/data-store.json

@@ -10,6 +10,9 @@ import {
   resolveSalonS3KeyPrefix,
   isSafeWcgpHost,
   normalizeSalonScope,
+  normalizeSalonId,
+  resolveEffectiveSalonId,
+  resolveAuthorizedSalonId,
 } from '../salonIsolation.js';
 import {
   loadServerEnvironment,
@@ -247,3 +250,69 @@ test('loadServerEnvironment protects explicit deploy_env salon/ATS isolation key
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('resolveEffectiveSalonId, validateCallBelongsToSalon(salon_id), and resolveAuthorizedSalonId enforce strict tenant isolation', () => {
+  assert.equal(normalizeSalonId('LIQ28'), 'liq28');
+  assert.equal(normalizeSalonId('Лик 28'), 'liq28');
+
+  assert.equal(
+    resolveEffectiveSalonId({ envSalonId: 'LIQ-28', salonName: 'Other Name' }),
+    'liq28'
+  );
+  assert.equal(
+    resolveEffectiveSalonId({ salonName: 'Лик 28', restDomain: 'vats111111.megapbx.ru' }),
+    'liq28'
+  );
+  assert.equal(
+    resolveEffectiveSalonId({ salonName: 'Салон красоты', restDomain: 'vats936154.megapbx.ru' }),
+    'vats936154'
+  );
+  assert.equal(
+    resolveEffectiveSalonId({ salonName: '', yclientsSalonId: '543210' }),
+    'yclients-543210'
+  );
+
+  // Foreign CallRecord.salon_id must be rejected even if audio_url is absent
+  const foreignCall = validateCallBelongsToSalon(
+    { salon_id: 'fashion-look-studio' },
+    { salonId: 'liq28', salonName: 'Лик 28' }
+  );
+  assert.equal(foreignCall.belongs, false);
+  assert.equal(foreignCall.reason, 'foreign_salon_id');
+
+  // Matching CallRecord.salon_id passes
+  const ownCall = validateCallBelongsToSalon(
+    { salon_id: 'LIQ28' },
+    { salonId: 'liq28', salonName: 'Лик 28' }
+  );
+  assert.equal(ownCall.belongs, true);
+
+  // Server-side /api/calls salon_id authorization check
+  const allowedMatching = resolveAuthorizedSalonId({
+    userSalonId: 'liq28',
+    requestedSalonId: 'LIQ28',
+    instanceSalonId: 'liq28',
+  });
+  assert.equal(allowedMatching.allowed, true);
+  assert.equal(allowedMatching.effectiveSalonId, 'liq28');
+
+  // Omitted ?salon_id still enforces authenticated user's salon_id
+  const allowedImplicit = resolveAuthorizedSalonId({
+    userSalonId: 'liq28',
+    requestedSalonId: '',
+    instanceSalonId: 'liq28',
+  });
+  assert.equal(allowedImplicit.allowed, true);
+  assert.equal(allowedImplicit.effectiveSalonId, 'liq28');
+
+  // Spoofing another salon's salon_id in query/header MUST be rejected with 403
+  const blockedCrossSalon = resolveAuthorizedSalonId({
+    userSalonId: 'liq28',
+    requestedSalonId: 'fashion-look-studio',
+    instanceSalonId: 'liq28',
+  });
+  assert.equal(blockedCrossSalon.allowed, false);
+  assert.equal(blockedCrossSalon.httpStatus, 403);
+  assert.equal(blockedCrossSalon.effectiveSalonId, 'liq28');
+});
+

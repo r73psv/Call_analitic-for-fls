@@ -41,6 +41,7 @@ interface CurrentUserInfo {
   username: string;
   name: string;
   role: UserRole;
+  salon_id?: string;
 }
 
 async function safeFetchJson<T = any>(
@@ -49,7 +50,8 @@ async function safeFetchJson<T = any>(
   authToken?: string | null,
   userRole?: UserRole,
   retries = 4, 
-  delay = 1200
+  delay = 1200,
+  salonId?: string | null
 ): Promise<T> {
   const headers: Record<string, string> = {
     ...(options?.headers as Record<string, string> || {}),
@@ -60,6 +62,9 @@ async function safeFetchJson<T = any>(
   }
   if (userRole) {
     headers['x-user-role'] = userRole;
+  }
+  if (salonId) {
+    headers['x-salon-id'] = salonId;
   }
 
   const reqOptions: RequestInit = {
@@ -148,6 +153,8 @@ export default function App() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   
   const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
+  const [callsDateRange, setCallsDateRange] = useState<string>('all');
+  const [isRefreshingCalls, setIsRefreshingCalls] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'list' | 'details' | 'tasks' | 'stats' | 'consents' | 'prompt' | 'reception' | 'admin' | 'guide'>('list');
@@ -211,10 +218,13 @@ export default function App() {
 
   // Public branding fetched from server env (SALON_NAME) even before login
   const [publicBranding, setPublicBranding] = useState<{
+    salonId?: string;
     salonName: string;
     envSalonName?: string;
     theme: SalonThemeId;
   } | null>(null);
+
+  const currentSalonId = (currentUser?.salon_id || publicBranding?.salonId || '').trim();
 
   useEffect(() => {
     let active = true;
@@ -226,6 +236,7 @@ export default function App() {
           ? data.salonName.trim()
           : DEFAULT_SALON_NAME;
         setPublicBranding({
+          salonId: typeof data.salonId === 'string' && data.salonId.trim() ? data.salonId.trim() : undefined,
           salonName: resolvedName,
           envSalonName: typeof data.envSalonName === 'string' ? data.envSalonName : '',
           theme: data.theme === 'liq28' ? 'liq28' : detectSalonTheme(resolvedName),
@@ -266,22 +277,39 @@ export default function App() {
   };
 
   const isLoadingDataRef = React.useRef(false);
+  const loadSeqRef = React.useRef(0);
   const selectedCallIdRef = React.useRef<string | null>(selectedCallId);
   selectedCallIdRef.current = selectedCallId;
 
   // Synchronize state with backend APIs
-  const loadData = async (silent = false) => {
+  const loadData = async (silent = false, dateRangeOverride?: string) => {
     if (!authToken || !currentUser) return;
-    if (isLoadingDataRef.current) return;
+    if (silent && isLoadingDataRef.current) return;
+    const reqSeq = ++loadSeqRef.current;
     isLoadingDataRef.current = true;
-    if (!silent) setLoading(true);
+    const activeDateRange = (dateRangeOverride !== undefined ? dateRangeOverride : callsDateRange).trim();
+    if (!silent) {
+      if (calls.length === 0) setLoading(true);
+      setIsRefreshingCalls(true);
+    }
     try {
+      const callsParams = new URLSearchParams();
+      if (currentSalonId) callsParams.set('salon_id', currentSalonId);
+      if (activeDateRange && activeDateRange !== 'all') {
+        callsParams.set('date_range', activeDateRange);
+      }
+      const callsQuery = callsParams.toString() ? `?${callsParams.toString()}` : '';
+      const statsQuery = currentSalonId ? `?salon_id=${encodeURIComponent(currentSalonId)}` : '';
+
       const [callsData, statsData, configData, logsData] = await Promise.all([
-        safeFetchJson<CallRecord[]>('/api/calls', {}, authToken, userRole),
-        safeFetchJson<DashboardStats>('/api/stats', {}, authToken, userRole),
-        safeFetchJson<SystemConfig>('/api/config', {}, authToken, userRole),
-        safeFetchJson<LogEntry[]>('/api/logs', {}, authToken, userRole).catch(() => [])
+        safeFetchJson<CallRecord[]>(`/api/calls${callsQuery}`, {}, authToken, userRole, 4, 1200, currentSalonId),
+        safeFetchJson<DashboardStats>(`/api/stats${statsQuery}`, {}, authToken, userRole, 4, 1200, currentSalonId),
+        safeFetchJson<SystemConfig>('/api/config', {}, authToken, userRole, 4, 1200, currentSalonId),
+        safeFetchJson<LogEntry[]>('/api/logs', {}, authToken, userRole, 4, 1200, currentSalonId).catch(() => [])
       ]);
+
+      // Ignore stale responses if a newer request (e.g. changed date_range) already fired
+      if (reqSeq !== loadSeqRef.current) return;
 
       const uniqueCalls = deduplicateCalls(callsData || []);
       setCalls(uniqueCalls);
@@ -289,31 +317,35 @@ export default function App() {
       setConfig(configData);
       setLogs(logsData || []);
 
-      if (uniqueCalls.length > 0 && !selectedCallIdRef.current) {
+      if (uniqueCalls.length > 0 && (!selectedCallIdRef.current || !uniqueCalls.some(c => c.call_id === selectedCallIdRef.current))) {
         setSelectedCallId(uniqueCalls[0].call_id);
       }
       setError(null);
     } catch (err: any) {
+      if (reqSeq !== loadSeqRef.current) return;
       console.warn('Data loading error:', err?.message || err);
       // Only set visible error if we don't have calls loaded yet, or during explicit (non-silent) manual fetch
       if (!silent || calls.length === 0) {
         setError(err.message || 'Ошибка подключения к серверу');
       }
     } finally {
-      isLoadingDataRef.current = false;
-      setLoading(false);
+      if (reqSeq === loadSeqRef.current) {
+        isLoadingDataRef.current = false;
+        setLoading(false);
+        setIsRefreshingCalls(false);
+      }
     }
   };
 
   useEffect(() => {
     if (!authToken || !currentUser?.id) return;
-    loadData();
+    loadData(false, callsDateRange);
     const timer = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-      loadData(true);
+      loadData(true, callsDateRange);
     }, 30000);
     return () => clearInterval(timer);
-  }, [userRole, authToken, currentUser?.id]);
+  }, [userRole, authToken, currentUser?.id, currentSalonId, callsDateRange]);
 
   const handleLogout = async (reason?: string) => {
     try {
@@ -408,13 +440,15 @@ export default function App() {
         if (!data.authenticated || !data.user) {
           handleLogout('Сессия завершена или истек срок действия. Пожалуйста, выполните вход.');
         } else {
+          localStorage.setItem('callqa_user_info', JSON.stringify(data.user));
           setCurrentUser(prev => {
             if (
               prev &&
               prev.id === data.user.id &&
               prev.role === data.user.role &&
               prev.username === data.user.username &&
-              prev.name === data.user.name
+              prev.name === data.user.name &&
+              prev.salon_id === data.user.salon_id
             ) {
               return prev;
             }
@@ -1072,6 +1106,11 @@ export default function App() {
                     }}
                     onClearDemoCalls={handleClearDemoCalls}
                     userRole={userRole}
+                    authToken={authToken}
+                    salonId={currentSalonId}
+                    dateRange={callsDateRange}
+                    onDateRangeChange={setCallsDateRange}
+                    isDateRangeLoading={isRefreshingCalls}
                   />
                 </motion.div>
               )}

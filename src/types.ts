@@ -50,6 +50,7 @@ export interface User {
   lastLoginAt?: string;
   isActive: boolean;
   notes?: string;
+  salon_id?: string;
 }
 
 export interface AuthSession {
@@ -59,6 +60,7 @@ export interface AuthSession {
     username: string;
     name: string;
     role: UserRole;
+    salon_id: string;
   };
   createdAt: number;
   expiresAt: number;
@@ -262,6 +264,7 @@ export interface CallRecord {
   type?: 'incoming' | 'outgoing';
   is_answered?: boolean;
   is_demo?: boolean;
+  salon_id?: string;
   vats_domain?: string;
   salon_scope?: string;
 

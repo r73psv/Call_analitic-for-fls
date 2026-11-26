@@ -44,11 +44,15 @@ import {
   validateCallBelongsToSalon,
   validateS3SnapshotForSalon,
   normalizeSalonScope,
+  normalizeSalonId,
+  resolveEffectiveSalonId,
+  resolveAuthorizedSalonId,
   extractVatsHostFromUrl,
   extractVatsNumericId,
   isSafeWcgpHost,
   SalonIsolationContext,
 } from './src/services/salonIsolation.js';
+import { parseCallDateRange, filterCallsByDateRange } from './src/services/callDateRange.js';
 import { resolveCallAdministratorName, extractAdministratorIntroNameFromTranscript } from './src/services/administratorIdentity.js';
 import { classifyCallContext } from './src/services/summaryUtils.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
@@ -2127,17 +2131,35 @@ function getSalonIsolationContext(db: any): SalonIsolationContext {
     configSalonName: db?.config?.salonName,
     credentialsSalonName: db?.config?.credentials?.salonName,
   });
+  const salonId = resolveEffectiveSalonId({
+    envSalonId: getEnvValue('SALON_ID'),
+    salonName,
+    restDomain: authCtx.restDomain,
+    yclientsSalonId:
+      getEnvValue('YCLIENTS_SALON_ID') ||
+      db?.config?.credentials?.yclientsSalonId ||
+      db?.config?.yclients?.salonId ||
+      '',
+  });
   const vatsId =
     extractVatsNumericId(authCtx.restDomain) ||
     extractVatsNumericId(authCtx.lkLogin) ||
     null;
   return {
+    salonId,
     salonName,
     apiVersion: authCtx.apiVersion,
     restDomain: authCtx.restDomain,
     crmToken: authCtx.crmToken,
     vatsId,
   };
+}
+
+function extractRequestedSalonId(req: express.Request): string {
+  const fromQuery = typeof req.query?.salon_id === 'string' ? req.query.salon_id : '';
+  const fromBody = typeof req.body?.salon_id === 'string' ? req.body.salon_id : '';
+  const fromHeader = typeof req.headers['x-salon-id'] === 'string' ? req.headers['x-salon-id'] : '';
+  return (fromQuery || fromBody || fromHeader).trim();
 }
 
 function isPresignedOrTokenizedUrl(targetUrl: string): boolean {
@@ -2718,6 +2740,7 @@ async function importCallRecord(extCall: any): Promise<boolean> {
   const isolationCtx = getSalonIsolationContext(db);
   const ownership = validateCallBelongsToSalon(
     {
+      salon_id: extCall.salon_id,
       vats_domain: extCall.vats_domain,
       salon_scope: extCall.salon_scope,
       audio_url: extCall.audio_url,
@@ -2741,12 +2764,18 @@ async function importCallRecord(extCall: any): Promise<boolean> {
     isolationCtx.restDomain ||
     undefined;
   const resolvedSalonScope = normalizeSalonScope(isolationCtx.salonName) || undefined;
+  const resolvedSalonId = isolationCtx.salonId || resolvedSalonScope || 'default';
 
   // Check if already imported
   const existingCallIdx = db.calls.findIndex((c: any) => c.call_id === extCall.call_id);
   if (existingCallIdx !== -1) {
     const existingCall = db.calls[existingCallIdx];
     let needsUpdate = false;
+
+    if (!existingCall.salon_id && resolvedSalonId) {
+      existingCall.salon_id = resolvedSalonId;
+      needsUpdate = true;
+    }
     
     // Fix the incorrect demo flag
     if (extCall.call_id.startsWith('megafon-real-') && existingCall.is_demo !== false) {
@@ -2851,6 +2880,7 @@ async function importCallRecord(extCall: any): Promise<boolean> {
       type: direction,
       is_answered: false,
       is_demo: false,
+      salon_id: resolvedSalonId,
       vats_domain: resolvedVatsDomain,
       salon_scope: resolvedSalonScope,
     };
@@ -2916,6 +2946,7 @@ async function importCallRecord(extCall: any): Promise<boolean> {
       is_answered: false,
       audio_url: extCall.record_play_uri || undefined,
       is_demo: false,
+      salon_id: resolvedSalonId,
       vats_domain: resolvedVatsDomain,
       salon_scope: resolvedSalonScope,
     };
@@ -2979,6 +3010,7 @@ async function importCallRecord(extCall: any): Promise<boolean> {
       is_answered: true,
       audio_url: extCall.record_play_uri || undefined,
       is_demo: false,
+      salon_id: resolvedSalonId,
       vats_domain: resolvedVatsDomain,
       salon_scope: resolvedSalonScope,
     };
@@ -3366,10 +3398,13 @@ app.get('/api/health', (req, res) => {
 
 // Public non-sensitive branding endpoint (loaded before authentication on login screen)
 app.get('/api/public/branding', (_req, res) => {
-  const salonName = getEffectiveSalonName();
+  const db = readDb();
+  const salonName = getEffectiveSalonName(db.config);
   const envSalonName = getEnvValue('SALON_NAME') || '';
+  const isolationCtx = getSalonIsolationContext(db);
   const theme = detectSalonTheme(salonName);
   res.json({
+    salonId: isolationCtx.salonId || 'default',
     salonName,
     envSalonName,
     theme,
@@ -4600,12 +4635,54 @@ function repairCallCopyIfNeeded(callCopy: any, salonName: string): boolean {
 }
 
 app.get('/api/calls', (req, res) => {
+  const currentUser = getCurrentUser(req);
+  if (!currentUser) {
+    return res.status(401).json({
+      error: 'Требуется авторизация для доступа к списку звонков',
+    });
+  }
+
   const db = readDb();
-  const userRole = getCurrentUserRole(req);
+  const userRole = currentUser.role;
   const salonName = getEffectiveSalonName(db.config);
-  const isolationCtx = getSalonIsolationContext(db);
-  const rawCalls = deduplicateCalls(db.calls || []).filter(
-    (c: any) => validateCallBelongsToSalon(c, isolationCtx).belongs
+  const baseIsolationCtx = getSalonIsolationContext(db);
+  const salonAuth = resolveAuthorizedSalonId({
+    userSalonId: currentUser.salon_id,
+    requestedSalonId: extractRequestedSalonId(req),
+    instanceSalonId: baseIsolationCtx.salonId,
+  });
+
+  if (!salonAuth.allowed) {
+    appendLog(
+      'warning',
+      'security',
+      `[Изоляция салона] Пользователю ${currentUser.username} (salon_id="${salonAuth.effectiveSalonId}") отказано в запросе /api/calls с чужим salon_id="${salonAuth.requestedSalonId}"`
+    );
+    return res.status(salonAuth.httpStatus || 403).json({
+      error: salonAuth.error || 'Доступ к звонкам другого салона запрещён',
+    });
+  }
+
+  const isolationCtx: SalonIsolationContext = {
+    ...baseIsolationCtx,
+    salonId: salonAuth.effectiveSalonId,
+  };
+
+  const rawDateRange = typeof req.query?.date_range === 'string' ? req.query.date_range : '';
+  const salonTimeZone = resolveReportTimeZone();
+  const parsedDateRange = parseCallDateRange(rawDateRange, salonTimeZone);
+  if (!parsedDateRange.valid) {
+    return res.status(400).json({
+      error: parsedDateRange.error || 'Некорректный параметр date_range',
+    });
+  }
+
+  const rawCalls = filterCallsByDateRange(
+    deduplicateCalls(db.calls || []).filter(
+      (c: any) => validateCallBelongsToSalon(c, isolationCtx).belongs
+    ),
+    parsedDateRange,
+    salonTimeZone
   );
 
   const mappedCalls = rawCalls.map((c: any) => {
@@ -4616,6 +4693,7 @@ app.get('/api/calls', (req, res) => {
 
     const callCopy: any = {
       ...c,
+      salon_id: normalizeSalonId(c.salon_id) || salonAuth.effectiveSalonId,
       key_facts: c.key_facts ? { ...c.key_facts } : undefined,
       booking_status: bookingStatus,
       client_phone_masked: masked,
@@ -4646,15 +4724,46 @@ app.get('/api/calls', (req, res) => {
 // 1.5. EXPORT CALLS TABLE / FILTERED SELECTION TO PDF (Сводный реестр для управляющего)
 const handleCallsTablePdfExport = (req: express.Request, res: express.Response) => {
   const db = readDb();
-  const userRole = getCurrentUserRole(req);
+  const currentUser = getCurrentUser(req);
+  const userRole = currentUser?.role || null;
   const salonName = getEffectiveSalonName(db.config);
 
   const rawIds = req.body?.call_ids || (typeof req.query?.call_ids === 'string' ? req.query.call_ids.split(',') : null);
   const filterTitle = req.body?.filterTitle || (req.query?.filterTitle as string) || '';
 
-  const isolationCtx = getSalonIsolationContext(db);
-  let callsToExport = (db.calls || []).filter(
-    (c: any) => validateCallBelongsToSalon(c, isolationCtx).belongs
+  const baseIsolationCtx = getSalonIsolationContext(db);
+  const salonAuth = resolveAuthorizedSalonId({
+    userSalonId: currentUser?.salon_id,
+    requestedSalonId: extractRequestedSalonId(req),
+    instanceSalonId: baseIsolationCtx.salonId,
+  });
+  if (!salonAuth.allowed) {
+    return res.status(salonAuth.httpStatus || 403).json({
+      error: salonAuth.error || 'Доступ к экспорту звонков другого салона запрещён',
+    });
+  }
+
+  const isolationCtx: SalonIsolationContext = {
+    ...baseIsolationCtx,
+    salonId: salonAuth.effectiveSalonId,
+  };
+  const rawDateRange =
+    (typeof req.body?.date_range === 'string' ? req.body.date_range : '') ||
+    (typeof req.query?.date_range === 'string' ? req.query.date_range : '');
+  const salonTimeZone = resolveReportTimeZone();
+  const parsedDateRange = parseCallDateRange(rawDateRange, salonTimeZone);
+  if (!parsedDateRange.valid) {
+    return res.status(400).json({
+      error: parsedDateRange.error || 'Некорректный параметр date_range',
+    });
+  }
+
+  let callsToExport = filterCallsByDateRange(
+    (db.calls || []).filter(
+      (c: any) => validateCallBelongsToSalon(c, isolationCtx).belongs
+    ),
+    parsedDateRange,
+    salonTimeZone
   );
   if (Array.isArray(rawIds) && rawIds.length > 0) {
     const idSet = new Set(rawIds.map((id: any) => String(id).trim()));
@@ -4670,6 +4779,7 @@ const handleCallsTablePdfExport = (req: express.Request, res: express.Response) 
 
     return {
       ...call,
+      salon_id: normalizeSalonId(call.salon_id) || salonAuth.effectiveSalonId,
       booking_status: bookingStatus,
       client_phone_masked: masked,
     };
@@ -4700,13 +4810,47 @@ app.post('/api/calls/export/table-pdf', handleCallsTablePdfExport);
 // 1.6. EXPORT CALLS TABLE / FILTERED SELECTION TO CSV (Excel / 152-ФЗ)
 const handleCallsTableCsvExport = (req: express.Request, res: express.Response) => {
   const db = readDb();
-  const userRole = getCurrentUserRole(req);
+  const currentUser = getCurrentUser(req);
+  const userRole = currentUser?.role || null;
   const salonName = getEffectiveSalonName(db.config);
 
   const rawIds = req.body?.call_ids || (typeof req.query?.call_ids === 'string' ? req.query.call_ids.split(',') : null);
   const filterTitle = req.body?.filterTitle || (req.query?.filterTitle as string) || '';
 
-  let callsToExport = db.calls || [];
+  const baseIsolationCtx = getSalonIsolationContext(db);
+  const salonAuth = resolveAuthorizedSalonId({
+    userSalonId: currentUser?.salon_id,
+    requestedSalonId: extractRequestedSalonId(req),
+    instanceSalonId: baseIsolationCtx.salonId,
+  });
+  if (!salonAuth.allowed) {
+    return res.status(salonAuth.httpStatus || 403).json({
+      error: salonAuth.error || 'Доступ к экспорту звонков другого салона запрещён',
+    });
+  }
+
+  const isolationCtx: SalonIsolationContext = {
+    ...baseIsolationCtx,
+    salonId: salonAuth.effectiveSalonId,
+  };
+  const rawDateRange =
+    (typeof req.body?.date_range === 'string' ? req.body.date_range : '') ||
+    (typeof req.query?.date_range === 'string' ? req.query.date_range : '');
+  const salonTimeZone = resolveReportTimeZone();
+  const parsedDateRange = parseCallDateRange(rawDateRange, salonTimeZone);
+  if (!parsedDateRange.valid) {
+    return res.status(400).json({
+      error: parsedDateRange.error || 'Некорректный параметр date_range',
+    });
+  }
+
+  let callsToExport = filterCallsByDateRange(
+    (db.calls || []).filter(
+      (c: any) => validateCallBelongsToSalon(c, isolationCtx).belongs
+    ),
+    parsedDateRange,
+    salonTimeZone
+  );
   if (Array.isArray(rawIds) && rawIds.length > 0) {
     const idSet = new Set(rawIds.map((id: any) => String(id).trim()));
     callsToExport = callsToExport.filter((c: any) => idSet.has(c.call_id));
@@ -4721,6 +4865,7 @@ const handleCallsTableCsvExport = (req: express.Request, res: express.Response) 
 
     return {
       ...call,
+      salon_id: normalizeSalonId(call.salon_id) || salonAuth.effectiveSalonId,
       booking_status: bookingStatus,
       client_phone_masked: masked,
     };
@@ -4746,12 +4891,33 @@ app.post('/api/calls/export-table-csv', handleCallsTableCsvExport);
 app.get('/api/calls/export/table-csv', handleCallsTableCsvExport);
 app.post('/api/calls/export/table-csv', handleCallsTableCsvExport);
 
-// 2. GET SINGLE CALL (with 152-ФЗ Role Masking)
+// 2. GET SINGLE CALL (with 152-ФЗ Role Masking & salon_id isolation)
 app.get('/api/calls/:id', (req, res) => {
+  const currentUser = getCurrentUser(req);
+  if (!currentUser) {
+    return res.status(401).json({ error: 'Требуется авторизация для доступа к звонку' });
+  }
+
   const db = readDb();
-  const userRole = getCurrentUserRole(req);
+  const userRole = currentUser.role;
+  const baseIsolationCtx = getSalonIsolationContext(db);
+  const salonAuth = resolveAuthorizedSalonId({
+    userSalonId: currentUser.salon_id,
+    requestedSalonId: extractRequestedSalonId(req),
+    instanceSalonId: baseIsolationCtx.salonId,
+  });
+  if (!salonAuth.allowed) {
+    return res.status(salonAuth.httpStatus || 403).json({
+      error: salonAuth.error || 'Доступ к звонку другого салона запрещён',
+    });
+  }
+
+  const isolationCtx: SalonIsolationContext = {
+    ...baseIsolationCtx,
+    salonId: salonAuth.effectiveSalonId,
+  };
   const call = db.calls.find((c: any) => c.call_id === req.params.id);
-  if (!call) {
+  if (!call || !validateCallBelongsToSalon(call, isolationCtx).belongs) {
     return res.status(404).json({ error: 'Звонок не найден' });
   }
 
@@ -4762,6 +4928,7 @@ app.get('/api/calls/:id', (req, res) => {
 
   const callCopy: any = {
     ...call,
+    salon_id: normalizeSalonId(call.salon_id) || salonAuth.effectiveSalonId,
     key_facts: call.key_facts ? { ...call.key_facts } : undefined,
     booking_status: bookingStatus,
     client_phone_masked: masked,
@@ -4786,18 +4953,35 @@ app.get('/api/calls/:id', (req, res) => {
 
 // 2.001. DELETE SINGLE CALL
 app.delete('/api/calls/:id', (req, res) => {
-  const userRole = getCurrentUserRole(req);
+  const actingUser = getCurrentUser(req);
+  const userRole = actingUser?.role || null;
   if (userRole !== 'admin' && userRole !== 'manager') {
     return res.status(403).json({ error: 'Удаление записей звонков разрешено только администраторам и управляющим' });
   }
 
   const db = readDb();
-  const initialLength = db.calls.length;
-  db.calls = db.calls.filter((c: any) => c.call_id !== req.params.id);
+  const baseIsolationCtx = getSalonIsolationContext(db);
+  const salonAuth = resolveAuthorizedSalonId({
+    userSalonId: actingUser?.salon_id,
+    requestedSalonId: extractRequestedSalonId(req),
+    instanceSalonId: baseIsolationCtx.salonId,
+  });
+  if (!salonAuth.allowed) {
+    return res.status(salonAuth.httpStatus || 403).json({
+      error: salonAuth.error || 'Удаление звонка другого салона запрещено',
+    });
+  }
 
-  if (db.calls.length === initialLength) {
+  const isolationCtx: SalonIsolationContext = {
+    ...baseIsolationCtx,
+    salonId: salonAuth.effectiveSalonId,
+  };
+  const targetCall = db.calls.find((c: any) => c.call_id === req.params.id);
+  if (!targetCall || !validateCallBelongsToSalon(targetCall, isolationCtx).belongs) {
     return res.status(404).json({ error: 'Звонок не найден' });
   }
+
+  db.calls = db.calls.filter((c: any) => c.call_id !== req.params.id);
 
   if (Array.isArray(db.notifications)) {
     db.notifications = db.notifications.filter((n: any) => n.call_id !== req.params.id);
@@ -4805,7 +4989,6 @@ app.delete('/api/calls/:id', (req, res) => {
 
   writeDb(db);
   appendLog('info', 'system', `Удалена запись звонка ${req.params.id} пользователем с ролью ${userRole}`);
-  const actingUser = getCurrentUser(req);
   logAccess(
     actingUser?.name || 'Администратор',
     'delete',
@@ -5058,6 +5241,33 @@ app.post('/api/calls/webhook', async (req, res) => {
       return res.status(401).json({ error: 'Неверный токен авторизации вебхука' });
     }
 
+    const isolationCtx = getSalonIsolationContext(db);
+    const ownership = validateCallBelongsToSalon(
+      {
+        salon_id: payload.salon_id,
+        vats_domain: payload.vats_domain || payload.domain,
+        salon_scope: payload.salon_scope,
+        audio_url: payload.audio_url || payload.record_play_uri || payload.link,
+      },
+      isolationCtx
+    );
+    if (!ownership.belongs) {
+      appendLog(
+        'warning',
+        'megafon',
+        `[Изоляция салона] Отклонён вебхук другого салона: источник "${ownership.detectedHost || 'unknown'}", ожидается "${ownership.expectedHost || 'unknown'}"`
+      );
+      return res.status(403).json({ error: 'Звонок отклонён: несовпадение salon_id или домена ВАТС' });
+    }
+
+    const resolvedSalonScope = normalizeSalonScope(isolationCtx.salonName) || undefined;
+    const resolvedSalonId = isolationCtx.salonId || resolvedSalonScope || 'default';
+    const resolvedVatsDomain =
+      extractVatsHostFromUrl(payload.vats_domain || payload.domain) ||
+      extractVatsHostFromUrl(payload.audio_url || payload.record_play_uri || payload.link) ||
+      isolationCtx.restDomain ||
+      undefined;
+
     const callId = payload.call_id || payload.id || `ats-${Date.now()}`;
     const clientPhone = payload.phone || payload.client_phone || payload.caller || '';
     const maskedPhone = maskPhone(clientPhone);
@@ -5083,6 +5293,9 @@ app.post('/api/calls/webhook', async (req, res) => {
       status: status,
       type: direction,
       is_answered: status !== 'missed',
+      salon_id: resolvedSalonId,
+      vats_domain: resolvedVatsDomain,
+      salon_scope: resolvedSalonScope,
       booking_status: payload.booking_status || (status === 'missed' ? 'не применимо' : 'консультация'),
       operator_score: (status === 'missed' || duration === 0) ? null : (payload.operator_score !== undefined ? Number(payload.operator_score) : null),
       operator_comment: payload.operator_comment || (status === 'missed' ? 'Разговор не состоялся: зафиксирован пропущенный/неотвеченный вызов.' : 'Обработан оператором'),
@@ -5579,6 +5792,10 @@ app.post('/api/calls/:id/clarify-context', async (req, res) => {
 app.post('/api/calls/analyze', async (req, res) => {
   const { transcript, client_name, operator_name, duration_seconds, model, audioBase64, timestamp } = req.body;
   const db = readDb();
+  const currentUser = getCurrentUser(req);
+  const isolationCtx = getSalonIsolationContext(db);
+  const resolvedSalonScope = normalizeSalonScope(isolationCtx.salonName) || undefined;
+  const resolvedSalonId = currentUser?.salon_id || isolationCtx.salonId || resolvedSalonScope || 'default';
   const selectedModel = model || db.config.activeModel || 'GigaChat:Ultra';
   const resolvedTimestamp = (typeof timestamp === 'string' && timestamp.trim()) ? timestamp.trim() : new Date().toISOString();
 
@@ -5617,7 +5834,10 @@ app.post('/api/calls/analyze', async (req, res) => {
       client_name: client_name || 'Новый клиент',
       operator_name: operator_name || 'Менеджер салона',
       status: durationSec === 0 ? 'missed' : 'completed',
-      is_answered: false
+      is_answered: false,
+      salon_id: resolvedSalonId,
+      vats_domain: isolationCtx.restDomain || undefined,
+      salon_scope: resolvedSalonScope,
     };
 
     db.calls.unshift(shortCall);
@@ -5648,7 +5868,10 @@ app.post('/api/calls/analyze', async (req, res) => {
     operator_comment: '',
     client_name: client_name || 'Новый клиент',
     operator_name: operator_name || 'Менеджер салона',
-    status: 'processing'
+    status: 'processing',
+    salon_id: resolvedSalonId,
+    vats_domain: isolationCtx.restDomain || undefined,
+    salon_scope: resolvedSalonScope,
   };
 
   // Add processing entry
@@ -7088,8 +7311,32 @@ app.post('/api/calls/create-demo', (req, res) => {
 
 // 11. STATS CALCULATION
 app.get('/api/stats', (req, res) => {
+  const currentUser = getCurrentUser(req);
+  if (!currentUser) {
+    return res.status(401).json({ error: 'Требуется авторизация для доступа к статистике' });
+  }
+
   const db = readDb();
-  const calls: CallRecord[] = db.calls.filter((c: any) => c.status === 'completed');
+  const baseIsolationCtx = getSalonIsolationContext(db);
+  const salonAuth = resolveAuthorizedSalonId({
+    userSalonId: currentUser.salon_id,
+    requestedSalonId: extractRequestedSalonId(req),
+    instanceSalonId: baseIsolationCtx.salonId,
+  });
+  if (!salonAuth.allowed) {
+    return res.status(salonAuth.httpStatus || 403).json({
+      error: salonAuth.error || 'Доступ к статистике другого салона запрещён',
+    });
+  }
+
+  const isolationCtx: SalonIsolationContext = {
+    ...baseIsolationCtx,
+    salonId: salonAuth.effectiveSalonId,
+  };
+  const salonCalls: CallRecord[] = deduplicateCalls(db.calls || []).filter(
+    (c: any) => validateCallBelongsToSalon(c, isolationCtx).belongs
+  );
+  const calls: CallRecord[] = salonCalls.filter((c: any) => c.status === 'completed');
   
   if (calls.length === 0) {
     return res.json({
@@ -7106,7 +7353,7 @@ app.get('/api/stats', (req, res) => {
 
   const total = calls.length;
   const disputes = calls.filter(c => c.key_facts.is_dispute).length;
-  const totalScore = calls.reduce((acc, c) => acc + c.operator_score, 0);
+  const totalScore = calls.reduce((acc, c) => acc + (c.operator_score || 0), 0);
   const success = calls.filter(c => c.key_facts.call_outcome === 'успешно').length;
 
   const tone_client = { neutral: 0, discontent: 0, aggressive: 0 };
@@ -7130,8 +7377,8 @@ app.get('/api/stats', (req, res) => {
     hourlyMap[h] = { total: 0, booked: 0, declined: 0, consultation: 0, disputes: 0, totalScore: 0, scoreCount: 0, missed: 0 };
   }
 
-  // Include all calls (both completed and missed for peak load estimation)
-  const allCallsForHourly: any[] = db.calls || [];
+  // Include all calls (both completed and missed for peak load estimation) scoped to the user's salon
+  const allCallsForHourly: any[] = salonCalls;
   allCallsForHourly.forEach((c: any) => {
     try {
       const d = new Date(c.timestamp);

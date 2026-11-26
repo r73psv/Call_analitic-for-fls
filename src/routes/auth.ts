@@ -6,9 +6,29 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { UserRole, AccessLogEntry, User, AuthSession } from '../types.js';
-import { readStore, writeStore } from '../store/store.js';
+import { readStore, readStoreSync, writeStore } from '../store/store.js';
 import { hashPassword, verifyPassword } from '../store/user-store.js';
-import { persistServerEnvVars } from '../services/serverEnv.js';
+import { getEnvValue, persistServerEnvVars } from '../services/serverEnv.js';
+import { resolveSalonName } from '../services/salonBranding.js';
+import { normalizeSalonId, resolveEffectiveSalonId } from '../services/salonIsolation.js';
+
+export function resolveInstanceSalonId(storeOverride?: any): string {
+  const store = storeOverride || readStoreSync();
+  const cfg = store?.config || {};
+  const creds = cfg.credentials || {};
+  const megafon = cfg.megafon || {};
+  const salonName = resolveSalonName({
+    envSalonName: getEnvValue('SALON_NAME'),
+    configSalonName: cfg.salonName,
+    credentialsSalonName: creds.salonName,
+  });
+  return resolveEffectiveSalonId({
+    envSalonId: getEnvValue('SALON_ID'),
+    salonName,
+    restDomain: getEnvValue('MEGAFON_REST_DOMAIN') || megafon.restDomain || creds.megafonRestDomain || '',
+    yclientsSalonId: getEnvValue('YCLIENTS_SALON_ID') || creds.yclientsSalonId || cfg.yclients?.salonId || '',
+  });
+}
 
 // In-memory active sessions store: token -> AuthSession
 const sessionCache = new Map<string, AuthSession>();
@@ -86,7 +106,7 @@ export function extractAuthToken(req: Request): string | null {
 /**
  * Получает текущего аутентифицированного пользователя с проверкой тайм-аута неактивности (4 часа)
  */
-export function getCurrentUser(req: Request): { id: string; username: string; name: string; role: UserRole } | null {
+export function getCurrentUser(req: Request): { id: string; username: string; name: string; role: UserRole; salon_id: string } | null {
   const token = extractAuthToken(req);
   if (token && sessionCache.has(token)) {
     const session = sessionCache.get(token)!;
@@ -102,6 +122,9 @@ export function getCurrentUser(req: Request): { id: string; username: string; na
     // Сессия активна: обновляем метку последней активности и продлеваем скользящее окно
     session.lastActivity = now;
     session.expiresAt = now + INACTIVITY_TIMEOUT_MS;
+    if (!session.user.salon_id) {
+      session.user.salon_id = resolveInstanceSalonId();
+    }
     return session.user;
   }
 
@@ -110,11 +133,15 @@ export function getCurrentUser(req: Request): { id: string; username: string; na
   const headerRole = (req.headers['x-user-role'] || req.query?.role) as string;
   if (token && !sessionCache.has(token) && headerRole) {
     const role = (['admin', 'manager', 'operator', 'viewer'].includes(headerRole) ? headerRole : 'operator') as UserRole;
+    const store = readStoreSync();
+    const matchedUser = (store.users || []).find(u => u.role === role && u.isActive);
+    const resolvedSalonId = normalizeSalonId(matchedUser?.salon_id) || resolveInstanceSalonId(store);
     const recoveredUser = {
-      id: `usr-${role}-1`,
-      username: role,
-      name: role === 'admin' ? 'Главный Администратор' : (role === 'manager' ? 'Управляющий' : (role === 'operator' ? 'Администратор ресепшн' : 'Наблюдатель')),
+      id: matchedUser?.id || `usr-${role}-1`,
+      username: matchedUser?.username || role,
+      name: matchedUser?.name || (role === 'admin' ? 'Главный Администратор' : (role === 'manager' ? 'Управляющий' : (role === 'operator' ? 'Администратор ресепшн' : 'Наблюдатель'))),
       role,
+      salon_id: resolvedSalonId,
     };
     const now = Date.now();
     sessionCache.set(token, {
@@ -128,17 +155,21 @@ export function getCurrentUser(req: Request): { id: string; username: string; na
   }
 
   // Fallback to legacy/header role ONLY if token is not provided and query/header explicitly requested
-  if (headerRole === 'manager') {
-    return { id: 'usr-manager-1', username: 'manager', name: 'Управляющий', role: 'manager' };
-  }
-  if (headerRole === 'operator') {
-    return { id: 'usr-operator-1', username: 'operator', name: 'Администратор ресепшн', role: 'operator' };
-  }
-  if (headerRole === 'viewer') {
-    return { id: 'usr-viewer-1', username: 'viewer', name: 'Наблюдатель', role: 'viewer' };
-  }
-  if (headerRole === 'admin') {
-    return { id: 'usr-admin-1', username: 'admin', name: 'Главный Администратор', role: 'admin' };
+  if (headerRole === 'manager' || headerRole === 'operator' || headerRole === 'viewer' || headerRole === 'admin') {
+    const instanceSalonId = resolveInstanceSalonId();
+    const roleNames: Record<UserRole, string> = {
+      admin: 'Главный Администратор',
+      manager: 'Управляющий',
+      operator: 'Администратор ресепшн',
+      viewer: 'Наблюдатель',
+    };
+    return {
+      id: `usr-${headerRole}-1`,
+      username: headerRole,
+      name: roleNames[headerRole],
+      role: headerRole,
+      salon_id: instanceSalonId,
+    };
   }
 
   return null;
@@ -208,6 +239,10 @@ authRouter.post('/login', async (req: Request, res: Response) => {
     // Generate session token (valid 4 hours sliding inactivity TTL)
     const now = Date.now();
     const token = crypto.randomBytes(32).toString('hex');
+    const resolvedSalonId = normalizeSalonId(user.salon_id) || resolveInstanceSalonId(store);
+    if (!user.salon_id) {
+      user.salon_id = resolvedSalonId;
+    }
     const session: AuthSession = {
       token,
       user: {
@@ -215,6 +250,7 @@ authRouter.post('/login', async (req: Request, res: Response) => {
         username: user.username,
         name: user.name,
         role: user.role,
+        salon_id: resolvedSalonId,
       },
       createdAt: now,
       lastActivity: now,
@@ -291,6 +327,9 @@ authRouter.get('/me', (req: Request, res: Response) => {
   // Обновляем метку активности
   session.lastActivity = now;
   session.expiresAt = now + INACTIVITY_TIMEOUT_MS;
+  if (!session.user.salon_id) {
+    session.user.salon_id = resolveInstanceSalonId();
+  }
 
   res.json({
     authenticated: true,
@@ -429,11 +468,13 @@ adminUsersRouter.use(requireRole(['admin', 'manager']));
 adminUsersRouter.get('/', async (req: Request, res: Response) => {
   try {
     const store = await readStore();
+    const instanceSalonId = resolveInstanceSalonId(store);
     const users = (store.users || []).map(u => ({
       id: u.id,
       username: u.username,
       name: u.name,
       role: u.role,
+      salon_id: normalizeSalonId(u.salon_id) || instanceSalonId,
       createdAt: u.createdAt,
       updatedAt: u.updatedAt,
       lastLoginAt: u.lastLoginAt,
@@ -452,7 +493,7 @@ adminUsersRouter.get('/', async (req: Request, res: Response) => {
  */
 adminUsersRouter.post('/', async (req: Request, res: Response) => {
   try {
-    const { username, name, password, role, notes } = req.body || {};
+    const { username, name, password, role, notes, salon_id } = req.body || {};
     if (!username || !password || !name || !role) {
       return res.status(400).json({ error: 'Поля username, name, password, role обязательны' });
     }
@@ -481,12 +522,19 @@ adminUsersRouter.post('/', async (req: Request, res: Response) => {
       return res.status(400).json({ error: `Пользователь с логином "${username}" уже существует` });
     }
 
+    const instanceSalonId = resolveInstanceSalonId(store);
+    const assignedSalonId =
+      currentUser?.role === 'admin' && typeof salon_id === 'string' && normalizeSalonId(salon_id)
+        ? normalizeSalonId(salon_id)
+        : (currentUser?.salon_id || instanceSalonId);
+
     const { hash, salt } = hashPassword(String(password));
     const newUser: User = {
       id: `usr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       username: normalizedUsername,
       name: String(name).trim(),
       role,
+      salon_id: assignedSalonId,
       passwordHash: hash,
       salt,
       createdAt: new Date().toISOString(),
@@ -509,6 +557,7 @@ adminUsersRouter.post('/', async (req: Request, res: Response) => {
       username: newUser.username,
       name: newUser.name,
       role: newUser.role,
+      salon_id: newUser.salon_id,
       createdAt: newUser.createdAt,
       isActive: newUser.isActive,
       notes: newUser.notes,
