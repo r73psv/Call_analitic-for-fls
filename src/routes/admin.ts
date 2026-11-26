@@ -26,6 +26,7 @@ import { persistServerEnvVars, getServerEnvStatus, getEnvValue } from '../servic
 import { clearYclientsCache, fetchYclientsMasters, testYclientsReadOnlyConnection, getYclientsMastersSyncStatus } from '../services/yclients.js';
 import { normalizeDailyReportTime, resolveReportTimeZone, getLocalDateParts } from '../services/vkDailyReport.js';
 import { resolveSalonName } from '../services/salonBranding.js';
+import { resolveSalonS3KeyPrefix } from '../services/salonIsolation.js';
 import { buildStaffPerformanceReport } from '../services/administratorIdentity.js';
 import { SystemCredentials, GigaChatModel, AutoCleanupSettings, LogEntry } from '../types.js';
 
@@ -114,7 +115,11 @@ adminRouter.get('/credentials', async (req: Request, res: Response) => {
       s3AccessKey: effectiveS3AccessKey,
       s3SecretKey: getEnvValue('S3_SECRET_KEY') || creds.s3SecretKey || '',
       s3BucketName: getEnvValue('S3_BUCKET_NAME') || creds.s3BucketName || '',
-      s3KeyPrefix: getEnvValue('S3_KEY_PREFIX') || creds.s3KeyPrefix || 'lik28/data/',
+      s3KeyPrefix: resolveSalonS3KeyPrefix({
+        explicitPrefix: getEnvValue('S3_KEY_PREFIX') || creds.s3KeyPrefix || '',
+        salonName: effectiveSalonName,
+        restDomain: getEnvValue('MEGAFON_REST_DOMAIN') || creds.megafonRestDomain || store.config.megafon.restDomain || '',
+      }),
       s3Region: getEnvValue('S3_REGION') || creds.s3Region || 'ru-1',
       s3Configured: !!effectiveS3AccessKey,
 

@@ -7,6 +7,7 @@ import { S3Client, GetObjectCommand, PutObjectCommand, HeadBucketCommand } from 
 import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { encrypt, decrypt } from '../store/crypto-store.js';
 import { readStoreSync } from '../store/store.js';
+import { resolveSalonS3KeyPrefix } from './salonIsolation.js';
 
 export const DEFAULT_S3_SYNC_DEBOUNCE_MS = 45_000; // 45s (окно 30–60 сек)
 export const DEFAULT_S3_SYNC_MAX_WAIT_MS = 60_000; // гарантированный верхний предел ожидания
@@ -143,9 +144,14 @@ function getTimewebS3Client(): { s3: S3Client; bucket: string; storeKey: string;
   let region = (process.env.S3_REGION || '').trim();
   let keyPrefix = (process.env.S3_KEY_PREFIX || '').trim();
 
+  let salonName = (process.env.SALON_NAME || '').trim();
+  let restDomain = (process.env.MEGAFON_REST_DOMAIN || '').trim();
+
   try {
     const store = readStoreSync();
     const creds = store.config?.credentials;
+    if (!salonName && store.config?.salonName) salonName = store.config.salonName.trim();
+    if (!restDomain && store.config?.megafon?.restDomain) restDomain = store.config.megafon.restDomain.trim();
     if (creds) {
       if (!endpoint && creds.s3Endpoint) endpoint = creds.s3Endpoint.trim();
       if (!accessKeyId && creds.s3AccessKey) accessKeyId = creds.s3AccessKey.trim();
@@ -159,7 +165,11 @@ function getTimewebS3Client(): { s3: S3Client; bucket: string; storeKey: string;
   }
 
   region = region || 'ru-1';
-  keyPrefix = keyPrefix || 'app/data/';
+  keyPrefix = resolveSalonS3KeyPrefix({
+    explicitPrefix: keyPrefix,
+    salonName,
+    restDomain,
+  });
 
   if (!endpoint || !accessKeyId || !secretAccessKey || !bucket) {
     return null;

@@ -39,6 +39,16 @@ import { savePendingTranscriptionAudio, loadPendingTranscriptionAudio, deletePen
 import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation, harmonizeMistakesAndEvaluation, filterOutdatedReminderMistakes, reconcileMistakesWithCriteria, generateLocalFallbackAnalysis, clearCrmMastersCache } from './src/services/gigachat.js';
 import { clearYclientsCache, fetchYclientsMasters, isYclientsDailySyncDue, normalizeYclientsSyncTime, getYclientsMastersSyncStatus, getEffectiveYclientsConfig } from './src/services/yclients.js';
 import { detectSalonTheme, resolveSalonName, LOGIN_FORM_TITLE } from './src/services/salonBranding.js';
+import {
+  validateWcgpWebhookOrigin,
+  validateCallBelongsToSalon,
+  validateS3SnapshotForSalon,
+  normalizeSalonScope,
+  extractVatsHostFromUrl,
+  extractVatsNumericId,
+  isSafeWcgpHost,
+  SalonIsolationContext,
+} from './src/services/salonIsolation.js';
 import { resolveCallAdministratorName, extractAdministratorIntroNameFromTranscript } from './src/services/administratorIdentity.js';
 import { classifyCallContext } from './src/services/summaryUtils.js';
 import { anonymizeTranscript, maskPhone } from './src/services/anonymize.js';
@@ -2086,13 +2096,48 @@ const AUDIO_CACHE_DIR = path.resolve(os.tmpdir(), 'lik28-audio-cache');
 
 function getMegafonAuthContext(db: any) {
   const megafon = db?.config?.megafon || {};
-  const apiVersion = megafon.apiVersion === 'rest_wcgp' ? 'rest_wcgp' : 'json_rpc';
-  const restDomain = normalizeWcgpDomain(megafon.restDomain || process.env.MEGAFON_REST_DOMAIN || '');
+  const creds = (db?.config as any)?.credentials || {};
+  const envApiVersion = getEnvValue('MEGAFON_API_VERSION');
+  const apiVersion = (envApiVersion || megafon.apiVersion) === 'rest_wcgp' ? 'rest_wcgp' : 'json_rpc';
   const clean = (v: any) => (typeof v === 'string' ? v.trim().replace(/^['"]|['"]$/g, '') : '');
-  const jsonRpcToken = clean(megafon.token || (db?.config as any)?.credentials?.megafonToken || process.env.MEGAFON_TOKEN || '');
-  const restToken = clean(megafon.restToken || process.env.MEGAFON_REST_TOKEN || jsonRpcToken || '');
-  const activeToken = apiVersion === 'rest_wcgp' ? (restToken || jsonRpcToken) : (jsonRpcToken || restToken);
-  return { apiVersion, restDomain, jsonRpcToken, restToken, activeToken };
+  const restDomain = normalizeWcgpDomain(
+    getEnvValue('MEGAFON_REST_DOMAIN') || megafon.restDomain || creds.megafonRestDomain || ''
+  );
+  // Strict separation: NEVER cross-mix JSON-RPC token (data-api.cp.megafon.ru) with REST WCGP token (megapbx.ru)
+  const jsonRpcToken = clean(
+    getEnvValue('MEGAFON_TOKEN') || megafon.token || creds.megafonToken || ''
+  );
+  const restToken = clean(
+    getEnvValue('MEGAFON_REST_TOKEN') || megafon.restToken || creds.megafonRestToken || ''
+  );
+  const crmToken = clean(
+    getEnvValue('MEGAFON_CRM_TOKEN') || megafon.crmToken || creds.megafonCrmToken || ''
+  );
+  const lkLogin = clean(
+    getEnvValue('MEGAFON_LK_LOGIN') || megafon.lkLogin || creds.megafonLkLogin || ''
+  );
+  const activeToken = apiVersion === 'rest_wcgp' ? restToken : jsonRpcToken;
+  return { apiVersion, restDomain, jsonRpcToken, restToken, crmToken, lkLogin, activeToken };
+}
+
+function getSalonIsolationContext(db: any): SalonIsolationContext {
+  const authCtx = getMegafonAuthContext(db);
+  const salonName = resolveSalonName({
+    envSalonName: getEnvValue('SALON_NAME'),
+    configSalonName: db?.config?.salonName,
+    credentialsSalonName: db?.config?.credentials?.salonName,
+  });
+  const vatsId =
+    extractVatsNumericId(authCtx.restDomain) ||
+    extractVatsNumericId(authCtx.lkLogin) ||
+    null;
+  return {
+    salonName,
+    apiVersion: authCtx.apiVersion,
+    restDomain: authCtx.restDomain,
+    crmToken: authCtx.crmToken,
+    vatsId,
+  };
 }
 
 function isPresignedOrTokenizedUrl(targetUrl: string): boolean {
@@ -2670,7 +2715,33 @@ async function getRealMegafonCalls(fromDate: Date, toDate: Date, token: string):
 // Helper to import a call record from Megafon ATS
 async function importCallRecord(extCall: any): Promise<boolean> {
   const db = readDb();
-  
+  const isolationCtx = getSalonIsolationContext(db);
+  const ownership = validateCallBelongsToSalon(
+    {
+      vats_domain: extCall.vats_domain,
+      salon_scope: extCall.salon_scope,
+      audio_url: extCall.audio_url,
+      record_play_uri: extCall.record_play_uri,
+      is_demo: extCall.is_demo,
+    },
+    isolationCtx
+  );
+  if (!ownership.belongs) {
+    appendLog(
+      'warning',
+      'megafon',
+      `[Изоляция салона] Отклонён чужой звонок ${extCall.call_id || ''}: обнаружен источник "${ownership.detectedHost || 'unknown'}", ожидается "${ownership.expectedHost || 'unknown'}".`
+    );
+    return false;
+  }
+
+  const resolvedVatsDomain =
+    extractVatsHostFromUrl(extCall.vats_domain) ||
+    extractVatsHostFromUrl(extCall.record_play_uri || extCall.audio_url) ||
+    isolationCtx.restDomain ||
+    undefined;
+  const resolvedSalonScope = normalizeSalonScope(isolationCtx.salonName) || undefined;
+
   // Check if already imported
   const existingCallIdx = db.calls.findIndex((c: any) => c.call_id === extCall.call_id);
   if (existingCallIdx !== -1) {
@@ -2779,7 +2850,9 @@ async function importCallRecord(extCall: any): Promise<boolean> {
       status: 'missed',
       type: direction,
       is_answered: false,
-      is_demo: false
+      is_demo: false,
+      vats_domain: resolvedVatsDomain,
+      salon_scope: resolvedSalonScope,
     };
 
     try {
@@ -2842,7 +2915,9 @@ async function importCallRecord(extCall: any): Promise<boolean> {
       type: direction,
       is_answered: false,
       audio_url: extCall.record_play_uri || undefined,
-      is_demo: false
+      is_demo: false,
+      vats_domain: resolvedVatsDomain,
+      salon_scope: resolvedSalonScope,
     };
 
     try {
@@ -2903,7 +2978,9 @@ async function importCallRecord(extCall: any): Promise<boolean> {
       type: direction,
       is_answered: true,
       audio_url: extCall.record_play_uri || undefined,
-      is_demo: false
+      is_demo: false,
+      vats_domain: resolvedVatsDomain,
+      salon_scope: resolvedSalonScope,
     };
 
     try {
@@ -3019,9 +3096,10 @@ setInterval(async () => {
   try {
     const db = readDb();
     const megafon = db.config?.megafon;
-    const token = megafon?.token || (db.config as any)?.credentials?.megafonToken || process.env.MEGAFON_TOKEN || '';
-    const restToken = megafon?.restToken || token || process.env.MEGAFON_REST_TOKEN || '';
-    const activeToken = megafon?.apiVersion === 'rest_wcgp' ? restToken : token;
+    const authCtx = getMegafonAuthContext(db);
+    const token = authCtx.jsonRpcToken;
+    const restToken = authCtx.restToken;
+    const activeToken = authCtx.activeToken;
     const isPollingEnabled = megafon ? (megafon.pollingEnabled !== false && megafon.active !== false) : false;
 
     if (activeToken && isPollingEnabled) {
@@ -3066,9 +3144,9 @@ setInterval(async () => {
       const queryFromDate = hasCallsInDb ? new Date(lastPollDate.getTime() - 1 * 3600000) : new Date(Date.now() - 86400000 * 30);
       let newCalls: any[] = [];
 
-      if (megafon?.apiVersion === 'rest_wcgp') {
-        const domain = megafon.restDomain || process.env.MEGAFON_REST_DOMAIN || '';
-        if (domain && restToken) {
+      if (authCtx.apiVersion === 'rest_wcgp') {
+        const domain = authCtx.restDomain;
+        if (domain && restToken && isSafeWcgpHost(domain)) {
           const { calls: rows } = await getWcgpHistory(domain, restToken, {
             period: megafon.restPollingPeriod || undefined,
             start: !megafon.restPollingPeriod ? queryFromDate : undefined,
@@ -3089,6 +3167,7 @@ setInterval(async () => {
               client_name: lastSix ? `Клиент (${lastSix})` : 'Клиент',
               operator_name: row.account || 'Администратор',
               record_play_uri: normalizeWcgpRecordUrl(row.record, domain),
+              vats_domain: domain,
               status: isAnswered ? 'запись готова' : 'пропущен'
             });
           }
@@ -3303,8 +3382,24 @@ async function performS3Hydration(): Promise<boolean> {
   try {
     const data = await hydrateFromS3();
     if (data) {
+      const s3Check = validateS3SnapshotForSalon(data, {
+        envSalonName: getEnvValue('SALON_NAME'),
+        envRestDomain: getEnvValue('MEGAFON_REST_DOMAIN'),
+      });
+      if (!s3Check.allowed) {
+        console.error(`[S3 Hydration Blocked] ${s3Check.message}`);
+        appendLog('error', 'security', `[S3 Изоляция] ${s3Check.message}`);
+        return false;
+      }
+
       const db = readStoreSync();
-      if (Array.isArray(data.calls)) db.calls = deduplicateCalls(data.calls);
+      const isolationCtx = getSalonIsolationContext(db);
+      if (Array.isArray(data.calls)) {
+        const filteredCalls = deduplicateCalls(data.calls).filter(
+          (c: any) => validateCallBelongsToSalon(c, isolationCtx).belongs
+        );
+        db.calls = filteredCalls;
+      }
       if (Array.isArray(data.logs)) db.logs = data.logs;
       if (data.config) db.config = { ...db.config, ...data.config };
       if (Array.isArray(data.users) && data.users.length > 0) db.users = data.users;
@@ -3661,10 +3756,11 @@ app.post('/api/calls/fetch-period', async (req, res) => {
 // Manual trigger for poll check (supports both /api/calls/fetch-poll and /api/calls/poll-now)
 const handleAtsPoll = async (req: express.Request, res: express.Response) => {
   const db = readDb();
-  const token = getEffectiveMegafonToken(db);
-  const isRestMode = db.config?.megafon?.apiVersion === 'rest_wcgp';
-  const effectiveRestDomain = db.config?.megafon?.restDomain || process.env.MEGAFON_REST_DOMAIN || '';
-  const effectiveRestToken = db.config?.megafon?.restToken || token;
+  const authCtx = getMegafonAuthContext(db);
+  const token = authCtx.jsonRpcToken;
+  const isRestMode = authCtx.apiVersion === 'rest_wcgp';
+  const effectiveRestDomain = authCtx.restDomain;
+  const effectiveRestToken = authCtx.restToken;
 
   if (isRestMode) {
     if (!effectiveRestDomain || !effectiveRestToken) {
@@ -3733,6 +3829,7 @@ const handleAtsPoll = async (req: express.Request, res: express.Response) => {
           client_name: lastSix ? `Клиент (${lastSix})` : 'Клиент',
           operator_name: row.account || 'Администратор',
           record_play_uri: normalizeWcgpRecordUrl(row.record, effectiveRestDomain),
+          vats_domain: effectiveRestDomain,
           status: isAnswered ? 'запись готова' : 'пропущен'
         });
       }
@@ -3772,22 +3869,58 @@ const handleAtsPoll = async (req: express.Request, res: express.Response) => {
 };
 
 // Megafon VATS REST CRM API Webhook Handler (по приложенной документации REST API ВАТС)
-async function handleMegafonWcgpWebhook(req: express.Request, res: express.Response) {
+async function handleMegafonWcgpWebhook(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+) {
   const db = readDb();
-  const megafon = db.config?.megafon;
+  const authCtx = getMegafonAuthContext(db);
 
   // Extract parameters (support urlencoded body, json body, query)
   const body = req.body || {};
   const query = req.query || {};
   const cmd = String(body.cmd || query.cmd || '').trim().toLowerCase();
 
-  // Validate crm_token if configured
-  const incomingCrmToken = String(body.crm_token || query.crm_token || '').trim();
-  const expectedCrmToken = String(megafon?.crmToken || process.env.MEGAFON_CRM_TOKEN || '').trim();
+  // If this is a non-WCGP JSON webhook POST to /api/calls/webhook (no `cmd`), hand off to the JSON webhook handler
+  if (req.path === '/api/calls/webhook' && req.method === 'POST' && !cmd) {
+    return next();
+  }
 
-  if (expectedCrmToken && incomingCrmToken && incomingCrmToken !== expectedCrmToken) {
-    appendLog('warning', 'megafon', `[ВАТС REST] Отклонен вебхук ${cmd}: передан неверный crm_token (${incomingCrmToken}).`);
-    return res.status(401).json({ error: 'Invalid token' });
+  if (req.method === 'GET' && !cmd) {
+    return res.status(200).json({
+      status: 'ok',
+      service: 'CallQA Megafon REST Integration Webhook',
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  // Strict WCGP authentication & cross-salon VATS isolation check
+  const incomingCrmToken = String(body.crm_token || query.crm_token || '').trim();
+  const rawIncomingLink = String(
+    body.link || body.record || body.record_url || body.audio_url || body.url ||
+    query.link || query.record || query.record_url || query.audio_url || ''
+  ).trim();
+  const rawIncomingDomain = String(body.domain || body.vats || query.domain || query.vats || '').trim();
+
+  const webhookValidation = validateWcgpWebhookOrigin({
+    cmd,
+    incomingCrmToken,
+    incomingRecordUrl: rawIncomingLink,
+    incomingDomain: rawIncomingDomain,
+    expectedCrmToken: authCtx.crmToken,
+    expectedRestDomain: authCtx.restDomain,
+  });
+
+  if (!webhookValidation.allowed) {
+    appendLog(
+      'warning',
+      'megafon',
+      `[ВАТС REST] Отклонён вебхук cmd=${cmd || 'unknown'}: ${webhookValidation.message || webhookValidation.reason}`
+    );
+    return res.status(webhookValidation.httpStatus || 401).json({
+      error: webhookValidation.message || 'Invalid token',
+    });
   }
 
   appendLog('info', 'megafon', `[ВАТС REST Webhook] Получена команда: cmd=${cmd || 'не указан'}`);
@@ -3806,10 +3939,7 @@ async function handleMegafonWcgpWebhook(req: express.Request, res: express.Respo
     const groupRealName = String(body.groupRealName || query.groupRealName || '').trim();
     const ext = String(body.ext || query.ext || '').trim();
     const duration = Number(body.duration || query.duration || 0);
-    const rawLink = String(
-      body.link || body.record || body.record_url || body.audio_url || body.url ||
-      query.link || query.record || query.record_url || query.audio_url || ''
-    ).trim();
+    const rawLink = rawIncomingLink;
     const start = String(body.start || query.start || '').trim();
 
     const isAnswered = status === 'Success' && duration > 0;
@@ -3830,7 +3960,8 @@ async function handleMegafonWcgpWebhook(req: express.Request, res: express.Respo
       full_phone: phone,
       client_name: clientName,
       operator_name: operatorName,
-      record_play_uri: normalizeWcgpRecordUrl(rawLink, megafon?.restDomain),
+      record_play_uri: normalizeWcgpRecordUrl(rawLink, authCtx.restDomain),
+      vats_domain: webhookValidation.detectedVatsHost || authCtx.restDomain || undefined,
       status: isAnswered ? 'запись готова' : 'пропущен'
     };
 
@@ -3937,16 +4068,23 @@ app.all('/api/calls/webhook', handleMegafonWcgpWebhook);
 app.all('/api/vats/webhook', handleMegafonWcgpWebhook);
 app.all('/api/megafon/rest/webhook', handleMegafonWcgpWebhook);
 
-// Dedicated endpoints for REST WCGP testing and management
-app.post('/api/megafon/rest/test-connection', async (req, res) => {
+// Dedicated endpoints for REST WCGP testing and management (restricted to admin/manager)
+app.post('/api/megafon/rest/test-connection', requireRole(['admin', 'manager']), async (req, res) => {
   const db = readDb();
-  const domain = req.body?.domain || db.config.megafon?.restDomain || process.env.MEGAFON_REST_DOMAIN || '';
-  const token = req.body?.token || db.config.megafon?.restToken || db.config.megafon?.token || process.env.MEGAFON_REST_TOKEN || '';
+  const authCtx = getMegafonAuthContext(db);
+  const domain = String(req.body?.domain || authCtx.restDomain || '').trim();
+  const token = String(req.body?.token || authCtx.restToken || '').trim();
 
   if (!domain || !token) {
     return res.status(400).json({
       success: false,
       error: 'Укажите домен ВАТС (например: vatsXXXXX.megapbx.ru) и токен авторизации.'
+    });
+  }
+  if (!isSafeWcgpHost(domain)) {
+    return res.status(400).json({
+      success: false,
+      error: 'Некорректный домен ВАТС: укажите публичное доменное имя АТС (например: vatsXXXXX.megapbx.ru).'
     });
   }
 
@@ -3989,10 +4127,15 @@ app.post('/api/megafon/rest/test-connection', async (req, res) => {
   }
 });
 
-app.post('/api/megafon/rest/groups', async (req, res) => {
+app.post('/api/megafon/rest/groups', requireRole(['admin', 'manager']), async (req, res) => {
   const db = readDb();
-  const domain = req.body?.domain || db.config.megafon?.restDomain || process.env.MEGAFON_REST_DOMAIN || '';
-  const token = req.body?.token || db.config.megafon?.restToken || db.config.megafon?.token || process.env.MEGAFON_REST_TOKEN || '';
+  const authCtx = getMegafonAuthContext(db);
+  const domain = String(req.body?.domain || authCtx.restDomain || '').trim();
+  const token = String(req.body?.token || authCtx.restToken || '').trim();
+
+  if (!domain || !token || !isSafeWcgpHost(domain)) {
+    return res.status(400).json({ success: false, error: 'Укажите корректный домен ВАТС и токен авторизации.' });
+  }
 
   try {
     const groups = await getWcgpGroups(domain, token);
@@ -4002,13 +4145,17 @@ app.post('/api/megafon/rest/groups', async (req, res) => {
   }
 });
 
-app.post('/api/megafon/rest/make-call', async (req, res) => {
+app.post('/api/megafon/rest/make-call', requireRole(['admin', 'manager']), async (req, res) => {
   const db = readDb();
-  const domain = req.body?.domain || db.config.megafon?.restDomain || process.env.MEGAFON_REST_DOMAIN || '';
-  const token = req.body?.token || db.config.megafon?.restToken || db.config.megafon?.token || process.env.MEGAFON_REST_TOKEN || '';
+  const authCtx = getMegafonAuthContext(db);
+  const domain = String(req.body?.domain || authCtx.restDomain || '').trim();
+  const token = String(req.body?.token || authCtx.restToken || '').trim();
   const user = req.body?.user;
   const phone = req.body?.phone;
 
+  if (!domain || !token || !isSafeWcgpHost(domain)) {
+    return res.status(400).json({ success: false, error: 'Укажите корректный домен ВАТС и токен авторизации.' });
+  }
   if (!user || !phone) {
     return res.status(400).json({ success: false, error: 'Параметры user и phone обязательны' });
   }
@@ -4024,15 +4171,30 @@ app.post('/api/megafon/rest/make-call', async (req, res) => {
   }
 });
 
-app.post('/api/megafon/rest/fetch-history', async (req, res) => {
+app.post('/api/megafon/rest/fetch-history', requireRole(['admin', 'manager']), async (req, res) => {
   const db = readDb();
-  const domain = req.body?.domain || db.config.megafon?.restDomain || process.env.MEGAFON_REST_DOMAIN || '';
-  const token = req.body?.token || db.config.megafon?.restToken || db.config.megafon?.token || process.env.MEGAFON_REST_TOKEN || '';
+  const authCtx = getMegafonAuthContext(db);
+  const requestedDomain = String(req.body?.domain || authCtx.restDomain || '').trim();
+  const domain = normalizeWcgpDomain(requestedDomain);
+  const token = String(req.body?.token || authCtx.restToken || '').trim();
   const period = req.body?.period || db.config.megafon?.restPollingPeriod || 'today';
   const type = req.body?.type || 'all';
 
-  if (!domain || !token) {
-    return res.status(400).json({ success: false, error: 'Укажите домен ВАТС и токен авторизации.' });
+  if (!domain || !token || !isSafeWcgpHost(domain)) {
+    return res.status(400).json({ success: false, error: 'Укажите корректный домен ВАТС и токен авторизации.' });
+  }
+
+  // Prevent importing history from a different salon's VATS domain when this salon already has a configured MEGAFON_REST_DOMAIN
+  if (authCtx.restDomain && domain.toLowerCase() !== authCtx.restDomain.toLowerCase()) {
+    appendLog(
+      'warning',
+      'megafon',
+      `[ВАТС REST] Заблокирована попытка выгрузить историю из чужого домена "${domain}" (текущий домен салона: "${authCtx.restDomain}").`
+    );
+    return res.status(403).json({
+      success: false,
+      error: `Домен ВАТС (${domain}) не совпадает с настроенным доменом этого салона (${authCtx.restDomain}). Сначала сохраните настройки ВАТС этого салона.`,
+    });
   }
 
   appendLog('info', 'megafon', `[ВАТС REST] Ручной запрос истории звонков за период "${period}" (домен: ${domain})...`);
@@ -4056,6 +4218,7 @@ app.post('/api/megafon/rest/fetch-history', async (req, res) => {
         client_name: lastSix ? `Клиент (${lastSix})` : 'Клиент',
         operator_name: row.account || 'Администратор',
         record_play_uri: normalizeWcgpRecordUrl(row.record, domain),
+        vats_domain: domain,
         status: isAnswered ? 'запись готова' : 'пропущен'
       };
       const imported = await importCallRecord(extCall);
@@ -4440,7 +4603,10 @@ app.get('/api/calls', (req, res) => {
   const db = readDb();
   const userRole = getCurrentUserRole(req);
   const salonName = getEffectiveSalonName(db.config);
-  const rawCalls = deduplicateCalls(db.calls || []);
+  const isolationCtx = getSalonIsolationContext(db);
+  const rawCalls = deduplicateCalls(db.calls || []).filter(
+    (c: any) => validateCallBelongsToSalon(c, isolationCtx).belongs
+  );
 
   const mappedCalls = rawCalls.map((c: any) => {
     const rawPhone = c.client_phone || c.full_phone || '';
@@ -4486,7 +4652,10 @@ const handleCallsTablePdfExport = (req: express.Request, res: express.Response) 
   const rawIds = req.body?.call_ids || (typeof req.query?.call_ids === 'string' ? req.query.call_ids.split(',') : null);
   const filterTitle = req.body?.filterTitle || (req.query?.filterTitle as string) || '';
 
-  let callsToExport = db.calls || [];
+  const isolationCtx = getSalonIsolationContext(db);
+  let callsToExport = (db.calls || []).filter(
+    (c: any) => validateCallBelongsToSalon(c, isolationCtx).belongs
+  );
   if (Array.isArray(rawIds) && rawIds.length > 0) {
     const idSet = new Set(rawIds.map((id: any) => String(id).trim()));
     callsToExport = callsToExport.filter((c: any) => idSet.has(c.call_id));

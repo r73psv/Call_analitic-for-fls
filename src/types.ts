@@ -262,6 +262,8 @@ export interface CallRecord {
   type?: 'incoming' | 'outgoing';
   is_answered?: boolean;
   is_demo?: boolean;
+  vats_domain?: string;
+  salon_scope?: string;
 
   // 152-ФЗ Personal Data & Consent Details
   client_phone?: string;

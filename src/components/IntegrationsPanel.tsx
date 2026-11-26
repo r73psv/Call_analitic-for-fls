@@ -813,7 +813,7 @@ export function IntegrationsPanel({ config, onSaveConfig, userRole = 'admin' }: 
                         type="text"
                         value={megafonRestDomain}
                         onChange={(e) => setMegafonRestDomain(e.target.value)}
-                        placeholder="https://vats903670.megapbx.ru/crmapi/v1 или vats903670.megapbx.ru"
+                        placeholder="https://vatsXXXXX.megapbx.ru/crmapi/v1 или vatsXXXXX.megapbx.ru"
                         className="w-full p-2.5 bg-white border border-slate-200 rounded-lg text-xs font-mono focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
                       />
                       <p className="text-[10px] text-slate-500 mt-1">

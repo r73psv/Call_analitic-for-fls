@@ -98,6 +98,25 @@ export const MANAGED_SERVER_ENV_KEYS = new Set<string>([
   'YCLIENTS_MASTERS_SYNC_TIME',
 ]);
 
+/**
+ * Keys that define tenant/salon identity and ATS/S3 isolation.
+ * When explicitly supplied via deployment server environment (`deploy_env`),
+ * a stale runtime `.env` file on a reused volume must NEVER overwrite them
+ * (prevents cross-salon ATS/S3 credential leakage between salon deployments).
+ */
+const DEPLOY_ENV_ISOLATION_KEYS = new Set<string>([
+  'SALON_NAME',
+  'S3_KEY_PREFIX',
+  'S3_BUCKET_NAME',
+  'MEGAFON_API_VERSION',
+  'MEGAFON_TOKEN',
+  'MEGAFON_REST_DOMAIN',
+  'MEGAFON_REST_TOKEN',
+  'MEGAFON_CRM_TOKEN',
+  'MEGAFON_LK_LOGIN',
+  'MEGAFON_LK_PASSWORD',
+]);
+
 /** Canonical alias pairs kept in sync when either side is loaded or updated. */
 const ALIAS_GROUPS: Array<string[]> = [
   ['GIGACHAT_AUTH_KEY', 'GIGACHAT_CREDENTIALS'],
@@ -413,6 +432,11 @@ export function loadServerEnvironment(options: LoadServerEnvOptions = {}): {
         }
         const trimmed = typeof val === 'string' ? val.trim() : '';
         if (trimmed !== '') {
+          // Never allow a stale runtime .env file to override salon/ATS/S3 isolation keys
+          // that were explicitly provided by the deployment environment.
+          if (DEPLOY_ENV_ISOLATION_KEYS.has(key) && envSources.get(key) === 'deploy_env') {
+            continue;
+          }
           process.env[key] = trimmed;
           envSources.set(key, 'runtime_env_file');
           loadedFromRuntimeFile.push(key);
@@ -901,7 +925,11 @@ export function hydrateStoreFromServerEnv(
   }
 
   const migratedFromStore = Object.keys(legacyToPersist);
-  const isNodeTestRunner = process.execArgv.includes('--test') || process.argv.includes('--test');
+  const isNodeTestRunner =
+    process.execArgv.includes('--test') ||
+    process.argv.includes('--test') ||
+    Boolean(process.env.NODE_TEST_CONTEXT) ||
+    process.argv.some((a) => /\.test\.[cm]?[jt]s$/i.test(a));
   if (migratedFromStore.length > 0 && options.persistLegacyMigration !== false && !isNodeTestRunner) {
     persistServerEnvVars(legacyToPersist, { silent: options.silent });
   }

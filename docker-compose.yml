@@ -16,6 +16,7 @@ services:
       - PORT=3000
       - HOST=0.0.0.0
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - SALON_NAME=${SALON_NAME}
       - STORE_ENCRYPTION_KEY=${STORE_ENCRYPTION_KEY}
       - DATA_PATH=/app/data/data-store.json
       - DATA_PATH_ENC=/app/data/data-store.enc
@@ -36,15 +37,19 @@ services:
       - S3_ACCESS_KEY=${S3_ACCESS_KEY}
       - S3_SECRET_KEY=${S3_SECRET_KEY}
       - S3_BUCKET_NAME=${S3_BUCKET_NAME}
-      - S3_KEY_PREFIX=${S3_KEY_PREFIX:-lik28/data/}
+      - S3_KEY_PREFIX=${S3_KEY_PREFIX}
       - S3_REGION=${S3_REGION:-ru-1}
       - S3_SYNC_INTERVAL_SEC=${S3_SYNC_INTERVAL_SEC:-300}
       # Sber GigaChat
       - GIGACHAT_AUTH_KEY=${GIGACHAT_AUTH_KEY}
       - GIGACHAT_MODEL=${GIGACHAT_MODEL:-GigaChat:Ultra}
       - GIGACHAT_SCOPE=${GIGACHAT_SCOPE:-GIGACHAT_API_PERS}
-      # Мегафон ВАТС
+      # Мегафон ВАТС (JSON-RPC и REST CRM API WCGP)
+      - MEGAFON_API_VERSION=${MEGAFON_API_VERSION:-json_rpc}
       - MEGAFON_TOKEN=${MEGAFON_TOKEN}
+      - MEGAFON_REST_DOMAIN=${MEGAFON_REST_DOMAIN}
+      - MEGAFON_REST_TOKEN=${MEGAFON_REST_TOKEN}
+      - MEGAFON_CRM_TOKEN=${MEGAFON_CRM_TOKEN}
       # ВКонтакте (оповещения)
       - VK_TOKEN=${VK_TOKEN}
       - VK_CHAT_ID=${VK_CHAT_ID}

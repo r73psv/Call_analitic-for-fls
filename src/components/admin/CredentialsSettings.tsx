@@ -2534,7 +2534,7 @@ export function CredentialsSettings({ authToken, onConfigUpdated }: CredentialsS
                       type="text"
                       value={megafonRestDomain}
                       onChange={(e) => setMegafonRestDomain(e.target.value)}
-                      placeholder="https://vats903670.megapbx.ru/crmapi/v1 или vats903670.megapbx.ru"
+                      placeholder="https://vatsXXXXX.megapbx.ru/crmapi/v1 или vatsXXXXX.megapbx.ru"
                       className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono"
                       id="input-megafon-rest-domain"
                     />
