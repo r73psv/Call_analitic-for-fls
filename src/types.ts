@@ -17,7 +17,18 @@ export type GigaamModelVariant =
   | 'e2e_rnnt'
   | 'e2e_ctc'
   | 'rnnt'
-  | 'ctc';
+  | 'ctc'
+  | (string & {});
+
+export type AsrFailReason =
+  | 'model_not_found'
+  | 'rate_limit'
+  | 'auth_error'
+  | 'timeout_or_network'
+  | 'server_error'
+  | 'bad_request'
+  | 'empty_audio'
+  | 'unknown';
 
 export type UserRole = 'admin' | 'manager' | 'operator' | 'viewer';
 
@@ -65,10 +76,11 @@ export interface SystemCredentials {
   tbankApiKey?: string;
   tbankSecretKey?: string;
 
-  // GigaAM v3 (SaluteDevices / Sber ASR HTTP Inference)
+  // GigaAM v3 (SaluteDevices / Sber ASR HTTP Inference) / Cloud.ru GigaASR
   gigaamApiUrl?: string;
   gigaamApiKey?: string;
   gigaamVariant?: GigaamModelVariant;
+  asrModelFallback?: string;
 
   // Yandex Object Storage (для аудиозаписей SpeechKit >= 1MB)
   yandexStorageBucket?: string;
@@ -266,6 +278,9 @@ export interface CallRecord {
   pending_asr_retry_after?: string;
   pending_asr_attempts?: number;
   pending_asr_last_error?: string;
+  asr_fail_reason?: AsrFailReason | string;
+  asr_failed_model?: string;
+  pending_asr_alert_sent_at?: string;
   
   // TTL & S3 Archive Data (152-ФЗ)
   audio_deleted?: boolean;

@@ -3,12 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GigaamModelVariant, SttProvider } from '../types.js';
+import { AsrFailReason, GigaamModelVariant, SttProvider } from '../types.js';
 import { readStoreSync } from '../store/store.js';
 import { isYandexAuthConfigured } from './yandex-auth.js';
 import { transcribeWithRetry, refineTranscriptRoles, fixDuplicatedTranscript } from './speechkit.js';
 import { isTbankVoiceKitConfigured, transcribeWithTbankVoiceKitRetry } from './tbank-voicekit.js';
-import { isGigaAmConfigured, transcribeWithGigaAmRetry } from './gigaam-asr.js';
+import {
+  isGigaAmConfigured,
+  transcribeWithGigaAmRetry,
+  classifyAsrFailReason,
+  getGigaAmConfig,
+} from './gigaam-asr.js';
 
 export type TranscriptionEngine = SttProvider | 'speechkit' | 'none';
 
@@ -21,6 +26,9 @@ export interface TranscriptionResult {
   preparedWav?: Buffer;
   rateLimited?: boolean;
   httpStatus?: number;
+  asrFailReason?: AsrFailReason | string;
+  failedModel?: string;
+  fallbackModelsTried?: string[];
 }
 
 export interface TranscribeAudioOptions {
@@ -162,6 +170,12 @@ export async function transcribeAudio(
       };
     } catch (err: any) {
       const errMsg = err.message || String(err);
+      const httpStatus = typeof err?.status === 'number' ? err.status : undefined;
+      const asrFailReason = classifyAsrFailReason(err, httpStatus, err?.http404Body);
+      const failedModel =
+        typeof err?.asrModel === 'string' && err.asrModel.trim()
+          ? err.asrModel.trim()
+          : getGigaAmConfig(undefined, undefined, gigaamVariantOverride).variant;
       log('error', `[STT] Ошибка распознавания речи ${providerLabel}: ${errMsg}`);
       return {
         text: '',
@@ -170,8 +184,11 @@ export async function transcribeAudio(
         error: errMsg,
         attempts: Math.max(1, attempts || (typeof err?.sttAttempts === 'number' ? err.sttAttempts : 1)),
         preparedWav,
-        rateLimited: Boolean(err?.rateLimited || err?.status === 429),
-        httpStatus: typeof err?.status === 'number' ? err.status : undefined,
+        rateLimited: Boolean(err?.rateLimited || httpStatus === 429),
+        httpStatus,
+        asrFailReason,
+        failedModel,
+        fallbackModelsTried: Array.isArray(err?.asrFallbackModelsTried) ? err.asrFallbackModelsTried : undefined,
       };
     }
   }

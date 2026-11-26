@@ -49,6 +49,8 @@ export const MANAGED_SERVER_ENV_KEYS = new Set<string>([
   // GigaASR / GigaAM v3
   'GIGAAM_API_URL',
   'GIGAAM_API_KEY',
+  'ASR_MODEL',
+  'ASR_MODEL_FALLBACK',
   'GIGAAM_MODEL_VARIANT',
   'ASR_MAX_CONCURRENT',
 
@@ -722,15 +724,17 @@ export function hydrateStoreFromServerEnv(
   syncField(['GIGAAM_API_URL'], () => creds.gigaamApiUrl, (v) => { creds.gigaamApiUrl = v; }, false);
   syncField(['GIGAAM_API_KEY'], () => creds.gigaamApiKey, (v) => { creds.gigaamApiKey = v; });
   syncField(
-    ['GIGAAM_MODEL_VARIANT'],
+    ['ASR_MODEL', 'GIGAAM_MODEL_VARIANT'],
     () => creds.gigaamVariant,
     (v) => {
-      if (VALID_GIGAAM_VARIANTS.has(v)) {
-        creds.gigaamVariant = v as GigaamModelVariant;
+      const trimmed = v.trim();
+      if (trimmed) {
+        creds.gigaamVariant = (VALID_GIGAAM_VARIANTS.has(trimmed) ? trimmed : trimmed) as GigaamModelVariant;
       }
     },
     false
   );
+  syncField(['ASR_MODEL_FALLBACK'], () => creds.asrModelFallback, (v) => { creds.asrModelFallback = v.trim(); }, false);
 
   // 152-FZ Store encryption key
   syncField(['STORE_ENCRYPTION_KEY'], () => creds.storeEncryptionKey, (v) => { creds.storeEncryptionKey = v; });

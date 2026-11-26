@@ -4,7 +4,7 @@
  */
 
 import axios from 'axios';
-import { GigaamModelVariant } from '../types.js';
+import { AsrFailReason, CallRecord, GigaamModelVariant } from '../types.js';
 import { readStoreSync } from '../store/store.js';
 import {
   detectAudioFormat,
@@ -29,6 +29,10 @@ import {
 
 export const CLOUDRU_GIGAASR_TRANSCRIPTIONS_URL =
   'https://foundation-models.api.cloud.ru/v1/audio/transcriptions';
+
+export const DEFAULT_CLOUDRU_ASR_MODEL = 'GigaChat/GigaASR';
+
+const SELF_HOSTED_GIGAAM_VARIANTS = new Set<string>(['e2e_rnnt', 'e2e_ctc', 'rnnt', 'ctc']);
 
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 2000;
@@ -78,6 +82,119 @@ export function isAsrRateLimitError(error: unknown, statusOverride?: number, raw
   if (status === 429) return true;
   const msg = `${typeof (error as any)?.message === 'string' ? (error as any).message : ''} ${rawBody || ''}`;
   return /rate[_ ]?limit|too many requests|\b429\b/i.test(msg);
+}
+
+/**
+ * Определяет, является ли ошибка отсутствием модели / маршрута транскрибации (HTTP 404 / model_not_found).
+ */
+export function isAsrModelNotFoundError(error: unknown, statusOverride?: number, rawBody?: string): boolean {
+  const errObj = error as any;
+  if (errObj?.asrFailReason === 'model_not_found') return true;
+  const status = statusOverride ?? extractHttpStatus(error);
+  if (status === 404) return true;
+  const msg = `${typeof errObj?.message === 'string' ? errObj.message : ''} ${rawBody || ''}`;
+  return /model[_ ]not[_ ]found|unknown model|\bhttp\s*404\b/i.test(msg);
+}
+
+/**
+ * Классифицирует причину сбоя расшифровки ASR для поля asr_fail_reason.
+ */
+export function classifyAsrFailReason(error: unknown, statusOverride?: number, rawBody?: string): AsrFailReason {
+  const errObj = error as any;
+  if (typeof errObj?.asrFailReason === 'string' && errObj.asrFailReason.trim()) {
+    return errObj.asrFailReason.trim() as AsrFailReason;
+  }
+  const status = statusOverride ?? extractHttpStatus(error);
+  const msg = `${typeof errObj?.message === 'string' ? errObj.message : ''} ${rawBody || ''}`;
+
+  if (isAsrModelNotFoundError(error, status, rawBody)) {
+    return 'model_not_found';
+  }
+  if (isAsrRateLimitError(error, status, rawBody)) {
+    return 'rate_limit';
+  }
+  if (
+    status === 401 ||
+    status === 403 ||
+    /unauthorized|forbidden|ошибка авторизации|укажите api[- ]?ключ|не настроен/i.test(msg)
+  ) {
+    return 'auth_error';
+  }
+  if (status === 400 || status === 413 || status === 415 || status === 422) {
+    return 'bad_request';
+  }
+  if (typeof status === 'number' && status >= 500) {
+    return 'server_error';
+  }
+  if (/timeout|timed out|abort|econn|enotfound|fetch failed|network|socket|und_err/i.test(msg)) {
+    return 'timeout_or_network';
+  }
+  return 'unknown';
+}
+
+/**
+ * Формирует текст уведомления администратору в VK-чат при недоступности модели ASR (HTTP 404 / model_not_found).
+ */
+export function formatAsrModelNotFoundVkAlert(
+  modelName: string,
+  details?: {
+    fallbackModels?: string[];
+    callId?: string;
+    salonName?: string;
+  }
+): string {
+  const cleanModel = (modelName || '').trim() || getConfiguredAsrModel();
+  const lines: string[] = [`ASR недоступен: модель ${cleanModel} не найдена`];
+  if (details?.salonName) {
+    lines.push(`Салон: ${details.salonName}`);
+  }
+  if (details?.callId) {
+    lines.push(`Звонок: ${details.callId} (сохранён со статусом «Требует расшифровки», авто-повтор остановлен)`);
+  }
+  if (details?.fallbackModels && details.fallbackModels.length > 0) {
+    lines.push(`Проверенные резервные модели (ASR_MODEL_FALLBACK): ${details.fallbackModels.join(', ')}`);
+  }
+  lines.push('Действие: проверьте и обновите переменную окружения ASR_MODEL (и при необходимости ASR_MODEL_FALLBACK).');
+  return lines.join('\n');
+}
+
+/**
+ * Проверяет, следует ли планировщику автоматически повторять расшифровку звонка со статусом «Требует расшифровки».
+ * При asr_fail_reason === 'model_not_found' авто-повтор пропускается (нужно вмешательство администратора).
+ */
+export function shouldAutoRetryPendingAsrCall(
+  call: Pick<
+    CallRecord,
+    'status' | 'transcription_status' | 'asr_fail_reason' | 'pending_asr_retry_after' | 'pending_asr_attempts'
+  >,
+  nowMs: number = Date.now(),
+  maxAttempts?: number
+): {
+  shouldRetry: boolean;
+  skipReason?: 'not_pending' | 'model_not_found' | 'not_due_yet' | 'max_attempts_reached';
+} {
+  const isPending = call.status === 'needs_transcription' || call.transcription_status === 'Требует расшифровки';
+  if (!isPending) {
+    return { shouldRetry: false, skipReason: 'not_pending' };
+  }
+  if ((call.asr_fail_reason || '').trim().toLowerCase() === 'model_not_found') {
+    return { shouldRetry: false, skipReason: 'model_not_found' };
+  }
+  if (
+    typeof maxAttempts === 'number' &&
+    maxAttempts > 0 &&
+    typeof call.pending_asr_attempts === 'number' &&
+    call.pending_asr_attempts >= maxAttempts
+  ) {
+    return { shouldRetry: false, skipReason: 'max_attempts_reached' };
+  }
+  if (call.pending_asr_retry_after) {
+    const retryAt = Date.parse(call.pending_asr_retry_after);
+    if (!Number.isNaN(retryAt) && retryAt > nowMs) {
+      return { shouldRetry: false, skipReason: 'not_due_yet' };
+    }
+  }
+  return { shouldRetry: true };
 }
 
 /**
@@ -305,7 +422,59 @@ const cloudRuModelsCache = new Map<string, CloudRuCatalogInfo>();
 
 export function isCloudRuModelVariant(variant?: GigaamModelVariant | string): boolean {
   if (!variant) return false;
-  return variant.includes('/');
+  const trimmed = String(variant).trim();
+  if (!trimmed) return false;
+  return trimmed.includes('/') || !SELF_HOSTED_GIGAAM_VARIANTS.has(trimmed);
+}
+
+/**
+ * Возвращает основную модель ASR из env (ASR_MODEL -> GIGAAM_MODEL_VARIANT -> дефолт Cloud.ru).
+ */
+export function getConfiguredAsrModel(variantOverride?: GigaamModelVariant | string): string {
+  if (variantOverride && String(variantOverride).trim()) {
+    return normalizeGigaamVariant(String(variantOverride));
+  }
+  const envAsrModel = (process.env.ASR_MODEL || '').trim();
+  if (envAsrModel) {
+    return normalizeGigaamVariant(envAsrModel);
+  }
+  const envLegacy = (process.env.GIGAAM_MODEL_VARIANT || '').trim();
+  if (envLegacy && !SELF_HOSTED_GIGAAM_VARIANTS.has(envLegacy.toLowerCase())) {
+    return normalizeGigaamVariant(envLegacy);
+  }
+  return DEFAULT_CLOUDRU_ASR_MODEL;
+}
+
+/**
+ * Возвращает список резервных моделей ASR из env (ASR_MODEL_FALLBACK) и/или настроек хранилища.
+ * Поддерживает один идентификатор или список через запятую / точку с запятой.
+ */
+export function getConfiguredAsrFallbackModels(primaryModel?: string, storeFallbackOverride?: string): string[] {
+  let storeFallback = storeFallbackOverride ?? '';
+  if (storeFallbackOverride === undefined) {
+    try {
+      const store = readStoreSync();
+      storeFallback = store.config?.credentials?.asrModelFallback || '';
+    } catch {
+      // ignore early boot store read errors
+    }
+  }
+  const raw = (process.env.ASR_MODEL_FALLBACK || '').trim() || storeFallback.trim();
+  if (!raw) return [];
+
+  const primaryLower = (primaryModel || '').trim().toLowerCase();
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const part of raw.split(/[,;]+/)) {
+    const cleaned = part.trim();
+    if (!cleaned) continue;
+    const normalized = normalizeGigaamVariant(cleaned);
+    const key = normalized.toLowerCase();
+    if (key === primaryLower || seen.has(key)) continue;
+    seen.add(key);
+    result.push(normalized);
+  }
+  return result;
 }
 
 export interface GigaAmConfig {
@@ -313,13 +482,15 @@ export interface GigaAmConfig {
   apiKey: string;
   variant: GigaamModelVariant;
   isCloudRu: boolean;
+  fallbackModels?: string[];
 }
 
 export function normalizeGigaamVariant(raw?: string): GigaamModelVariant {
   if (!raw) return 'e2e_rnnt';
   const trimmed = raw.trim();
+  if (!trimmed) return 'e2e_rnnt';
   const lower = trimmed.toLowerCase();
-  if (lower === 'gigachat/gigaasr' || lower === 'sber/gigaasr' || lower === 'gigaasr') {
+  if (lower === 'gigachat/gigaasr' || lower === 'gigaasr') {
     return 'GigaChat/GigaASR';
   }
   if (lower === 'gigachat/salutespeech' || lower === 'salutespeech') {
@@ -331,7 +502,8 @@ export function normalizeGigaamVariant(raw?: string): GigaamModelVariant {
   if (VALID_VARIANTS.includes(trimmed as GigaamModelVariant)) {
     return trimmed as GigaamModelVariant;
   }
-  return 'e2e_rnnt';
+  // Сохраняем любые пользовательские идентификаторы моделей из ASR_MODEL / ASR_MODEL_FALLBACK без хардкода
+  return trimmed as GigaamModelVariant;
 }
 
 export function isCloudRuEvolutionEndpoint(url: string, variant?: GigaamModelVariant): boolean {
@@ -396,12 +568,14 @@ export function getGigaAmConfig(
   let storeUrl = '';
   let storeKey = '';
   let storeVariant: GigaamModelVariant | undefined;
+  let storeFallback = '';
 
   try {
     const store = readStoreSync();
     storeUrl = store.config?.credentials?.gigaamApiUrl || '';
     storeKey = store.config?.credentials?.gigaamApiKey || '';
     storeVariant = store.config?.credentials?.gigaamVariant;
+    storeFallback = store.config?.credentials?.asrModelFallback || '';
   } catch {
     // ignore early boot store read errors
   }
@@ -415,22 +589,35 @@ export function getGigaAmConfig(
       : ((process.env.GIGAAM_API_KEY || '').trim() || storeKey)
   ).trim();
 
+  const envAsrModel = (process.env.ASR_MODEL || '').trim();
   const envVariant = (process.env.GIGAAM_MODEL_VARIANT || '').trim();
-  const rawVariant = variantOverride || envVariant || storeVariant;
+  // Приоритет: явный override -> env ASR_MODEL -> env GIGAAM_MODEL_VARIANT (если не дефолтный e2e_rnnt для Cloud.ru) -> storeVariant
+  const isRawCloudRu = (rawUrl || '').toLowerCase().includes('cloud.ru') || (rawUrl || '').toLowerCase().includes('/v1/audio/transcription');
+  const effectiveLegacyEnv = isRawCloudRu && envVariant.toLowerCase() === 'e2e_rnnt' && !envAsrModel ? '' : envVariant;
+  const rawVariant = variantOverride || envAsrModel || effectiveLegacyEnv || storeVariant || envVariant;
   let variant = normalizeGigaamVariant(rawVariant);
   const apiUrl = normalizeGigaAmEndpointUrl(rawUrl, variant);
   const isCloudRu = isCloudRuEvolutionEndpoint(apiUrl, variant);
 
-  // Если URL указывает на Cloud.ru Evolution, а вариант остался дефолтным (e2e_rnnt), используем GigaChat/GigaASR
-  if (apiUrl.toLowerCase().includes('cloud.ru') && !variantOverride && !storeVariant && !envVariant && variant === 'e2e_rnnt') {
-    variant = 'GigaChat/GigaASR';
+  // Если URL указывает на Cloud.ru Evolution, а вариант остался дефолтным (e2e_rnnt) и ASR_MODEL не задан — берём дефолт Cloud.ru
+  if (
+    apiUrl.toLowerCase().includes('cloud.ru') &&
+    !variantOverride &&
+    !envAsrModel &&
+    (!storeVariant || SELF_HOSTED_GIGAAM_VARIANTS.has(String(storeVariant).toLowerCase())) &&
+    SELF_HOSTED_GIGAAM_VARIANTS.has(String(variant).toLowerCase())
+  ) {
+    variant = DEFAULT_CLOUDRU_ASR_MODEL;
   }
+
+  const fallbackModels = getConfiguredAsrFallbackModels(variant, storeFallback);
 
   return {
     apiUrl,
     apiKey,
     variant,
     isCloudRu,
+    fallbackModels,
   };
 }
 
@@ -587,13 +774,17 @@ interface CloudRuAttemptOpts {
 }
 
 function getModelParamForRequest(config: GigaAmConfig): string {
-  if (isCloudRuModelVariant(config.variant)) {
-    return config.variant;
-  }
+  const trimmed = String(config.variant || '').trim();
   if (config.isCloudRu) {
-    return 'GigaChat/GigaASR';
+    if (trimmed && !SELF_HOSTED_GIGAAM_VARIANTS.has(trimmed.toLowerCase())) {
+      return trimmed;
+    }
+    return getConfiguredAsrModel();
   }
-  return `gigaam-v3-${config.variant}`;
+  if (isCloudRuModelVariant(trimmed)) {
+    return trimmed;
+  }
+  return `gigaam-v3-${trimmed || 'e2e_rnnt'}`;
 }
 
 async function fetchCloudRuCatalogModels(
@@ -682,11 +873,18 @@ async function fetchCloudRuCatalogModels(
 }
 
 function pickCloudRuModelFromCatalog(desired: GigaamModelVariant, catalogModels: string[]): GigaamModelVariant {
+  const fallbackDefault = getConfiguredAsrModel();
   if (catalogModels.length === 0) {
-    return isCloudRuModelVariant(desired) ? desired : 'GigaChat/GigaASR';
+    return isCloudRuModelVariant(desired) ? desired : (fallbackDefault as GigaamModelVariant);
   }
   const exact = catalogModels.find((id) => id.toLowerCase() === desired.toLowerCase());
   if (exact) return exact as GigaamModelVariant;
+
+  // Если явно задан конкретный идентификатор модели (например через ASR_MODEL), не подменяем его молча —
+  // отправляем его на эндпоинт, чтобы при 404 сработали диагностика и ASR_MODEL_FALLBACK.
+  if (isCloudRuModelVariant(desired)) {
+    return desired;
+  }
 
   const lower = desired.toLowerCase();
   if (lower.includes('salutespeech')) {
@@ -700,27 +898,42 @@ function pickCloudRuModelFromCatalog(desired: GigaamModelVariant, catalogModels:
   const gigaAsr = catalogModels.find((id) => id.toLowerCase().includes('gigaasr'));
   if (gigaAsr) return gigaAsr as GigaamModelVariant;
 
-  return isCloudRuModelVariant(desired) ? desired : 'GigaChat/GigaASR';
+  return fallbackDefault as GigaamModelVariant;
 }
 
 function getAlternateCloudRuAudioModels(
   primaryModel: string,
   catalogModels: string[],
-  audioToTextModels: string[]
+  audioToTextModels: string[],
+  configuredFallbackModels: string[] = []
 ): GigaamModelVariant[] {
   const candidates = new Set<string>();
+  const primaryLower = primaryModel.toLowerCase();
+
+  // 1. В первую очередь — явно сконфигурированные фолбэк-модели (ASR_MODEL_FALLBACK)
+  for (const fb of configuredFallbackModels) {
+    const clean = fb.trim();
+    if (clean && clean.toLowerCase() !== primaryLower) {
+      candidates.add(clean);
+    }
+  }
+
+  // 2. Затем — реально доступные audio-to-text модели из каталога Cloud.ru /v1/models
   for (const id of audioToTextModels) {
-    if (id.toLowerCase() !== primaryModel.toLowerCase()) {
+    if (id.toLowerCase() !== primaryLower) {
       candidates.add(id);
     }
   }
-  for (const fallback of ['GigaChat/GigaASR', 'openai/whisper-large-v3']) {
-    if (
-      fallback.toLowerCase() !== primaryModel.toLowerCase() &&
-      (catalogModels.length === 0 || catalogModels.some((id) => id.toLowerCase() === fallback.toLowerCase()))
-    ) {
-      const exact = catalogModels.find((id) => id.toLowerCase() === fallback.toLowerCase()) || fallback;
-      candidates.add(exact);
+
+  // 3. Дополнительные модели из каталога, только если каталог реально вернулся и содержит их
+  if (catalogModels.length > 0) {
+    for (const candidate of [getConfiguredAsrModel(), 'openai/whisper-large-v3']) {
+      if (candidate.toLowerCase() !== primaryLower) {
+        const exact = catalogModels.find((id) => id.toLowerCase() === candidate.toLowerCase());
+        if (exact) {
+          candidates.add(exact);
+        }
+      }
     }
   }
   return Array.from(candidates) as GigaamModelVariant[];
@@ -728,7 +941,8 @@ function getAlternateCloudRuAudioModels(
 
 async function resolveCloudRuConfig(
   config: GigaAmConfig,
-  bypassCache: boolean = false
+  bypassCache: boolean = false,
+  skipCatalogFetch: boolean = false
 ): Promise<{
   config: GigaAmConfig;
   catalogModels: string[];
@@ -747,39 +961,41 @@ async function resolveCloudRuConfig(
   }
   const overrideKey = `${config.apiUrl}::${config.variant}`;
   const cachedOverride = !bypassCache ? cloudRuWorkingModelOverrides.get(overrideKey) : undefined;
-  try {
-    const origin = new URL(config.apiUrl).origin;
-    const cat = await fetchCloudRuCatalogModels(origin, config.apiKey, bypassCache);
-    if (cat.status === 200 && cat.models.length > 0) {
-      let picked = pickCloudRuModelFromCatalog(config.variant, cat.models);
-      // Если пользователь выбрал TTS-модель (SaluteSpeech), автоматически берём реальную STT-модель (GigaASR / whisper)
-      if (
-        cat.ttsOnlyModels.some((id) => id.toLowerCase() === picked.toLowerCase()) &&
-        cat.audioToTextModels.length > 0
-      ) {
-        const gigaAsr = cat.audioToTextModels.find((id) => id.toLowerCase().includes('gigaasr'));
-        picked = (gigaAsr || cat.audioToTextModels[0]) as GigaamModelVariant;
+  if (!skipCatalogFetch) {
+    try {
+      const origin = new URL(config.apiUrl).origin;
+      const cat = await fetchCloudRuCatalogModels(origin, config.apiKey, bypassCache);
+      if (cat.status === 200 && cat.models.length > 0) {
+        let picked = pickCloudRuModelFromCatalog(config.variant, cat.models);
+        // Если пользователь выбрал TTS-модель (SaluteSpeech), автоматически берём реальную STT-модель (GigaASR / whisper)
+        if (
+          cat.ttsOnlyModels.some((id) => id.toLowerCase() === picked.toLowerCase()) &&
+          cat.audioToTextModels.length > 0
+        ) {
+          const gigaAsr = cat.audioToTextModels.find((id) => id.toLowerCase().includes('gigaasr'));
+          picked = (gigaAsr || cat.audioToTextModels[0]) as GigaamModelVariant;
+        }
+        if (cachedOverride && cachedOverride.expiresAt > Date.now()) {
+          picked = cachedOverride.model;
+        }
+        return {
+          config: { ...config, variant: picked },
+          catalogModels: cat.models,
+          audioToTextModels: cat.audioToTextModels,
+          ttsOnlyModels: cat.ttsOnlyModels,
+          endpointsByModel: cat.endpointsByModel,
+        };
       }
-      if (cachedOverride && cachedOverride.expiresAt > Date.now()) {
-        picked = cachedOverride.model;
-      }
-      return {
-        config: { ...config, variant: picked },
-        catalogModels: cat.models,
-        audioToTextModels: cat.audioToTextModels,
-        ttsOnlyModels: cat.ttsOnlyModels,
-        endpointsByModel: cat.endpointsByModel,
-      };
+    } catch {
+      // ignore catalog discovery errors during transcription
     }
-  } catch {
-    // ignore catalog discovery errors during transcription
   }
   const fallbackVariant =
     cachedOverride && cachedOverride.expiresAt > Date.now()
       ? cachedOverride.model
       : isCloudRuModelVariant(config.variant)
       ? config.variant
-      : 'GigaChat/GigaASR';
+      : (getConfiguredAsrModel() as GigaamModelVariant);
   return {
     config: { ...config, variant: fallbackVariant },
     catalogModels: [],
@@ -854,6 +1070,9 @@ async function sendMultipartOnce(
   );
 
   const rawBody = await response.text().catch(() => '');
+  if (response.status === 404) {
+    console.error(`[GigaASR] HTTP 404: ${rawBody || response.statusText || '(empty body)'}`);
+  }
   if (!response.ok && isAsrRateLimitError(null, response.status, rawBody)) {
     const finalPause = ASR_RATE_LIMIT_BACKOFF_MS[ASR_RATE_LIMIT_BACKOFF_MS.length - 1];
     pauseAsrQueue(finalPause, 'HTTP 429 после исчерпания попыток');
@@ -976,6 +1195,9 @@ async function sendChatAudioOnce(
   );
 
   const rawBody = await response.text().catch(() => '');
+  if (response.status === 404) {
+    console.error(`[GigaASR] HTTP 404: ${rawBody || response.statusText || '(empty body)'}`);
+  }
   if (!response.ok && isAsrRateLimitError(null, response.status, rawBody)) {
     const finalPause = ASR_RATE_LIMIT_BACKOFF_MS[ASR_RATE_LIMIT_BACKOFF_MS.length - 1];
     pauseAsrQueue(finalPause, 'HTTP 429 chat/completions после исчерпания попыток');
@@ -1135,7 +1357,7 @@ async function postAudioToGigaAm(
       catalogModels,
       audioToTextModels,
       endpointsByModel,
-    } = await resolveCloudRuConfig(config);
+    } = await resolveCloudRuConfig(config, false, Boolean(ctx?.fetchImpl));
     const isDirectChatUrl = resolvedConfig.apiUrl.toLowerCase().endsWith('/chat/completions');
     const overrideKey = `${config.apiUrl}::${config.variant}`;
 
@@ -1242,14 +1464,111 @@ async function postAudioToGigaAm(
       }
     }
 
-    // Если /v1/audio/transcriptions вернул 404 или 405:
-    // 1) Пробуем альтернативные audio-to-text модели из каталога (например openai/whisper-large-v3),
-    // 2) Пробуем /v1/chat/completions только если модель не строго audio-to-text без chat-эндпоинта.
-    if (lastRes && (lastRes.status === 404 || lastRes.status === 405)) {
+    // Если /v1/audio/transcriptions вернул HTTP 404:
+    // 1) Полное тело ответа уже залогировано как [GigaASR] HTTP 404: <тело>.
+    // 2) Пробуем альтернативный идентификатор из конфига (ASR_MODEL_FALLBACK) + при наличии реальные аудио-модели каталога,
+    //    БЕЗ ретраев по несуществующей модели.
+    // 3) Если и фолбэк не помог — сразу финализируем попытку с asrFailReason='model_not_found' и noRetry=true.
+    if (lastRes && lastRes.status === 404) {
+      const configuredFallbacks =
+        config.fallbackModels && config.fallbackModels.length > 0
+          ? config.fallbackModels.filter((m) => m.toLowerCase() !== String(effectiveTxConfig.variant).toLowerCase())
+          : getConfiguredAsrFallbackModels(effectiveTxConfig.variant);
       const altModels = getAlternateCloudRuAudioModels(
         effectiveTxConfig.variant,
         catalogModels,
-        audioToTextModels
+        audioToTextModels,
+        configuredFallbacks
+      );
+      const triedFallbacks: string[] = [];
+      let lastFallbackRes: { status: number; ok: boolean; statusText: string; rawBody: string } | null = null;
+
+      for (const altModel of altModels) {
+        triedFallbacks.push(altModel);
+        console.warn(
+          `[GigaASR] Модель ${effectiveTxConfig.variant} вернула HTTP 404 на ${effectiveTxConfig.apiUrl}, пробуем резервную модель ${altModel}...`
+        );
+        const altCfg: GigaAmConfig = { ...effectiveTxConfig, variant: altModel };
+        const altRes = await sendMultipartOnce(
+          cloudBuffer,
+          cloudMeta,
+          altCfg,
+          fieldName,
+          { responseFormat: preferVerboseJson ? 'verbose_json' : 'json', includeLanguage: true },
+          ctx
+        );
+        lastFallbackRes = altRes;
+        if (altRes.ok) {
+          const parsedText = parseTranscriptionBody(altRes.rawBody, label);
+          if (parsedText) {
+            if (onRawSegments) onRawSegments(extractSegmentsFromGigaAmResponse(altRes.rawBody));
+            cloudRuWorkingModelOverrides.set(overrideKey, {
+              model: altModel,
+              expiresAt: Date.now() + 10 * 60 * 1000,
+            });
+            return parsedText;
+          }
+        }
+        // При 400/415/422 пробуем минимальный набор параметров для фолбэк-модели; при 404 — НЕ ретраим!
+        if (altRes.status === 400 || altRes.status === 415 || altRes.status === 422) {
+          const altMinRes = await sendMultipartOnce(
+            cloudBuffer,
+            cloudMeta,
+            altCfg,
+            fieldName,
+            { includeLanguage: false },
+            ctx
+          );
+          lastFallbackRes = altMinRes;
+          if (altMinRes.ok) {
+            const parsedText = parseTranscriptionBody(altMinRes.rawBody, label);
+            if (parsedText) {
+              if (onRawSegments) onRawSegments(extractSegmentsFromGigaAmResponse(altMinRes.rawBody));
+              cloudRuWorkingModelOverrides.set(overrideKey, {
+                model: altModel,
+                expiresAt: Date.now() + 10 * 60 * 1000,
+              });
+              return parsedText;
+            }
+          }
+        }
+        if (altRes.status === 401 || altRes.status === 403 || altRes.status === 429) {
+          break;
+        }
+      }
+
+      const fallbackNote =
+        triedFallbacks.length > 0
+          ? ` (резервные модели ${triedFallbacks.join(', ')} также не сработали: HTTP ${lastFallbackRes?.status ?? 404})`
+          : '';
+      const err: any = new Error(
+        `${label}: модель ${effectiveTxConfig.variant} не найдена на ${effectiveTxConfig.apiUrl} (HTTP 404)${fallbackNote}: ${
+          (lastRes.rawBody || '').slice(0, 300) || lastRes.statusText
+        }`
+      );
+      err.status = 404;
+      err.asrFailReason = 'model_not_found' satisfies AsrFailReason;
+      err.asrModel = effectiveTxConfig.variant;
+      err.asrFallbackModelsTried = triedFallbacks;
+      err.http404Body = lastRes.rawBody;
+      err.noRetry = true;
+      err.asrAttemptsExhausted = true;
+      throw err;
+    }
+
+    // Если /v1/audio/transcriptions вернул HTTP 405 (Method Not Allowed):
+    // 1) Пробуем альтернативные audio-to-text модели из каталога,
+    // 2) Пробуем /v1/chat/completions если модель поддерживает chat-эндпоинт.
+    if (lastRes && lastRes.status === 405) {
+      const configuredFallbacks =
+        config.fallbackModels && config.fallbackModels.length > 0
+          ? config.fallbackModels
+          : getConfiguredAsrFallbackModels(effectiveTxConfig.variant);
+      const altModels = getAlternateCloudRuAudioModels(
+        effectiveTxConfig.variant,
+        catalogModels,
+        audioToTextModels,
+        configuredFallbacks
       );
       for (const altModel of altModels) {
         console.warn(
@@ -1291,7 +1610,12 @@ async function postAudioToGigaAm(
           }`
         );
         err.status = chatRes.status;
-        if (isAsrRateLimitError(err, chatRes.status, chatRes.rawBody)) {
+        if (chatRes.status === 404) {
+          err.asrFailReason = 'model_not_found';
+          err.asrModel = effectiveTxConfig.variant;
+          err.noRetry = true;
+          err.asrAttemptsExhausted = true;
+        } else if (isAsrRateLimitError(err, chatRes.status, chatRes.rawBody)) {
           err.rateLimited = true;
           err.asrAttemptsExhausted = true;
         }
@@ -1396,6 +1720,36 @@ async function postAudioToGigaAm(
   }
 
   if (!res.ok) {
+    if (res.status === 404) {
+      const configuredFallbacks =
+        config.fallbackModels && config.fallbackModels.length > 0
+          ? config.fallbackModels.filter((m) => m.toLowerCase() !== String(config.variant).toLowerCase())
+          : getConfiguredAsrFallbackModels(config.variant);
+      const triedFallbacks: string[] = [];
+      for (const altModel of configuredFallbacks) {
+        triedFallbacks.push(altModel);
+        console.warn(
+          `[GigaASR] Модель ${config.variant} вернула HTTP 404 на ${config.apiUrl}, пробуем резервную модель ${altModel}...`
+        );
+        const altCfg: GigaAmConfig = { ...config, variant: altModel };
+        const altRes = await sendMultipartOnce(audioBuffer, meta, altCfg, fieldName, undefined, ctx);
+        if (altRes.ok) {
+          const parsedText = parseTranscriptionBody(altRes.rawBody, label);
+          if (parsedText) return parsedText;
+        }
+      }
+      const err: any = new Error(
+        `${label}: модель ${config.variant} не найдена на ${config.apiUrl} (HTTP 404): ${res.rawBody.slice(0, 300) || res.statusText}`
+      );
+      err.status = 404;
+      err.asrFailReason = 'model_not_found' satisfies AsrFailReason;
+      err.asrModel = config.variant;
+      err.asrFallbackModelsTried = triedFallbacks;
+      err.http404Body = res.rawBody;
+      err.noRetry = true;
+      err.asrAttemptsExhausted = true;
+      throw err;
+    }
     if (allowWavFallback && !ctx?.isPreparedWav && meta.ext !== 'wav' && (res.status === 400 || res.status === 422 || res.status === 500)) {
       const wavBuf = convertToWav16kMono(audioBuffer);
       if (wavBuf && wavBuf.length > 44) {
@@ -1457,7 +1811,9 @@ async function transcribeMonoAudioSegmentsWithGigaAm(
       err.status === 403 ||
       err.status === 404 ||
       err.status === 429 ||
-      Boolean(err.rateLimited);
+      Boolean(err.rateLimited) ||
+      Boolean(err.noRetry) ||
+      err.asrFailReason === 'model_not_found';
     if (isAuthOrRateLimitError) {
       throw err;
     }
@@ -1534,7 +1890,9 @@ async function transcribeMonoAudioSegmentsWithGigaAm(
             chunkErr.rateLimited ||
             chunkErr.status === 401 ||
             chunkErr.status === 403 ||
-            chunkErr.status === 404
+            chunkErr.status === 404 ||
+            chunkErr.noRetry ||
+            chunkErr.asrFailReason === 'model_not_found'
           ) {
             throw chunkErr;
           }
@@ -1642,6 +2000,10 @@ export async function transcribeWithGigaAmRetry(
         maxDelayMs: 16000,
         sleepFn: options?.sleepFn,
         shouldRetry: (err: any) => {
+          // HTTP 404 / model_not_found никогда не ретраится — повтор несуществующей модели бессмысленен.
+          if (err?.noRetry || err?.status === 404 || err?.asrFailReason === 'model_not_found') {
+            return false;
+          }
           // Если внутренний sendMultipartOnce уже исчерпал все попытки по 429/504 с глобальным бэкоффом,
           // не запускаем вложенный цикл повторных штурмов эндпоинта.
           if (err?.asrAttemptsExhausted || err?.rateLimited) {
@@ -1668,30 +2030,55 @@ export async function transcribeWithGigaAmRetry(
     return text;
   } catch (error: any) {
     const detail = formatSttNetworkError(error);
+    const resolvedStatus =
+      typeof error?.status === 'number'
+        ? error.status
+        : typeof error?.response?.status === 'number'
+        ? error.response.status
+        : undefined;
+    const failReason = classifyAsrFailReason(error, resolvedStatus, error?.http404Body);
+    const failedModel =
+      typeof error?.asrModel === 'string' && error.asrModel.trim()
+        ? error.asrModel.trim()
+        : getGigaAmConfig(undefined, undefined, variantOverride).variant;
+    const isModelNotFound = failReason === 'model_not_found' || resolvedStatus === 404;
+
     const attempts = Math.max(
       1,
-      totalAttempts || (typeof error?.sttAttempts === 'number' ? error.sttAttempts : MAX_RETRIES)
+      totalAttempts || (typeof error?.sttAttempts === 'number' ? error.sttAttempts : isModelNotFound ? 1 : MAX_RETRIES)
     );
     options?.onAttemptCount?.(attempts);
     if (options?.emitIncidentSummary === true) {
       console.error(
         formatGigaAsrIncidentSummary(options?.callId, 'failed', {
           attempts,
-          reason: detail,
+          reason: isModelNotFound ? `model_not_found (${failedModel}): ${detail}` : detail,
         })
       );
+    } else if (isModelNotFound) {
+      console.error(`[GigaASR / GigaAM v3] Модель ${failedModel} не найдена (HTTP 404, model_not_found, без ретраев):`, detail);
     } else {
       console.error(`[GigaASR / GigaAM v3] Транскрибация завершилась ошибкой (попыток: ${attempts}):`, detail);
     }
     const wrapped: any = new Error(
-      attempts > 1
+      isModelNotFound
+        ? `GigaASR / GigaAM v3: модель ${failedModel} не найдена (HTTP 404, model_not_found): ${detail}`
+        : attempts > 1
         ? `GigaASR / GigaAM v3 недоступен после ${attempts} попыток: ${detail}`
         : `GigaASR / GigaAM v3 недоступен: ${detail}`
     );
-    if (error?.status) wrapped.status = error.status;
-    if (error?.response?.status) wrapped.status = error.response.status;
+    if (resolvedStatus !== undefined) wrapped.status = resolvedStatus;
     if (error?.code) wrapped.code = error.code;
     wrapped.sttAttempts = attempts;
+    wrapped.asrFailReason = failReason;
+    wrapped.asrModel = failedModel;
+    if (Array.isArray(error?.asrFallbackModelsTried)) {
+      wrapped.asrFallbackModelsTried = error.asrFallbackModelsTried;
+    }
+    if (typeof error?.http404Body === 'string') {
+      wrapped.http404Body = error.http404Body;
+    }
+    wrapped.noRetry = Boolean(error?.noRetry || isModelNotFound);
     wrapped.rateLimited = Boolean(error?.rateLimited || isAsrRateLimitError(error));
     wrapped.cause = error;
     throw wrapped;
@@ -1833,9 +2220,14 @@ export async function testGigaAmConnection(
       }
     }
 
-    // Если выбранная модель вернула 404/405 на /v1/audio/transcriptions — пробуем альтернативные audio-to-text модели каталога
+    // Если выбранная модель вернула 404/405 на /v1/audio/transcriptions — пробуем ASR_MODEL_FALLBACK и альтернативные audio-to-text модели каталога
     if (!isDirectChatUrl && (transcriptionsStatus === 404 || transcriptionsStatus === 405)) {
-      const altModels = getAlternateCloudRuAudioModels(resolvedModelId, catalogModels, audioModelsList);
+      const altModels = getAlternateCloudRuAudioModels(
+        resolvedModelId,
+        catalogModels,
+        audioModelsList,
+        resolvedCfg.fallbackModels || []
+      );
       for (const altModel of altModels) {
         const altCfg: GigaAmConfig = { ...resolvedCfg, variant: altModel };
         const altProbe = await sendMultipartOnce(

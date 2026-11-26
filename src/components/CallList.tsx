@@ -39,6 +39,95 @@ export function getCallStarRating(score: number | null | undefined): number | nu
   return Math.max(1, Math.min(5, Math.ceil(score / 2)));
 }
 
+export type CallSentimentLevel = 'aggressive' | 'discontent' | 'positive' | 'neutral';
+
+export function getCallSentimentVisual(call: CallRecord): {
+  level: CallSentimentLevel;
+  label: string;
+  dotClass: string;
+  borderClass: string;
+  rowTintClass: string;
+  badgeClass: string;
+} {
+  const clientTone = (call.key_facts?.tone_client || '').toLowerCase().trim();
+  const managerTone = (call.key_facts?.tone_manager || '').toLowerCase().trim();
+  const combined = `${clientTone} ${managerTone}`;
+  const isDispute = Boolean(call.key_facts?.is_dispute);
+
+  const isAggressive =
+    clientTone.includes('агресс') ||
+    clientTone.includes('aggressive') ||
+    clientTone.includes('скандал') ||
+    clientTone.includes('груб') ||
+    clientTone.includes('хамств') ||
+    combined.includes('агресс') ||
+    combined.includes('aggressive');
+
+  if (isAggressive) {
+    return {
+      level: 'aggressive',
+      label: call.key_facts?.tone_client || 'Агрессивная',
+      dotClass: 'w-2.5 h-2.5 rounded-full bg-rose-600 ring-2 ring-rose-200 shrink-0',
+      borderClass: 'border-l-rose-600',
+      rowTintClass: 'bg-rose-50/45 hover:bg-rose-50/75',
+      badgeClass: 'bg-rose-50 text-rose-700 border-rose-300',
+    };
+  }
+
+  const isDiscontent =
+    clientTone.includes('недовол') ||
+    clientTone.includes('discontent') ||
+    clientTone.includes('негатив') ||
+    clientTone.includes('negative') ||
+    clientTone.includes('раздраж') ||
+    clientTone.includes('претенз') ||
+    clientTone.includes('жалоб') ||
+    clientTone.includes('разочар') ||
+    clientTone.includes('напряж') ||
+    managerTone.includes('оборонительн') ||
+    managerTone.includes('негатив') ||
+    isDispute;
+
+  if (isDiscontent) {
+    return {
+      level: 'discontent',
+      label: call.key_facts?.tone_client || 'Недовольство',
+      dotClass: 'w-2.5 h-2.5 rounded-full bg-amber-500 ring-2 ring-amber-200 shrink-0',
+      borderClass: 'border-l-amber-500',
+      rowTintClass: 'bg-amber-50/35 hover:bg-amber-50/65',
+      badgeClass: 'bg-amber-50 text-amber-800 border-amber-300',
+    };
+  }
+
+  const isPositive =
+    clientTone.includes('позитив') ||
+    clientTone.includes('positive') ||
+    clientTone.includes('доброжелат') ||
+    clientTone.includes('дружелюб') ||
+    clientTone.includes('радост') ||
+    /(?:^|\s)довол/.test(clientTone);
+
+  if (isPositive) {
+    return {
+      level: 'positive',
+      label: call.key_facts?.tone_client || 'Позитивная',
+      dotClass: 'w-2 h-2 rounded-full bg-emerald-500 ring-2 ring-emerald-100 shrink-0',
+      borderClass: 'border-l-emerald-400',
+      rowTintClass: 'hover:bg-slate-50',
+      badgeClass: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    };
+  }
+
+  return {
+    level: 'neutral',
+    label: call.key_facts?.tone_client || 'Нейтральная',
+    dotClass: 'w-2 h-2 rounded-full bg-slate-300 shrink-0',
+    borderClass: 'border-l-slate-300',
+    rowTintClass: 'hover:bg-slate-50',
+    badgeClass: 'bg-slate-50 text-slate-600 border-slate-200',
+  };
+}
+
 export const POPULAR_KEYWORDS = [
   'Маникюр',
   'Педикюр',
@@ -250,7 +339,13 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
     const combined = `${clientTone} ${managerTone}`;
 
     if (toneChoice === 'positive') {
-      return combined.includes('позитив') || combined.includes('довол') || combined.includes('радост') || combined.includes('вежлив');
+      return (
+        combined.includes('позитив') ||
+        combined.includes('positive') ||
+        /(?:^|\s)довол/.test(combined) ||
+        combined.includes('радост') ||
+        combined.includes('вежлив')
+      ) && !combined.includes('недовол') && !combined.includes('негатив') && !combined.includes('агресс');
     }
 
     if (toneChoice === 'neutral') {
@@ -1571,6 +1666,32 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
         </div>
       )}
 
+      {/* 4.5 Compact Sentiment Color Legend */}
+      <div
+        className="px-4 py-1.5 border-b border-slate-100 bg-slate-50/70 flex items-center justify-between gap-2 text-[10px] text-slate-500"
+        id="call-sentiment-legend"
+      >
+        <span className="font-semibold text-slate-500">Тональность:</span>
+        <div className="flex items-center gap-3 flex-wrap">
+          <span className="inline-flex items-center gap-1" title="Агрессивная или конфликтная тональность">
+            <span className="w-2 h-2 rounded-full bg-rose-600 ring-2 ring-rose-200" />
+            <span className="text-rose-700 font-medium">Агрессия</span>
+          </span>
+          <span className="inline-flex items-center gap-1" title="Недовольство или негативная тональность">
+            <span className="w-2 h-2 rounded-full bg-amber-500 ring-2 ring-amber-200" />
+            <span className="text-amber-700 font-medium">Недовольство</span>
+          </span>
+          <span className="inline-flex items-center gap-1" title="Нейтральная тональность">
+            <span className="w-2 h-2 rounded-full bg-slate-300" />
+            <span>Нейтрально</span>
+          </span>
+          <span className="inline-flex items-center gap-1" title="Позитивная тональность">
+            <span className="w-2 h-2 rounded-full bg-emerald-500" />
+            <span className="text-emerald-700 font-medium">Позитив</span>
+          </span>
+        </div>
+      </div>
+
       {/* 5. Call Cards Container */}
       <div className="flex-1 overflow-y-auto divide-y divide-slate-100" id="call-cards-scroll-container">
         {filteredCalls.length === 0 ? (
@@ -1598,21 +1719,31 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
           filteredCalls.map((call, idx) => {
             const isSelected = call.call_id === selectedCallId;
             const displayName = call.client_phone_masked || call.client_name || 'Неизвестный клиент';
+            const sentiment = getCallSentimentVisual(call);
+            const isProblemSentiment = sentiment.level === 'aggressive' || sentiment.level === 'discontent';
 
             return (
               <div
                 key={`${call.call_id}-${idx}`}
                 id={`call-card-${call.call_id}`}
+                data-sentiment={sentiment.level}
                 onClick={() => onSelectCall(call.call_id)}
-                className={`p-4 cursor-pointer text-left transition-all duration-150 relative border-l-3 ${
-                  isSelected 
-                    ? 'bg-emerald-50/50 border-l-emerald-600 shadow-2xs' 
-                    : 'hover:bg-slate-50 border-l-transparent'
+                className={`p-4 cursor-pointer text-left transition-all duration-150 relative border-l-4 ${
+                  isSelected
+                    ? isProblemSentiment
+                      ? `${sentiment.borderClass} bg-emerald-50/55 ring-1 ring-inset ring-emerald-300/80 shadow-2xs`
+                      : 'border-l-emerald-600 bg-emerald-50/55 shadow-2xs'
+                    : `${sentiment.borderClass} ${sentiment.rowTintClass}`
                 }`}
               >
                 <div className="flex justify-between items-start mb-1.5">
                   <div className="space-y-0.5 w-[70%]">
                     <div className="flex items-center gap-1.5 flex-wrap">
+                      <span
+                        className={sentiment.dotClass}
+                        title={`Тональность диалога: ${sentiment.label}`}
+                        aria-label={`Тональность диалога: ${sentiment.label}`}
+                      />
                       <span className="text-[10px] font-mono font-medium text-slate-400 uppercase">
                         {call.call_id.substring(0, 14)}
                       </span>
@@ -1727,17 +1858,16 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
                     )}
                     {/* Tone Badge */}
                     {call.key_facts?.tone_client && (
-                      <span className={`font-semibold px-1.5 py-0.2 rounded-sm text-[10px] border flex items-center gap-0.5 ${
-                        (call.key_facts.tone_client.toLowerCase().includes('позитив') || call.key_facts.tone_client.toLowerCase().includes('довол'))
-                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                          : (call.key_facts.tone_client.toLowerCase().includes('негатив') || call.key_facts.tone_client.toLowerCase().includes('недовол') || call.key_facts.is_dispute)
-                          ? 'bg-rose-50 text-rose-700 border-rose-200'
-                          : 'bg-slate-50 text-slate-600 border-slate-200'
-                      }`} title={`Тональность: ${call.key_facts.tone_client}`}>
-                        {(call.key_facts.tone_client.toLowerCase().includes('позитив') || call.key_facts.tone_client.toLowerCase().includes('довол')) ? (
+                      <span
+                        className={`font-semibold px-1.5 py-0.2 rounded-sm text-[10px] border flex items-center gap-0.5 ${sentiment.badgeClass}`}
+                        title={`Тональность: ${call.key_facts.tone_client}`}
+                      >
+                        {sentiment.level === 'positive' ? (
                           <Smile className="w-2.5 h-2.5 text-emerald-600" />
-                        ) : (call.key_facts.tone_client.toLowerCase().includes('негатив') || call.key_facts.tone_client.toLowerCase().includes('недовол') || call.key_facts.is_dispute) ? (
+                        ) : sentiment.level === 'aggressive' ? (
                           <Frown className="w-2.5 h-2.5 text-rose-600" />
+                        ) : sentiment.level === 'discontent' ? (
+                          <Frown className="w-2.5 h-2.5 text-amber-600" />
                         ) : (
                           <Meh className="w-2.5 h-2.5 text-slate-400" />
                         )}
