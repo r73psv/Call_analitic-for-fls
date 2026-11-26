@@ -4,7 +4,7 @@
  */
 
 import axios from 'axios';
-import { AsrFailReason, CallRecord, GigaamModelVariant } from '../types.js';
+import { AsrCatalogVerdict, AsrFailReason, CallRecord, GigaamModelVariant } from '../types.js';
 import { readStoreSync } from '../store/store.js';
 import {
   detectAudioFormat,
@@ -41,6 +41,71 @@ const BASE_DELAY_MS = 2000;
  * Экспоненциальный бэкофф для HTTP 429 (rate_limit_exceeded): 30 → 60 → 120 сек.
  */
 export const ASR_RATE_LIMIT_BACKOFF_MS = [30_000, 60_000, 120_000] as const;
+
+/**
+ * Плавающий интервал авто-повтора для HTTP 404 (временная недоступность сервиса ASR):
+ * 30 мин → 1 ч → 3 ч (после первого успешного ответа сбрасывается до 15 мин).
+ */
+export const ASR_404_SERVICE_UNAVAILABLE_BACKOFF_MINUTES = [30, 60, 180] as const;
+
+/**
+ * Начальный интервал авто-повтора после первого успешного восстановления сервиса ASR (15 мин).
+ */
+export const ASR_404_POST_RECOVERY_RESET_MINUTES = 15;
+
+/**
+ * Плавающий интервал авто-повтора для HTTP 404 (алиас для обратной совместимости): 30 → 60 → 180 мин.
+ */
+export const ASR_404_BACKOFF_MINUTES = ASR_404_SERVICE_UNAVAILABLE_BACKOFF_MINUTES;
+
+/**
+ * Порог подряд идущих неудач HTTP 404 для отправки алерта администратору в VK-чат (первые 2 подряд).
+ */
+export const ASR_404_ALERT_CONSECUTIVE_THRESHOLD = 2;
+
+/**
+ * Промежуточный (не финальный) статус звонка при временной недоступности сервиса ASR (HTTP 404).
+ */
+export const ASR_SERVICE_UNAVAILABLE_STATUS_LABEL = 'Ожидает расшифровки (сервис ASR недоступен)';
+
+/**
+ * Понятный текст в карточке звонка для администратора салона без технических деталей.
+ */
+export const ASR_CLIENT_FRIENDLY_WAITING_TEXT =
+  'Звонок будет обработан после восстановления сервиса расшифровки';
+
+export interface AsrHealthCheckResult {
+  ok: boolean;
+  status: number;
+  endpointPath: string;
+  model: string;
+  requestId?: string;
+  logLine: string;
+  error?: string;
+  durationMs: number;
+  audioBytes: number;
+}
+
+export interface Asr404CatalogProbeResult {
+  status: number;
+  modelsUrl: string;
+  modelVisibleInCatalog: boolean | null;
+  fallbackVisibleModels: string[];
+  availableAudioModels: string[];
+  totalModels: number;
+  verdict: AsrCatalogVerdict;
+  diagnosticSummary: string;
+}
+
+export interface AsrHttpAttemptResponse {
+  status: number;
+  ok: boolean;
+  statusText: string;
+  rawBody: string;
+  requestId?: string;
+  endpointPath?: string;
+  responseHeaders?: Record<string, string>;
+}
 
 export interface GigaAmTranscribeOptions {
   callId?: string;
@@ -85,6 +150,18 @@ export function isAsrRateLimitError(error: unknown, statusOverride?: number, raw
 }
 
 /**
+ * Определяет, является ли ошибка временной недоступностью сервиса ASR (HTTP 404 от эндпоинта транскрибации).
+ */
+export function isAsrServiceUnavailableError(error: unknown, statusOverride?: number, rawBody?: string): boolean {
+  const errObj = error as any;
+  if (errObj?.asrFailReason === 'service_unavailable') return true;
+  const status = statusOverride ?? extractHttpStatus(error);
+  if (status === 404) return true;
+  const msg = `${typeof errObj?.message === 'string' ? errObj.message : ''} ${rawBody || ''}`;
+  return /service[_ ]unavailable|\bhttp\s*404\b/i.test(msg);
+}
+
+/**
  * Определяет, является ли ошибка отсутствием модели / маршрута транскрибации (HTTP 404 / model_not_found).
  */
 export function isAsrModelNotFoundError(error: unknown, statusOverride?: number, rawBody?: string): boolean {
@@ -98,6 +175,7 @@ export function isAsrModelNotFoundError(error: unknown, statusOverride?: number,
 
 /**
  * Классифицирует причину сбоя расшифровки ASR для поля asr_fail_reason.
+ * HTTP 404 от эндпоинта транскрибации классифицируется как service_unavailable (внутренняя ошибка провайдера, не ошибка звонка).
  */
 export function classifyAsrFailReason(error: unknown, statusOverride?: number, rawBody?: string): AsrFailReason {
   const errObj = error as any;
@@ -107,6 +185,9 @@ export function classifyAsrFailReason(error: unknown, statusOverride?: number, r
   const status = statusOverride ?? extractHttpStatus(error);
   const msg = `${typeof errObj?.message === 'string' ? errObj.message : ''} ${rawBody || ''}`;
 
+  if (status === 404 || isAsrServiceUnavailableError(error, status, rawBody)) {
+    return 'service_unavailable';
+  }
   if (isAsrModelNotFoundError(error, status, rawBody)) {
     return 'model_not_found';
   }
@@ -130,6 +211,136 @@ export function classifyAsrFailReason(error: unknown, statusOverride?: number, r
     return 'timeout_or_network';
   }
   return 'unknown';
+}
+
+/**
+ * Вычисляет плавающий интервал авто-повтора для HTTP 404:
+ * - стандартный режим: 30 мин → 1 ч (60 мин) → 3 ч (180 мин);
+ * - после первого успешного восстановления (afterRecoveryReset=true): сброс до 15 мин → 30 мин → 1 ч → 3 ч.
+ */
+export function computeAsr404RetryDelayMs(
+  attemptNumber: number,
+  options?: { afterRecoveryReset?: boolean }
+): number {
+  const safeAttempt = Number.isFinite(attemptNumber) && attemptNumber >= 1 ? Math.floor(attemptNumber) : 1;
+  const schedule = options?.afterRecoveryReset
+    ? [ASR_404_POST_RECOVERY_RESET_MINUTES, ...ASR_404_SERVICE_UNAVAILABLE_BACKOFF_MINUTES]
+    : [...ASR_404_SERVICE_UNAVAILABLE_BACKOFF_MINUTES];
+  const idx = Math.min(safeAttempt - 1, schedule.length - 1);
+  return schedule[idx] * 60 * 1000;
+}
+
+/**
+ * Извлекает идентификатор запроса (x-request-id и аналоги) из заголовков ответа Cloud.ru / прокси.
+ */
+export function extractRequestIdFromHeaders(headers?: Headers | Record<string, string> | null): string | undefined {
+  if (!headers) return undefined;
+  const candidateKeys = [
+    'x-request-id',
+    'x-amzn-requestid',
+    'x-correlation-id',
+    'x-trace-id',
+    'request-id',
+    'cf-ray',
+  ];
+  if (typeof (headers as Headers).get === 'function') {
+    const h = headers as Headers;
+    for (const key of candidateKeys) {
+      const val = h.get(key);
+      if (val && val.trim()) return val.trim();
+    }
+    return undefined;
+  }
+  const obj = headers as Record<string, string>;
+  const entries = Object.entries(obj);
+  for (const key of candidateKeys) {
+    const found = entries.find(([k]) => k.toLowerCase() === key);
+    if (found && found[1] && String(found[1]).trim()) {
+      return String(found[1]).trim();
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Собирает первые безопасные заголовки ответа (до maxCount, без чувствительных cookie/authorization)
+ * с обязательным включением x-request-id, если он присутствует.
+ */
+export function collectFirstResponseHeaders(
+  headers?: Headers | null,
+  maxCount: number = 8
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!headers || typeof headers.forEach !== 'function') return result;
+
+  const redacted = new Set(['set-cookie', 'authorization', 'proxy-authorization']);
+  const reqId = extractRequestIdFromHeaders(headers);
+  if (reqId) {
+    result['x-request-id'] = reqId;
+  }
+
+  let count = Object.keys(result).length;
+  headers.forEach((value, key) => {
+    const lower = key.toLowerCase();
+    if (redacted.has(lower)) return;
+    if (lower in result) return;
+    if (count >= maxCount) return;
+    result[lower] = value;
+    count++;
+  });
+  return result;
+}
+
+/**
+ * Извлекает путь эндпоинта (например /v1/audio/transcriptions) из полного URL.
+ */
+export function extractEndpointPath(apiUrl: string): string {
+  try {
+    return new URL(apiUrl).pathname || '/v1/audio/transcriptions';
+  } catch {
+    return apiUrl || '/v1/audio/transcriptions';
+  }
+}
+
+/**
+ * Формирует обязательную строку логирования x-request-id для КАЖДОГО ответа ASR (200, 404, 429, 5xx).
+ */
+export function formatAsrResponseRequestIdLog(details: {
+  method: string;
+  endpointPath: string;
+  status: number;
+  model: string;
+  requestId?: string;
+}): string {
+  return `[GigaASR] HTTP ${details.status} (${details.method} ${details.endpointPath}, model=${details.model}): x-request-id=${details.requestId || 'none'}`;
+}
+
+/**
+ * Формирует развёрнутую диагностическую строку при HTTP 404:
+ * метод, полный путь, имя файла, размер, Content-Type, x-request-id и первые заголовки ответа.
+ */
+export function formatAsr404DiagnosticLog(details: {
+  method: string;
+  url: string;
+  model: string;
+  fileName: string;
+  sizeBytes: number;
+  requestContentType: string;
+  responseContentType?: string;
+  requestId?: string;
+  firstHeaders?: Record<string, string>;
+}): string {
+  const headersStr = details.firstHeaders && Object.keys(details.firstHeaders).length > 0
+    ? Object.entries(details.firstHeaders)
+        .map(([k, v]) => `${k}=${v}`)
+        .join('; ')
+    : 'none';
+  return (
+    `[GigaASR] HTTP 404 диагностика: method=${details.method} url=${details.url} model=${details.model} ` +
+    `file=${details.fileName} size=${details.sizeBytes}B contentType=${details.requestContentType} ` +
+    `respContentType=${details.responseContentType || 'unknown'} x-request-id=${details.requestId || 'none'} ` +
+    `headers={${headersStr}}`
+  );
 }
 
 /**
@@ -159,8 +370,91 @@ export function formatAsrModelNotFoundVkAlert(
 }
 
 /**
- * Проверяет, следует ли планировщику автоматически повторять расшифровку звонка со статусом «Требует расшифровки».
- * При asr_fail_reason === 'model_not_found' авто-повтор пропускается (нужно вмешательство администратора).
+ * Формирует алерт в VK-чат после трёх подряд неудач HTTP 404:
+ * «ASR недоступен: /v1/audio/transcriptions возвращает 404, x-request-id: …»
+ */
+export function formatAsr404ConsecutiveVkAlert(details: {
+  endpointPath?: string;
+  requestId?: string;
+  modelName?: string;
+  fallbackModels?: string[];
+  consecutiveFailures?: number;
+  catalogVerdict?: AsrCatalogVerdict | string;
+  catalogSummary?: string;
+  callId?: string;
+  salonName?: string;
+}): string {
+  const endpointPath = (details.endpointPath || '/v1/audio/transcriptions').trim();
+  const reqIdLabel = (details.requestId || '').trim() || 'отсутствует';
+  const lines: string[] = [
+    `ASR недоступен: ${endpointPath} возвращает 404, x-request-id: ${reqIdLabel}`,
+  ];
+  if (details.salonName) {
+    lines.push(`Салон: ${details.salonName}`);
+  }
+  if (details.modelName) {
+    lines.push(`Модель ASR_MODEL: ${details.modelName}`);
+  }
+  if (details.fallbackModels && details.fallbackModels.length > 0) {
+    lines.push(`Резервные ASR_MODEL_FALLBACK: ${details.fallbackModels.join(', ')}`);
+  }
+  if (typeof details.consecutiveFailures === 'number' && details.consecutiveFailures > 0) {
+    lines.push(`Подряд неудач 404: ${details.consecutiveFailures}`);
+  }
+  if (details.catalogSummary) {
+    lines.push(`Проверка GET /v1/models: ${details.catalogSummary}`);
+  } else if (details.catalogVerdict === 'model_present_endpoint_issue') {
+    lines.push('Проверка GET /v1/models: модель есть в каталоге → проблема в эндпоинте');
+  } else if (details.catalogVerdict === 'model_missing_catalog_issue') {
+    lines.push('Проверка GET /v1/models: модель исчезла → проблема в каталоге');
+  }
+  if (details.callId) {
+    lines.push(`Последний звонок: ${details.callId} (поставлен на повтор 30 → 60 → 180 мин)`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Формирует алерт в VK-чат при первых двух подряд HTTP 404 от эндпоинта транскрибации:
+ * «ASR недоступен: /v1/audio/transcriptions возвращает 404 для всех моделей. Тикет в поддержку Cloud.ru отправлен.
+ *  Звонки накапливаются, будут расшифрованы автоматически после восстановления» + последний x-request-id.
+ */
+export function formatAsrServiceUnavailableVkAlert(details: {
+  endpointPath?: string;
+  requestId?: string;
+  modelName?: string;
+  consecutiveFailures?: number;
+  catalogSummary?: string;
+  salonName?: string;
+}): string {
+  const endpointPath = (details.endpointPath || '/v1/audio/transcriptions').trim();
+  const reqIdLabel = (details.requestId || '').trim() || 'отсутствует';
+  const lines: string[] = [
+    `ASR недоступен: ${endpointPath} возвращает 404 для всех моделей. Тикет в поддержку Cloud.ru отправлен. Звонки накапливаются, будут расшифрованы автоматически после восстановления.`,
+    `Последний x-request-id: ${reqIdLabel}`,
+  ];
+  if (details.salonName) {
+    lines.push(`Салон: ${details.salonName}`);
+  }
+  if (typeof details.consecutiveFailures === 'number' && details.consecutiveFailures > 0) {
+    lines.push(`Подряд ответов 404: ${details.consecutiveFailures}`);
+  }
+  if (details.modelName) {
+    lines.push(`Модель ASR_MODEL: ${details.modelName}`);
+  }
+  if (details.catalogSummary) {
+    lines.push(`Диагностика GET /v1/models: ${details.catalogSummary}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Проверяет, следует ли планировщику автоматически повторять расшифровку отложенного звонка.
+ * Различает классы ошибок:
+ * - service_unavailable (HTTP 404 от транскрибации): временная недоступность провайдера, не финальный статус,
+ *   повторяется без отбрасывания по maxAttempts с плавающим интервалом 30 мин → 1 ч → 3 ч (сброс до 15 мин после первого успеха);
+ * - стандартные временные ошибки (429/5xx/сеть): обычный повтор;
+ * - устаревший model_not_found: повтор по запланированному окну pending_asr_retry_after.
  */
 export function shouldAutoRetryPendingAsrCall(
   call: Pick<
@@ -168,33 +462,85 @@ export function shouldAutoRetryPendingAsrCall(
     'status' | 'transcription_status' | 'asr_fail_reason' | 'pending_asr_retry_after' | 'pending_asr_attempts'
   >,
   nowMs: number = Date.now(),
-  maxAttempts?: number
+  maxAttempts?: number,
+  options?: { afterRecoveryReset?: boolean; forceImmediateServiceUnavailable?: boolean }
 ): {
   shouldRetry: boolean;
   skipReason?: 'not_pending' | 'model_not_found' | 'not_due_yet' | 'max_attempts_reached';
+  retryClass?: 'standard_transient' | 'http_404_backoff' | 'service_unavailable_404';
+  nextRetryDelayMs?: number;
 } {
-  const isPending = call.status === 'needs_transcription' || call.transcription_status === 'Требует расшифровки';
+  const isPending =
+    call.status === 'needs_transcription' ||
+    call.transcription_status === 'Требует расшифровки' ||
+    call.transcription_status === ASR_SERVICE_UNAVAILABLE_STATUS_LABEL;
   if (!isPending) {
     return { shouldRetry: false, skipReason: 'not_pending' };
   }
-  if ((call.asr_fail_reason || '').trim().toLowerCase() === 'model_not_found') {
-    return { shouldRetry: false, skipReason: 'model_not_found' };
+
+  const normalizedReason = (call.asr_fail_reason || '').trim().toLowerCase();
+  const isServiceUnavailable =
+    normalizedReason === 'service_unavailable' ||
+    call.transcription_status === ASR_SERVICE_UNAVAILABLE_STATUS_LABEL;
+
+  if (isServiceUnavailable) {
+    const retryClass = 'service_unavailable_404' as const;
+    const nextAttempt = (call.pending_asr_attempts || 0) + 1;
+    const nextRetryDelayMs = computeAsr404RetryDelayMs(nextAttempt, {
+      afterRecoveryReset: options?.afterRecoveryReset,
+    });
+    if (options?.forceImmediateServiceUnavailable) {
+      return { shouldRetry: true, retryClass, nextRetryDelayMs };
+    }
+    if (call.pending_asr_retry_after) {
+      const retryAt = Date.parse(call.pending_asr_retry_after);
+      if (!Number.isNaN(retryAt) && retryAt > nowMs) {
+        return { shouldRetry: false, skipReason: 'not_due_yet', retryClass, nextRetryDelayMs };
+      }
+    }
+    return { shouldRetry: true, retryClass, nextRetryDelayMs };
   }
+
+  const isModelNotFound = normalizedReason === 'model_not_found';
+  const retryClass: 'standard_transient' | 'http_404_backoff' = isModelNotFound
+    ? 'http_404_backoff'
+    : 'standard_transient';
+
   if (
     typeof maxAttempts === 'number' &&
     maxAttempts > 0 &&
     typeof call.pending_asr_attempts === 'number' &&
     call.pending_asr_attempts >= maxAttempts
   ) {
-    return { shouldRetry: false, skipReason: 'max_attempts_reached' };
+    return { shouldRetry: false, skipReason: 'max_attempts_reached', retryClass };
   }
+
+  if (isModelNotFound) {
+    // Для устаревших записей model_not_found авто-повтор запускается только по явно запланированному окну.
+    if (!call.pending_asr_retry_after) {
+      return { shouldRetry: false, skipReason: 'model_not_found', retryClass };
+    }
+    const retryAt = Date.parse(call.pending_asr_retry_after);
+    if (Number.isNaN(retryAt) || retryAt > nowMs) {
+      return { shouldRetry: false, skipReason: 'not_due_yet', retryClass };
+    }
+    const nextAttempt = (call.pending_asr_attempts || 0) + 1;
+    return {
+      shouldRetry: true,
+      retryClass,
+      nextRetryDelayMs: computeAsr404RetryDelayMs(nextAttempt, {
+        afterRecoveryReset: options?.afterRecoveryReset,
+      }),
+    };
+  }
+
   if (call.pending_asr_retry_after) {
     const retryAt = Date.parse(call.pending_asr_retry_after);
     if (!Number.isNaN(retryAt) && retryAt > nowMs) {
-      return { shouldRetry: false, skipReason: 'not_due_yet' };
+      return { shouldRetry: false, skipReason: 'not_due_yet', retryClass };
     }
   }
-  return { shouldRetry: true };
+  return { shouldRetry: true, retryClass };
 }
 
 /**
@@ -939,6 +1285,129 @@ function getAlternateCloudRuAudioModels(
   return Array.from(candidates) as GigaamModelVariant[];
 }
 
+/**
+ * Одиночный быстрый запрос GET /v1/models при HTTP 404 (без ретраев),
+ * чтобы получить готовый диагностический сниппет:
+ * «модель есть → проблема в эндпоинте» или «модель исчезла → проблема в каталоге».
+ */
+export async function probeCloudRuCatalogOn404(
+  apiUrl: string,
+  apiKey: string,
+  primaryModel: string,
+  fallbackModels: string[] = [],
+  fetchImpl?: typeof fetch
+): Promise<Asr404CatalogProbeResult> {
+  let origin = 'https://foundation-models.api.cloud.ru';
+  let endpointPath = '/v1/audio/transcriptions';
+  try {
+    const parsed = new URL(apiUrl);
+    origin = parsed.origin;
+    endpointPath = parsed.pathname || endpointPath;
+  } catch {
+    // use defaults
+  }
+  const modelsUrl = `${origin}/v1/models`;
+  const headers: Record<string, string> = {};
+  if (apiKey) {
+    headers['Authorization'] = apiKey.startsWith('Bearer ') ? apiKey : `Bearer ${apiKey}`;
+  }
+
+  const doFetch = fetchImpl ?? fetch;
+  try {
+    const res = await doFetch(modelsUrl, {
+      method: 'GET',
+      headers,
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) {
+      const bodyPreview = (await res.text().catch(() => '')).slice(0, 200);
+      const diagnosticSummary = `GET ${modelsUrl} вернул HTTP ${res.status}${bodyPreview ? `: ${bodyPreview}` : ''}`;
+      console.warn(`[GigaASR] Проверка каталога при 404: ${diagnosticSummary}`);
+      return {
+        status: res.status,
+        modelsUrl,
+        modelVisibleInCatalog: null,
+        fallbackVisibleModels: [],
+        availableAudioModels: [],
+        totalModels: 0,
+        verdict: 'catalog_probe_failed',
+        diagnosticSummary,
+      };
+    }
+
+    const data: any = await res.json().catch(() => ({}));
+    const rawList: any[] = Array.isArray(data?.data) ? data.data : [];
+    const models: string[] = [];
+    const availableAudioModels: string[] = [];
+
+    for (const m of rawList) {
+      const id = String(m?.id || '').trim();
+      if (!id) continue;
+      models.push(id);
+      const metaType = String(m?.metadata?.type || '').toLowerCase();
+      const rawEndpoints: any[] = Array.isArray(m?.metadata?.endpoints) ? m.metadata.endpoints : [];
+      const paths = rawEndpoints.map((ep: any) => String(ep?.path || '').trim());
+      if (
+        metaType === 'audio-to-text' ||
+        paths.some((p) => p.includes('/audio/transcriptions')) ||
+        /asr|whisper|gigaam|speech/i.test(id)
+      ) {
+        availableAudioModels.push(id);
+      }
+    }
+
+    const primaryLower = primaryModel.trim().toLowerCase();
+    const primaryExact = models.find((id) => id.toLowerCase() === primaryLower);
+    const modelVisibleInCatalog = Boolean(primaryExact);
+    const fallbackVisibleModels = fallbackModels
+      .map((fb) => models.find((id) => id.toLowerCase() === fb.trim().toLowerCase()))
+      .filter((id): id is string => Boolean(id));
+
+    const audioListLabel = availableAudioModels.length > 0 ? availableAudioModels.join(', ') : 'не найдены';
+    const fallbackNote =
+      fallbackModels.length > 0
+        ? `; фолбэк в каталоге: ${fallbackVisibleModels.length > 0 ? fallbackVisibleModels.join(', ') : 'нет'}`
+        : '';
+
+    const verdict: AsrCatalogVerdict = modelVisibleInCatalog
+      ? 'model_present_endpoint_issue'
+      : 'model_missing_catalog_issue';
+
+    const diagnosticSummary = modelVisibleInCatalog
+      ? `модель ${primaryExact} ЕСТЬ в каталоге → проблема в эндпоинте (${endpointPath})${fallbackNote}. Аудио-модели: ${audioListLabel}`
+      : `модель ${primaryModel} ИСЧЕЗЛА из каталога → проблема в каталоге${fallbackNote}. Доступные аудио-модели: ${audioListLabel}`;
+
+    console.warn(
+      `[GigaASR] Проверка каталога GET ${modelsUrl} (HTTP 200, моделей: ${models.length}): ${diagnosticSummary}`
+    );
+
+    return {
+      status: 200,
+      modelsUrl,
+      modelVisibleInCatalog,
+      fallbackVisibleModels,
+      availableAudioModels,
+      totalModels: models.length,
+      verdict,
+      diagnosticSummary,
+    };
+  } catch (probeErr: any) {
+    const errMsg = probeErr?.message || String(probeErr);
+    const diagnosticSummary = `не удалось опросить ${modelsUrl} (${errMsg})`;
+    console.warn(`[GigaASR] Проверка каталога при 404: ${diagnosticSummary}`);
+    return {
+      status: 0,
+      modelsUrl,
+      modelVisibleInCatalog: null,
+      fallbackVisibleModels: [],
+      availableAudioModels: [],
+      totalModels: 0,
+      verdict: 'catalog_probe_failed',
+      diagnosticSummary,
+    };
+  }
+}
+
 async function resolveCloudRuConfig(
   config: GigaAmConfig,
   bypassCache: boolean = false,
@@ -975,11 +1444,16 @@ async function resolveCloudRuConfig(
           const gigaAsr = cat.audioToTextModels.find((id) => id.toLowerCase().includes('gigaasr'));
           picked = (gigaAsr || cat.audioToTextModels[0]) as GigaamModelVariant;
         }
+        // Подставляем точные актуальные идентификаторы из каталога Cloud.ru и для резервных моделей ASR_MODEL_FALLBACK
+        const resolvedFallbacks = (config.fallbackModels || []).map((fb) => {
+          const exactFb = cat.models.find((id) => id.toLowerCase() === fb.toLowerCase());
+          return exactFb || fb;
+        });
         if (cachedOverride && cachedOverride.expiresAt > Date.now()) {
           picked = cachedOverride.model;
         }
         return {
-          config: { ...config, variant: picked },
+          config: { ...config, variant: picked, fallbackModels: resolvedFallbacks },
           catalogModels: cat.models,
           audioToTextModels: cat.audioToTextModels,
           ttsOnlyModels: cat.ttsOnlyModels,
@@ -1012,8 +1486,10 @@ async function sendMultipartOnce(
   fieldName: 'file' | 'audio',
   cloudRuOpts?: CloudRuAttemptOpts,
   ctx?: AsrRequestContext
-): Promise<{ status: number; ok: boolean; statusText: string; rawBody: string }> {
+): Promise<AsrHttpAttemptResponse> {
   const modelParam = getModelParamForRequest(config);
+  const fileName = `call.${meta.ext}`;
+  const endpointPath = extractEndpointPath(config.apiUrl);
   const headers: Record<string, string> = {};
   if (config.apiKey) {
     headers['Authorization'] = config.apiKey.startsWith('Bearer ') ? config.apiKey : `Bearer ${config.apiKey}`;
@@ -1025,7 +1501,7 @@ async function sendMultipartOnce(
     () => {
       const form = new FormData();
       const blob = new Blob([audioBytes], { type: meta.mime });
-      form.append(fieldName, blob, `call.${meta.ext}`);
+      form.append(fieldName, blob, fileName);
       form.append('model', modelParam);
 
       if (config.isCloudRu) {
@@ -1070,8 +1546,35 @@ async function sendMultipartOnce(
   );
 
   const rawBody = await response.text().catch(() => '');
+  const requestId = extractRequestIdFromHeaders(response.headers);
+  const firstHeaders = collectFirstResponseHeaders(response.headers, 8);
+  const reqIdLogLine = formatAsrResponseRequestIdLog({
+    method: 'POST',
+    endpointPath,
+    status: response.status,
+    model: modelParam,
+    requestId,
+  });
+  if (response.ok) {
+    console.log(reqIdLogLine);
+  } else {
+    console.warn(reqIdLogLine);
+  }
   if (response.status === 404) {
     console.error(`[GigaASR] HTTP 404: ${rawBody || response.statusText || '(empty body)'}`);
+    console.error(
+      formatAsr404DiagnosticLog({
+        method: 'POST',
+        url: config.apiUrl,
+        model: modelParam,
+        fileName: `${fieldName}=${fileName}`,
+        sizeBytes: audioBuffer.length,
+        requestContentType: `multipart/form-data (file=${meta.mime})`,
+        responseContentType: response.headers?.get('content-type') || undefined,
+        requestId,
+        firstHeaders,
+      })
+    );
   }
   if (!response.ok && isAsrRateLimitError(null, response.status, rawBody)) {
     const finalPause = ASR_RATE_LIMIT_BACKOFF_MS[ASR_RATE_LIMIT_BACKOFF_MS.length - 1];
@@ -1082,6 +1585,9 @@ async function sendMultipartOnce(
     ok: response.ok,
     statusText: response.statusText,
     rawBody,
+    requestId,
+    endpointPath,
+    responseHeaders: firstHeaders,
   };
 }
 
@@ -1112,7 +1618,7 @@ async function sendChatAudioOnce(
   mode: 'input_audio' | 'audio_url',
   includeTextPrompt: boolean = true,
   ctx?: AsrRequestContext
-): Promise<{ status: number; ok: boolean; statusText: string; rawBody: string }> {
+): Promise<AsrHttpAttemptResponse> {
   const chatUrl = getChatCompletionsUrlFromConfig(config.apiUrl);
   const modelParam = getModelParamForRequest(config);
 
@@ -1195,8 +1701,36 @@ async function sendChatAudioOnce(
   );
 
   const rawBody = await response.text().catch(() => '');
+  const requestId = extractRequestIdFromHeaders(response.headers);
+  const firstHeaders = collectFirstResponseHeaders(response.headers, 8);
+  const endpointPath = extractEndpointPath(chatUrl);
+  const reqIdLogLine = formatAsrResponseRequestIdLog({
+    method: 'POST',
+    endpointPath,
+    status: response.status,
+    model: modelParam,
+    requestId,
+  });
+  if (response.ok) {
+    console.log(reqIdLogLine);
+  } else {
+    console.warn(reqIdLogLine);
+  }
   if (response.status === 404) {
     console.error(`[GigaASR] HTTP 404: ${rawBody || response.statusText || '(empty body)'}`);
+    console.error(
+      formatAsr404DiagnosticLog({
+        method: 'POST',
+        url: chatUrl,
+        model: modelParam,
+        fileName: `call.${meta.ext}`,
+        sizeBytes: audioBuffer.length,
+        requestContentType: 'application/json',
+        responseContentType: response.headers?.get('content-type') || undefined,
+        requestId,
+        firstHeaders,
+      })
+    );
   }
   if (!response.ok && isAsrRateLimitError(null, response.status, rawBody)) {
     const finalPause = ASR_RATE_LIMIT_BACKOFF_MS[ASR_RATE_LIMIT_BACKOFF_MS.length - 1];
@@ -1207,6 +1741,9 @@ async function sendChatAudioOnce(
     ok: response.ok,
     statusText: response.statusText,
     rawBody,
+    requestId,
+    endpointPath,
+    responseHeaders: firstHeaders,
   };
 }
 
@@ -1438,7 +1975,7 @@ async function postAudioToGigaAm(
           { includeLanguage: false },
         ];
 
-    let lastRes: { status: number; ok: boolean; statusText: string; rawBody: string } | null = null;
+    let lastRes: AsrHttpAttemptResponse | null = null;
     for (const profile of paramProfiles) {
       const res = await sendMultipartOnce(cloudBuffer, cloudMeta, effectiveTxConfig, fieldName, profile, ctx);
       lastRes = res;
@@ -1465,91 +2002,41 @@ async function postAudioToGigaAm(
     }
 
     // Если /v1/audio/transcriptions вернул HTTP 404:
-    // 1) Полное тело ответа уже залогировано как [GigaASR] HTTP 404: <тело>.
-    // 2) Пробуем альтернативный идентификатор из конфига (ASR_MODEL_FALLBACK) + при наличии реальные аудио-модели каталога,
-    //    БЕЗ ретраев по несуществующей модели.
-    // 3) Если и фолбэк не помог — сразу финализируем попытку с asrFailReason='model_not_found' и noRetry=true.
+    // Авто-фолбэк на вторую модель при 404 убран (бессмыслен при недоступности всего эндпоинта).
+    // 1) Полное тело ответа, x-request-id и развёрнутая диагностика уже залогированы.
+    // 2) Выполняем одиночный диагностический GET /v1/models («модель есть → проблема в эндпоинте» / «модель исчезла → проблема в каталоге»).
+    // 3) Классифицируем как service_unavailable (внутренняя ошибка провайдера, не ошибка звонка), без немедленных ретраев.
     if (lastRes && lastRes.status === 404) {
       const configuredFallbacks =
-        config.fallbackModels && config.fallbackModels.length > 0
-          ? config.fallbackModels.filter((m) => m.toLowerCase() !== String(effectiveTxConfig.variant).toLowerCase())
+        effectiveTxConfig.fallbackModels && effectiveTxConfig.fallbackModels.length > 0
+          ? effectiveTxConfig.fallbackModels.filter((m) => m.toLowerCase() !== String(effectiveTxConfig.variant).toLowerCase())
           : getConfiguredAsrFallbackModels(effectiveTxConfig.variant);
-      const altModels = getAlternateCloudRuAudioModels(
+
+      const catalogProbe = await probeCloudRuCatalogOn404(
+        effectiveTxConfig.apiUrl,
+        effectiveTxConfig.apiKey,
         effectiveTxConfig.variant,
-        catalogModels,
-        audioToTextModels,
-        configuredFallbacks
+        configuredFallbacks,
+        ctx?.fetchImpl
       );
-      const triedFallbacks: string[] = [];
-      let lastFallbackRes: { status: number; ok: boolean; statusText: string; rawBody: string } | null = null;
 
-      for (const altModel of altModels) {
-        triedFallbacks.push(altModel);
-        console.warn(
-          `[GigaASR] Модель ${effectiveTxConfig.variant} вернула HTTP 404 на ${effectiveTxConfig.apiUrl}, пробуем резервную модель ${altModel}...`
-        );
-        const altCfg: GigaAmConfig = { ...effectiveTxConfig, variant: altModel };
-        const altRes = await sendMultipartOnce(
-          cloudBuffer,
-          cloudMeta,
-          altCfg,
-          fieldName,
-          { responseFormat: preferVerboseJson ? 'verbose_json' : 'json', includeLanguage: true },
-          ctx
-        );
-        lastFallbackRes = altRes;
-        if (altRes.ok) {
-          const parsedText = parseTranscriptionBody(altRes.rawBody, label);
-          if (parsedText) {
-            if (onRawSegments) onRawSegments(extractSegmentsFromGigaAmResponse(altRes.rawBody));
-            cloudRuWorkingModelOverrides.set(overrideKey, {
-              model: altModel,
-              expiresAt: Date.now() + 10 * 60 * 1000,
-            });
-            return parsedText;
-          }
-        }
-        // При 400/415/422 пробуем минимальный набор параметров для фолбэк-модели; при 404 — НЕ ретраим!
-        if (altRes.status === 400 || altRes.status === 415 || altRes.status === 422) {
-          const altMinRes = await sendMultipartOnce(
-            cloudBuffer,
-            cloudMeta,
-            altCfg,
-            fieldName,
-            { includeLanguage: false },
-            ctx
-          );
-          lastFallbackRes = altMinRes;
-          if (altMinRes.ok) {
-            const parsedText = parseTranscriptionBody(altMinRes.rawBody, label);
-            if (parsedText) {
-              if (onRawSegments) onRawSegments(extractSegmentsFromGigaAmResponse(altMinRes.rawBody));
-              cloudRuWorkingModelOverrides.set(overrideKey, {
-                model: altModel,
-                expiresAt: Date.now() + 10 * 60 * 1000,
-              });
-              return parsedText;
-            }
-          }
-        }
-        if (altRes.status === 401 || altRes.status === 403 || altRes.status === 429) {
-          break;
-        }
-      }
-
-      const fallbackNote =
-        triedFallbacks.length > 0
-          ? ` (резервные модели ${triedFallbacks.join(', ')} также не сработали: HTTP ${lastFallbackRes?.status ?? 404})`
-          : '';
+      const effectiveRequestId = lastRes.requestId;
+      const endpointPath = lastRes.endpointPath || extractEndpointPath(effectiveTxConfig.apiUrl);
+      const reqIdSuffix = effectiveRequestId ? ` [x-request-id: ${effectiveRequestId}]` : '';
       const err: any = new Error(
-        `${label}: модель ${effectiveTxConfig.variant} не найдена на ${effectiveTxConfig.apiUrl} (HTTP 404)${fallbackNote}: ${
+        `${label}: сервис транскрибации ${endpointPath} временно недоступен (HTTP 404, service_unavailable, модель ${effectiveTxConfig.variant})${reqIdSuffix}: ${
           (lastRes.rawBody || '').slice(0, 300) || lastRes.statusText
         }`
       );
       err.status = 404;
-      err.asrFailReason = 'model_not_found' satisfies AsrFailReason;
+      err.asrFailReason = 'service_unavailable' satisfies AsrFailReason;
       err.asrModel = effectiveTxConfig.variant;
-      err.asrFallbackModelsTried = triedFallbacks;
+      err.asrFallbackModelsTried = [];
+      err.asrRequestId = effectiveRequestId;
+      err.asrEndpointPath = endpointPath;
+      err.asrCatalogVerdict = catalogProbe.verdict;
+      err.asrCatalogSummary = catalogProbe.diagnosticSummary;
+      err.asrCatalogCheck = catalogProbe;
       err.http404Body = lastRes.rawBody;
       err.noRetry = true;
       err.asrAttemptsExhausted = true;
@@ -1611,7 +2098,7 @@ async function postAudioToGigaAm(
         );
         err.status = chatRes.status;
         if (chatRes.status === 404) {
-          err.asrFailReason = 'model_not_found';
+          err.asrFailReason = 'service_unavailable' satisfies AsrFailReason;
           err.asrModel = effectiveTxConfig.variant;
           err.noRetry = true;
           err.asrAttemptsExhausted = true;
@@ -1721,30 +2208,17 @@ async function postAudioToGigaAm(
 
   if (!res.ok) {
     if (res.status === 404) {
-      const configuredFallbacks =
-        config.fallbackModels && config.fallbackModels.length > 0
-          ? config.fallbackModels.filter((m) => m.toLowerCase() !== String(config.variant).toLowerCase())
-          : getConfiguredAsrFallbackModels(config.variant);
-      const triedFallbacks: string[] = [];
-      for (const altModel of configuredFallbacks) {
-        triedFallbacks.push(altModel);
-        console.warn(
-          `[GigaASR] Модель ${config.variant} вернула HTTP 404 на ${config.apiUrl}, пробуем резервную модель ${altModel}...`
-        );
-        const altCfg: GigaAmConfig = { ...config, variant: altModel };
-        const altRes = await sendMultipartOnce(audioBuffer, meta, altCfg, fieldName, undefined, ctx);
-        if (altRes.ok) {
-          const parsedText = parseTranscriptionBody(altRes.rawBody, label);
-          if (parsedText) return parsedText;
-        }
-      }
+      const effectiveRequestId = res.requestId;
+      const endpointPath = res.endpointPath || extractEndpointPath(config.apiUrl);
       const err: any = new Error(
-        `${label}: модель ${config.variant} не найдена на ${config.apiUrl} (HTTP 404): ${res.rawBody.slice(0, 300) || res.statusText}`
+        `${label}: сервис транскрибации ${endpointPath} временно недоступен (HTTP 404, service_unavailable, модель ${config.variant}): ${res.rawBody.slice(0, 300) || res.statusText}`
       );
       err.status = 404;
-      err.asrFailReason = 'model_not_found' satisfies AsrFailReason;
+      err.asrFailReason = 'service_unavailable' satisfies AsrFailReason;
       err.asrModel = config.variant;
-      err.asrFallbackModelsTried = triedFallbacks;
+      err.asrFallbackModelsTried = [];
+      err.asrRequestId = effectiveRequestId;
+      err.asrEndpointPath = endpointPath;
       err.http404Body = res.rawBody;
       err.noRetry = true;
       err.asrAttemptsExhausted = true;
@@ -1813,6 +2287,7 @@ async function transcribeMonoAudioSegmentsWithGigaAm(
       err.status === 429 ||
       Boolean(err.rateLimited) ||
       Boolean(err.noRetry) ||
+      err.asrFailReason === 'service_unavailable' ||
       err.asrFailReason === 'model_not_found';
     if (isAuthOrRateLimitError) {
       throw err;
@@ -1892,6 +2367,7 @@ async function transcribeMonoAudioSegmentsWithGigaAm(
             chunkErr.status === 403 ||
             chunkErr.status === 404 ||
             chunkErr.noRetry ||
+            chunkErr.asrFailReason === 'service_unavailable' ||
             chunkErr.asrFailReason === 'model_not_found'
           ) {
             throw chunkErr;
@@ -2000,8 +2476,13 @@ export async function transcribeWithGigaAmRetry(
         maxDelayMs: 16000,
         sleepFn: options?.sleepFn,
         shouldRetry: (err: any) => {
-          // HTTP 404 / model_not_found никогда не ретраится — повтор несуществующей модели бессмысленен.
-          if (err?.noRetry || err?.status === 404 || err?.asrFailReason === 'model_not_found') {
+          // HTTP 404 (service_unavailable / model_not_found) не тратит немедленные ретраи — звонок уходит в плавающий планировщик 30м → 1ч → 3ч.
+          if (
+            err?.noRetry ||
+            err?.status === 404 ||
+            err?.asrFailReason === 'service_unavailable' ||
+            err?.asrFailReason === 'model_not_found'
+          ) {
             return false;
           }
           // Если внутренний sendMultipartOnce уже исчерпал все попытки по 429/504 с глобальным бэкоффом,
@@ -2041,28 +2522,31 @@ export async function transcribeWithGigaAmRetry(
       typeof error?.asrModel === 'string' && error.asrModel.trim()
         ? error.asrModel.trim()
         : getGigaAmConfig(undefined, undefined, variantOverride).variant;
-    const isModelNotFound = failReason === 'model_not_found' || resolvedStatus === 404;
+    const isHttp404 =
+      failReason === 'service_unavailable' ||
+      failReason === 'model_not_found' ||
+      resolvedStatus === 404;
 
     const attempts = Math.max(
       1,
-      totalAttempts || (typeof error?.sttAttempts === 'number' ? error.sttAttempts : isModelNotFound ? 1 : MAX_RETRIES)
+      totalAttempts || (typeof error?.sttAttempts === 'number' ? error.sttAttempts : isHttp404 ? 1 : MAX_RETRIES)
     );
     options?.onAttemptCount?.(attempts);
     if (options?.emitIncidentSummary === true) {
       console.error(
         formatGigaAsrIncidentSummary(options?.callId, 'failed', {
           attempts,
-          reason: isModelNotFound ? `model_not_found (${failedModel}): ${detail}` : detail,
+          reason: isHttp404 ? `${failReason} (${failedModel}): ${detail}` : detail,
         })
       );
-    } else if (isModelNotFound) {
-      console.error(`[GigaASR / GigaAM v3] Модель ${failedModel} не найдена (HTTP 404, model_not_found, без ретраев):`, detail);
+    } else if (isHttp404) {
+      console.error(`[GigaASR / GigaAM v3] Сервис транскрибации недоступен (HTTP 404, ${failReason}, модель ${failedModel}, без ретраев):`, detail);
     } else {
       console.error(`[GigaASR / GigaAM v3] Транскрибация завершилась ошибкой (попыток: ${attempts}):`, detail);
     }
     const wrapped: any = new Error(
-      isModelNotFound
-        ? `GigaASR / GigaAM v3: модель ${failedModel} не найдена (HTTP 404, model_not_found): ${detail}`
+      isHttp404
+        ? `GigaASR / GigaAM v3: сервис транскрибации недоступен (HTTP 404, ${failReason}, модель ${failedModel}): ${detail}`
         : attempts > 1
         ? `GigaASR / GigaAM v3 недоступен после ${attempts} попыток: ${detail}`
         : `GigaASR / GigaAM v3 недоступен: ${detail}`
@@ -2075,10 +2559,25 @@ export async function transcribeWithGigaAmRetry(
     if (Array.isArray(error?.asrFallbackModelsTried)) {
       wrapped.asrFallbackModelsTried = error.asrFallbackModelsTried;
     }
+    if (typeof error?.asrRequestId === 'string' && error.asrRequestId.trim()) {
+      wrapped.asrRequestId = error.asrRequestId.trim();
+    }
+    if (typeof error?.asrEndpointPath === 'string' && error.asrEndpointPath.trim()) {
+      wrapped.asrEndpointPath = error.asrEndpointPath.trim();
+    }
+    if (typeof error?.asrCatalogVerdict === 'string' && error.asrCatalogVerdict.trim()) {
+      wrapped.asrCatalogVerdict = error.asrCatalogVerdict.trim();
+    }
+    if (typeof error?.asrCatalogSummary === 'string' && error.asrCatalogSummary.trim()) {
+      wrapped.asrCatalogSummary = error.asrCatalogSummary.trim();
+    }
+    if (error?.asrCatalogCheck) {
+      wrapped.asrCatalogCheck = error.asrCatalogCheck;
+    }
     if (typeof error?.http404Body === 'string') {
       wrapped.http404Body = error.http404Body;
     }
-    wrapped.noRetry = Boolean(error?.noRetry || isModelNotFound);
+    wrapped.noRetry = Boolean(error?.noRetry || isHttp404);
     wrapped.rateLimited = Boolean(error?.rateLimited || isAsrRateLimitError(error));
     wrapped.cause = error;
     throw wrapped;
@@ -2086,14 +2585,15 @@ export async function transcribeWithGigaAmRetry(
 }
 
 /**
- * Генерирует минимальный валидный WAV-файл (0.2 сек тишины, 16 кГц моно 16-bit PCM)
- * для реальной проверки эндпоинта транскрибации.
+ * Генерирует валидный WAV-файл тишины заданной длительности (16 кГц моно 16-bit PCM)
+ * для фоновой проверки доступности эндпоинта ASR (по умолчанию 1 секунда = 32044 байта).
  */
-function createSilentWavProbeBuffer(): Buffer {
+export function createSilentWavBuffer(durationSec: number = 1.0): Buffer {
+  const safeDuration = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 1.0;
   const sampleRate = 16000;
   const numChannels = 1;
   const bitsPerSample = 16;
-  const numSamples = Math.floor(sampleRate * 0.2);
+  const numSamples = Math.max(1, Math.floor(sampleRate * safeDuration));
   const dataSize = numSamples * numChannels * (bitsPerSample / 8);
   const buf = Buffer.alloc(44 + dataSize);
 
@@ -2112,6 +2612,143 @@ function createSilentWavProbeBuffer(): Buffer {
   buf.writeUInt32LE(dataSize, 40);
 
   return buf;
+}
+
+/**
+ * Генерирует минимальный валидный WAV-файл (0.2 сек тишины, 16 кГц моно 16-bit PCM)
+ * для реальной проверки эндпоинта транскрибации.
+ */
+function createSilentWavProbeBuffer(): Buffer {
+  return createSilentWavBuffer(0.2);
+}
+
+/**
+ * Фоновая ежечасная проверка доступности ASR одним дешёвым POST с 1-секундным silence WAV.
+ * Логирует результат: «ASR check: OK» / «ASR check: 404 (x-request-id: …)» и фиксирует x-request-id.
+ */
+export async function runAsrHealthCheckProbe(options?: {
+  apiUrlOverride?: string;
+  apiKeyOverride?: string;
+  variantOverride?: GigaamModelVariant;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}): Promise<AsrHealthCheckResult> {
+  const startedAt = Date.now();
+  const cfg = getGigaAmConfig(options?.apiUrlOverride, options?.apiKeyOverride, options?.variantOverride);
+  const endpointPath = extractEndpointPath(cfg.apiUrl || CLOUDRU_GIGAASR_TRANSCRIPTIONS_URL);
+  const modelParam = getModelParamForRequest(cfg);
+  const silentWav = createSilentWavBuffer(1.0);
+
+  if (!cfg.apiUrl || (cfg.apiUrl.includes('cloud.ru') && !cfg.apiKey)) {
+    const logLine = 'ASR check: skipped (ASR не настроен)';
+    return {
+      ok: false,
+      status: 0,
+      endpointPath,
+      model: modelParam,
+      logLine,
+      error: 'ASR не настроен',
+      durationMs: Date.now() - startedAt,
+      audioBytes: silentWav.length,
+    };
+  }
+
+  const headers: Record<string, string> = {};
+  if (cfg.apiKey) {
+    headers['Authorization'] = cfg.apiKey.startsWith('Bearer ') ? cfg.apiKey : `Bearer ${cfg.apiKey}`;
+  }
+
+  const form = new FormData();
+  form.append('file', new Blob([new Uint8Array(silentWav)], { type: 'audio/wav' }), 'silence-1s.wav');
+  form.append('model', modelParam);
+  form.append('language', 'ru');
+  if (cfg.isCloudRu) {
+    form.append('response_format', 'json');
+  } else {
+    form.append('variant', cfg.variant);
+  }
+
+  const doFetch = options?.fetchImpl ?? fetch;
+  const timeoutMs = options?.timeoutMs ?? 15000;
+
+  try {
+    const res = await doFetch(cfg.apiUrl, {
+      method: 'POST',
+      headers,
+      body: form,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const rawBody = await res.text().catch(() => '');
+    const requestId = extractRequestIdFromHeaders(res.headers);
+    const reqIdLogLine = formatAsrResponseRequestIdLog({
+      method: 'POST',
+      endpointPath,
+      status: res.status,
+      model: modelParam,
+      requestId,
+    });
+    if (res.ok) {
+      console.log(reqIdLogLine);
+      const logLine = 'ASR check: OK';
+      console.log(logLine);
+      return {
+        ok: true,
+        status: res.status,
+        endpointPath,
+        model: modelParam,
+        requestId,
+        logLine,
+        durationMs: Date.now() - startedAt,
+        audioBytes: silentWav.length,
+      };
+    }
+
+    console.warn(reqIdLogLine);
+    if (res.status === 404) {
+      console.error(`[GigaASR] HTTP 404: ${rawBody || res.statusText || '(empty body)'}`);
+      const logLine = `ASR check: 404 (x-request-id: ${requestId || 'none'})`;
+      console.warn(logLine);
+      return {
+        ok: false,
+        status: 404,
+        endpointPath,
+        model: modelParam,
+        requestId,
+        logLine,
+        error: rawBody.slice(0, 300) || res.statusText,
+        durationMs: Date.now() - startedAt,
+        audioBytes: silentWav.length,
+      };
+    }
+
+    const logLine = `ASR check: HTTP ${res.status} (x-request-id: ${requestId || 'none'})`;
+    console.warn(logLine);
+    return {
+      ok: false,
+      status: res.status,
+      endpointPath,
+      model: modelParam,
+      requestId,
+      logLine,
+      error: rawBody.slice(0, 300) || res.statusText,
+      durationMs: Date.now() - startedAt,
+      audioBytes: silentWav.length,
+    };
+  } catch (err: any) {
+    const errMsg = err?.message || String(err);
+    const logLine = `ASR check: ERROR (${errMsg})`;
+    console.warn(logLine);
+    return {
+      ok: false,
+      status: 0,
+      endpointPath,
+      model: modelParam,
+      logLine,
+      error: errMsg,
+      durationMs: Date.now() - startedAt,
+      audioBytes: silentWav.length,
+    };
+  }
 }
 
 export async function testGigaAmConnection(

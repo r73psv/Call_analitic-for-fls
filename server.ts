@@ -25,7 +25,15 @@ import {
   getAsrQueueStatus,
   classifyAsrFailReason,
   formatAsrModelNotFoundVkAlert,
+  formatAsr404ConsecutiveVkAlert,
+  formatAsrServiceUnavailableVkAlert,
   shouldAutoRetryPendingAsrCall,
+  computeAsr404RetryDelayMs,
+  runAsrHealthCheckProbe,
+  ASR_404_ALERT_CONSECUTIVE_THRESHOLD,
+  ASR_404_POST_RECOVERY_RESET_MINUTES,
+  ASR_SERVICE_UNAVAILABLE_STATUS_LABEL,
+  ASR_CLIENT_FRIENDLY_WAITING_TEXT,
 } from './src/services/gigaam-asr.js';
 import { savePendingTranscriptionAudio, loadPendingTranscriptionAudio, deletePendingTranscriptionAudio } from './src/services/s3-archive.js';
 import { analyzeWithRetry, getGigaChatQueueStatus, extractEssenceDetails, formatSummaryWithEssence, generateNextStepsWithAI, isMasterNameValid, clarifyCallContextWithGigaChat, extractStructuredCallSummary, extractCallEvaluation, harmonizeMistakesAndEvaluation, filterOutdatedReminderMistakes, reconcileMistakesWithCriteria, generateLocalFallbackAnalysis, clearCrmMastersCache } from './src/services/gigachat.js';
@@ -685,8 +693,14 @@ function extractAndParseLLMJson(rawText: string, transcriptInput: string, module
 // Helper to check if a call record failed due to technical/limitation error and needs reanalysis
 function isTechnicalFailedCall(call: any): boolean {
   if (!call) return false;
-  // If call duration is 0 or it is a missed call, it is NOT a technical failure — it was not answered.
-  if (call.duration_seconds === 0 || call.is_answered === false || call.status === 'missed') {
+  // If call duration is 0 or it is a missed call, or it is already managed by the dedicated ASR retry queue, do not hijack it.
+  if (
+    call.duration_seconds === 0 ||
+    call.is_answered === false ||
+    call.status === 'missed' ||
+    call.status === 'needs_transcription' ||
+    call.asr_fail_reason === 'service_unavailable'
+  ) {
     return false;
   }
 
@@ -855,8 +869,37 @@ async function executeSingleModelAttempt(
 
 const PENDING_ASR_RETRY_DELAY_MS = 12 * 60 * 1000; // 12 минут (окно 10–15 мин)
 const PENDING_ASR_MAX_DEFERRED_ATTEMPTS = 5;
-const ASR_MODEL_ALERT_COOLDOWN_MS = 30 * 60 * 1000; // Защита от спама в VK: не чаще 1 раза в 30 мин на модель
+const ASR_HEALTHCHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 час — фоновая проверка 1-сек silence WAV
+const ASR_MODEL_ALERT_COOLDOWN_MS = 30 * 60 * 1000; // Защита от спама в VK: не чаще 1 раза в 30 мин
 const asrModelAlertLastSentAt = new Map<string, number>();
+let consecutiveAsr404Failures = 0;
+let asrHad404Outage = false;
+let asrPostRecoveryResetActive = false;
+let lastAsr404RequestId: string | undefined;
+
+/**
+ * Фиксирует восстановление сервиса ASR после 404-сбоя:
+ * сбрасывает счётчик подряд 404, активирует сброс начального интервала до 15 мин и очищает cooldown алерта.
+ */
+function markAsrServiceRecovered(triggerSource: string): boolean {
+  const wasInOutage = consecutiveAsr404Failures > 0 || asrHad404Outage;
+  consecutiveAsr404Failures = 0;
+  asrHad404Outage = false;
+  if (wasInOutage) {
+    asrPostRecoveryResetActive = true;
+    for (const key of Array.from(asrModelAlertLastSentAt.keys())) {
+      if (key.startsWith('404-threshold::')) {
+        asrModelAlertLastSentAt.delete(key);
+      }
+    }
+    appendLog(
+      'success',
+      'speechkit',
+      `[GigaASR] Сервис расшифровки восстановился (${triggerSource}): интервал повтора сброшен до ${ASR_404_POST_RECOVERY_RESET_MINUTES} мин.`
+    );
+  }
+  return wasInOutage;
+}
 
 /**
  * Отправляет администратору уведомление в VK-чат, если модель ASR не найдена (HTTP 404 / model_not_found).
@@ -922,6 +965,86 @@ async function notifyAdminAsrModelNotFound(
   }
 }
 
+/**
+ * Отправляет алерт администратору в VK-чат при первых двух подряд HTTP 404:
+ * «ASR недоступен: /v1/audio/transcriptions возвращает 404 для всех моделей. Тикет в поддержку Cloud.ru отправлен.
+ *  Звонки накапливаются, будут расшифрованы автоматически после восстановления» + последний x-request-id.
+ */
+async function notifyAdminAsr404Threshold(details: {
+  endpointPath?: string;
+  requestId?: string;
+  modelName?: string;
+  fallbackModels?: string[];
+  consecutiveFailures: number;
+  catalogVerdict?: string;
+  catalogSummary?: string;
+  callId?: string;
+}): Promise<{ sent: boolean; skipped?: string; sentAt?: string }> {
+  const endpointPath = (details.endpointPath || '/v1/audio/transcriptions').trim();
+  const effectiveRequestId = (details.requestId || lastAsr404RequestId || '').trim() || undefined;
+  const cacheKey = `404-threshold::${endpointPath.toLowerCase()}`;
+  const now = Date.now();
+  const lastSent = asrModelAlertLastSentAt.get(cacheKey);
+  if (lastSent && now - lastSent < ASR_MODEL_ALERT_COOLDOWN_MS) {
+    return { sent: false, skipped: 'cooldown', sentAt: new Date(lastSent).toISOString() };
+  }
+
+  try {
+    const db = readDb();
+    const token = (
+      db.config?.vk?.token ||
+      db.config?.credentials?.vkToken ||
+      getEnvValue('VK_TOKEN') ||
+      ''
+    ).trim();
+    const chatId = (
+      db.config?.vk?.chatId ||
+      db.config?.credentials?.vkChatId ||
+      getEnvValue('VK_CHAT_ID') ||
+      ''
+    ).trim();
+
+    if (!token || !chatId) {
+      appendLog(
+        'warning',
+        'vk',
+        `[GigaASR Alert] ASR недоступен: ${endpointPath} возвращает 404 для всех моделей, x-request-id: ${effectiveRequestId || 'отсутствует'} (подряд: ${details.consecutiveFailures}) — отправка в VK пропущена (не настроены VK_TOKEN / VK_CHAT_ID).`
+      );
+      return { sent: false, skipped: 'vk_not_configured' };
+    }
+
+    const message = formatAsrServiceUnavailableVkAlert({
+      endpointPath,
+      requestId: effectiveRequestId,
+      modelName: details.modelName,
+      consecutiveFailures: details.consecutiveFailures,
+      catalogSummary: details.catalogSummary,
+      salonName: getEffectiveSalonName(db.config),
+    });
+
+    const res = await sendVkTextMessage(message, token, chatId);
+    if (res.success) {
+      asrModelAlertLastSentAt.set(cacheKey, now);
+      const sentAt = new Date(now).toISOString();
+      appendLog(
+        'warning',
+        'vk',
+        `[GigaASR Alert] Отправлен алерт администратору в VK (${details.consecutiveFailures} подряд 404): ASR недоступен: ${endpointPath} возвращает 404 для всех моделей, x-request-id: ${effectiveRequestId || 'отсутствует'}`
+      );
+      return { sent: true, sentAt };
+    }
+    appendLog(
+      'error',
+      'vk',
+      `[GigaASR Alert] Не удалось отправить алерт в VK о 404 (${endpointPath}): ${res.error || 'неизвестная ошибка'}`
+    );
+    return { sent: false, skipped: res.error || 'send_failed' };
+  } catch (err: any) {
+    appendLog('error', 'vk', `[GigaASR Alert] Ошибка отправки алерта 404 в VK: ${err?.message || err}`);
+    return { sent: false, skipped: err?.message || 'exception' };
+  }
+}
+
 // Unified Multi-Provider STT (Yandex SpeechKit / T-Bank VoiceKit / GigaAM v3) + Sber GigaChat LLM Calling Logic with 152-ФЗ Anonymization
 async function analyzeCallTextOrAudio(
   requestedModel: string,
@@ -941,6 +1064,10 @@ async function analyzeCallTextOrAudio(
   let sttFailReason: string | undefined;
   let sttFailedModel: string | undefined;
   let sttFallbackModelsTried: string[] | undefined;
+  let sttRequestId: string | undefined;
+  let sttEndpointPath: string | undefined;
+  let sttCatalogVerdict: string | undefined;
+  let sttCatalogSummary: string | undefined;
 
   // 0. Strict check: calls under 10 seconds MUST NOT hallucinate dialogue or receive scores
   if (callDurationSeconds !== undefined && callDurationSeconds < 10) {
@@ -982,6 +1109,8 @@ async function analyzeCallTextOrAudio(
     cleanTranscript.includes('Стенограмма ожидает') ||
     cleanTranscript.includes('ожидает расшифровки') ||
     cleanTranscript.includes('ожидает распознавания') ||
+    cleanTranscript.includes(ASR_CLIENT_FRIENDLY_WAITING_TEXT) ||
+    cleanTranscript.includes('после восстановления сервиса расшифровки') ||
     cleanTranscript.includes('не была загружена') ||
     cleanTranscript.includes('исчерпан лимит') ||
     cleanTranscript.includes('лимит токенов') ||
@@ -1036,7 +1165,12 @@ async function analyzeCallTextOrAudio(
       sttFailReason = sttResult.asrFailReason;
       sttFailedModel = sttResult.failedModel;
       sttFallbackModelsTried = sttResult.fallbackModelsTried;
+      sttRequestId = sttResult.requestId;
+      sttEndpointPath = sttResult.endpointPath;
+      sttCatalogVerdict = sttResult.catalogVerdict;
+      sttCatalogSummary = sttResult.catalogSummary;
       if (sttResult.text && sttResult.text.trim()) {
+        markAsrServiceRecovered('transcription_success');
         cleanTranscript = fixDuplicatedTranscript(sttResult.text.trim());
         usedTranscriptionEngine = sttResult.engine;
         appendLog('success', 'speechkit', `Аудиозапись успешно расшифрована (${getSttProviderLabel(attemptedSttProvider)}, ${cleanTranscript.length} симв.)`);
@@ -1057,6 +1191,10 @@ async function analyzeCallTextOrAudio(
       sttFailReason = classifyAsrFailReason(sttErr, sttHttpStatus, sttErr?.http404Body);
       sttFailedModel = typeof sttErr?.asrModel === 'string' ? sttErr.asrModel : undefined;
       sttFallbackModelsTried = Array.isArray(sttErr?.asrFallbackModelsTried) ? sttErr.asrFallbackModelsTried : undefined;
+      sttRequestId = typeof sttErr?.asrRequestId === 'string' ? sttErr.asrRequestId : undefined;
+      sttEndpointPath = typeof sttErr?.asrEndpointPath === 'string' ? sttErr.asrEndpointPath : undefined;
+      sttCatalogVerdict = typeof sttErr?.asrCatalogVerdict === 'string' ? sttErr.asrCatalogVerdict : undefined;
+      sttCatalogSummary = typeof sttErr?.asrCatalogSummary === 'string' ? sttErr.asrCatalogSummary : undefined;
       appendLog('error', 'speechkit', `Ошибка распознавания речи (${activeProviderLabel}): ${sttErrorReason}`);
     }
   }
@@ -1082,12 +1220,26 @@ async function analyzeCallTextOrAudio(
       if (isHardSttFailure) {
         const resolvedFailReason =
           sttFailReason || classifyAsrFailReason({ message: sttErrorReason, status: sttHttpStatus }, sttHttpStatus);
-        const isModelNotFound = resolvedFailReason === 'model_not_found' || sttHttpStatus === 404;
+        const isServiceUnavailable404 =
+          resolvedFailReason === 'service_unavailable' ||
+          resolvedFailReason === 'model_not_found' ||
+          sttHttpStatus === 404;
         const failedModelName = sttFailedModel || (attemptedSttProvider === 'gigaam_v3' ? getGigaAmConfig().variant : undefined);
 
-        // При HTTP 404 / model_not_found сразу ставим «Требует расшифровки» + asr_fail_reason='model_not_found',
-        // сохраняем аудио без потерь, НЕ планируем бесполезный авто-повтор и шлём сигнал админу в VK.
-        if (isModelNotFound) {
+        // При HTTP 404 от транскрибации:
+        // Классифицируем как service_unavailable (внутренняя ошибка провайдера, не ошибка звонка).
+        // Статус — не финальный «Требует расшифровки», а «Ожидает расшифровки (сервис ASR недоступен)».
+        // Повтор с плавающим интервалом 30 мин → 1 ч → 3 ч (сброс до 15 мин после первого успеха).
+        // Алерт в VK-чат при первых двух 404 подряд с последним x-request-id.
+        // В карточке звонка клиенту (админу салона) показываем только понятный текст без технических деталей.
+        if (isServiceUnavailable404) {
+          consecutiveAsr404Failures += 1;
+          asrHad404Outage = true;
+          if (sttRequestId) {
+            lastAsr404RequestId = sttRequestId;
+          }
+          const currentDeferredAttempt = options?.deferredAttempt ?? 0;
+          const nextAttempt = currentDeferredAttempt + 1;
           const bufferToArchive = preparedWavBuffer && preparedWavBuffer.length > 44 ? preparedWavBuffer : originalAudioBuf;
           const wavReady = Boolean((preparedWavBuffer && preparedWavBuffer.length > 44) || options?.isPreparedWav);
           const effectiveCallId = options?.callId || `call-${Date.now()}`;
@@ -1096,49 +1248,74 @@ async function analyzeCallTextOrAudio(
             mimeType: audioBase64!.mimeType,
           });
           const modelLabel = failedModelName || getGigaAmConfig().variant;
-          const alertRes = await notifyAdminAsrModelNotFound(modelLabel, {
-            callId: effectiveCallId,
-            fallbackModels: sttFallbackModelsTried,
+          const endpointPath = sttEndpointPath || '/v1/audio/transcriptions';
+          const retry404DelayMs = computeAsr404RetryDelayMs(nextAttempt, {
+            afterRecoveryReset: asrPostRecoveryResetActive,
           });
-          const failSummary = formatGigaAsrIncidentSummary(effectiveCallId, 'failed', {
-            reason: `model_not_found (${modelLabel}); аудио сохранено (${savedMeta.storage.toUpperCase()}), авто-повтор отключён`,
+          const retry404DelayMin = Math.round(retry404DelayMs / 60000);
+          const retryAfterIso = new Date(Date.now() + retry404DelayMs).toISOString();
+
+          let alertSentAt: string | undefined;
+          if (consecutiveAsr404Failures >= ASR_404_ALERT_CONSECUTIVE_THRESHOLD) {
+            const alertRes = await notifyAdminAsr404Threshold({
+              endpointPath,
+              requestId: sttRequestId || lastAsr404RequestId,
+              modelName: modelLabel,
+              fallbackModels: sttFallbackModelsTried,
+              consecutiveFailures: consecutiveAsr404Failures,
+              catalogVerdict: sttCatalogVerdict,
+              catalogSummary: sttCatalogSummary,
+              callId: effectiveCallId,
+            });
+            alertSentAt = alertRes.sentAt;
+          }
+
+          const diagNote = sttCatalogSummary ? `; /v1/models: ${sttCatalogSummary}` : '';
+          const reqIdNote = sttRequestId ? `; x-request-id=${sttRequestId}` : '';
+          const scheduleLabel = asrPostRecoveryResetActive ? '15→30→60→180 мин' : '30→60→180 мин';
+          const scheduleNote = `повтор через ${retry404DelayMin} мин (${scheduleLabel})`;
+          const failSummary = formatGigaAsrIncidentSummary(effectiveCallId, 'deferred', {
+            reason: `service_unavailable (${modelLabel}, подряд 404: ${consecutiveAsr404Failures}${reqIdNote}${diagNote}); ${scheduleNote}, аудио сохранено (${savedMeta.storage.toUpperCase()})`,
           });
-          console.error(failSummary);
-          appendLog('error', 'speechkit', failSummary);
+          console.warn(failSummary);
+          appendLog('warning', 'speechkit', failSummary);
 
           return {
             status: 'needs_transcription',
-            transcription_status: 'Требует расшифровки',
-            asr_fail_reason: 'model_not_found',
+            transcription_status: ASR_SERVICE_UNAVAILABLE_STATUS_LABEL,
+            asr_fail_reason: 'service_unavailable',
             asr_failed_model: modelLabel,
-            pending_asr_alert_sent_at: alertRes.sentAt,
+            asr_last_request_id: sttRequestId || lastAsr404RequestId,
+            asr_endpoint_path: endpointPath,
+            asr_catalog_verdict: sttCatalogVerdict,
+            asr_catalog_summary: sttCatalogSummary,
+            asr_404_consecutive_failures: consecutiveAsr404Failures,
+            pending_asr_alert_sent_at: alertSentAt,
             pending_asr_s3_key: savedMeta.s3Key,
             pending_asr_local_path: savedMeta.localPath,
             pending_asr_wav_ready: savedMeta.isWav,
             pending_asr_mime_type: savedMeta.mimeType,
-            pending_asr_retry_after: undefined,
-            pending_asr_attempts: (options?.deferredAttempt ?? 0) + 1,
+            pending_asr_retry_after: retryAfterIso,
+            pending_asr_attempts: nextAttempt,
             pending_asr_last_error: sttErrorReason,
-            transcript: `Требует расшифровки (model_not_found: модель ${modelLabel} не найдена). Аудиозапись сохранена (${savedMeta.storage.toUpperCase()}, ${wavReady ? 'WAV 16кГц готов' : `${audioKbytes} КБ`}). Авто-повтор отключён до обновления ASR_MODEL.`,
-            summary: `Требует расшифровки: ASR недоступен — модель ${modelLabel} не найдена (HTTP 404). Аудиозапись сохранена без потерь; обновите ASR_MODEL и перезапустите расшифровку.`,
+            transcript: ASR_CLIENT_FRIENDLY_WAITING_TEXT,
+            summary: ASR_CLIENT_FRIENDLY_WAITING_TEXT,
             key_facts: {
               is_dispute: false,
               dispute_reason: null,
               promises: [],
               tone_client: 'нейтральный',
               tone_manager: 'нейтральный',
-              call_outcome: 'Требует расшифровки',
+              call_outcome: ASR_SERVICE_UNAVAILABLE_STATUS_LABEL,
               booking_status: 'не применимо',
-              client_issue: `ASR недоступен (model_not_found): модель ${modelLabel} не найдена`,
+              client_issue: ASR_CLIENT_FRIENDLY_WAITING_TEXT,
             },
             trigger_phrases: [],
-            recommendations: [
-              `Проверьте и обновите переменную окружения ASR_MODEL (текущая модель ${modelLabel} вернула HTTP 404).`,
-              'После обновления ASR_MODEL запустите повторную расшифровку звонка вручную.',
-            ],
+            recommendations: [ASR_CLIENT_FRIENDLY_WAITING_TEXT],
             operator_score: null,
-            operator_comment: `Требует расшифровки (model_not_found: модель ${modelLabel} не найдена)`,
-            error_message: `ASR недоступен: модель ${modelLabel} не найдена (${sttErrorReason})`,
+            operator_comment: ASR_CLIENT_FRIENDLY_WAITING_TEXT,
+            error_message: undefined,
+            fallback_reason: undefined,
             transcription_engine: 'none',
           };
         }
@@ -2951,37 +3128,66 @@ setInterval(async () => {
   }
 }, 30000); // Check state every 30 seconds
 
-// Планировщик автоматического повтора звонков со статусом «Требует расшифровки» (через 10–15 мин, без повторной конвертации WAV)
-// Если asr_fail_reason === 'model_not_found' — авто-повтор пропускается и отправляется сигнал админу в VK.
+// Планировщик автоматического повтора отложенных расшифровок (без повторной конвертации WAV).
+// Различает классы ошибок:
+// - service_unavailable (HTTP 404): плавающий интервал 30 мин → 1 ч → 3 ч (сброс до 15 мин после первого успеха), не финальный статус;
+// - временные сбои (429/5xx/сеть): стандартный повтор каждые ~12 мин;
+// - устаревший model_not_found: повтор по запланированному окну.
 let pendingAsrSchedulerBusy = false;
-setInterval(async () => {
+
+async function processPendingAsrQueue(options?: { forceImmediateServiceUnavailable?: boolean }): Promise<void> {
   if (pendingAsrSchedulerBusy) return;
   pendingAsrSchedulerBusy = true;
   try {
     const db = readDb();
     const nowMs = Date.now();
-    const dueCalls: CallRecord[] = [];
+    const dueCalls: Array<{
+      call: CallRecord;
+      retryClass: 'standard_transient' | 'http_404_backoff' | 'service_unavailable_404';
+    }> = [];
     const modelNotFoundToAlert: CallRecord[] = [];
 
     for (const c of db.calls || []) {
-      const decision = shouldAutoRetryPendingAsrCall(c, nowMs, PENDING_ASR_MAX_DEFERRED_ATTEMPTS);
+      const decision = shouldAutoRetryPendingAsrCall(c, nowMs, PENDING_ASR_MAX_DEFERRED_ATTEMPTS, {
+        afterRecoveryReset: asrPostRecoveryResetActive,
+        forceImmediateServiceUnavailable: options?.forceImmediateServiceUnavailable,
+      });
       if (decision.shouldRetry) {
-        dueCalls.push(c);
-      } else if (decision.skipReason === 'model_not_found' && !c.pending_asr_alert_sent_at) {
+        dueCalls.push({ call: c, retryClass: decision.retryClass || 'standard_transient' });
+      } else if (
+        (decision.skipReason === 'model_not_found' ||
+          (decision.retryClass === 'http_404_backoff' && decision.skipReason === 'max_attempts_reached')) &&
+        !c.pending_asr_alert_sent_at
+      ) {
         modelNotFoundToAlert.push(c);
       }
     }
 
-    // Для звонков с model_not_found авто-повтор бессмысленен — уведомляем админа в VK и помечаем alert отправленным
+    // Устаревшие записи model_not_found без окна повтора — отправляем алерт в VK
     if (modelNotFoundToAlert.length > 0) {
       for (const blockedCall of modelNotFoundToAlert) {
         const failedModel = blockedCall.asr_failed_model || getGigaAmConfig().variant;
+        const consecutive = Math.max(
+          consecutiveAsr404Failures,
+          blockedCall.asr_404_consecutive_failures || blockedCall.pending_asr_attempts || 1
+        );
         appendLog(
           'warning',
           'speechkit',
-          `[GigaASR Scheduler] Звонок ${blockedCall.call_id}: авто-повтор пропущен (asr_fail_reason=model_not_found, модель ${failedModel}). Требуется обновление ASR_MODEL.`
+          `[GigaASR Scheduler] Звонок ${blockedCall.call_id}: авто-повтор остановлен (asr_fail_reason=model_not_found, модель ${failedModel}, попыток: ${blockedCall.pending_asr_attempts || 0}).`
         );
-        const alertRes = await notifyAdminAsrModelNotFound(failedModel, { callId: blockedCall.call_id });
+        const alertRes =
+          consecutive >= ASR_404_ALERT_CONSECUTIVE_THRESHOLD
+            ? await notifyAdminAsr404Threshold({
+                endpointPath: blockedCall.asr_endpoint_path || '/v1/audio/transcriptions',
+                requestId: blockedCall.asr_last_request_id,
+                modelName: failedModel,
+                consecutiveFailures: consecutive,
+                catalogVerdict: blockedCall.asr_catalog_verdict,
+                catalogSummary: blockedCall.asr_catalog_summary,
+                callId: blockedCall.call_id,
+              })
+            : await notifyAdminAsrModelNotFound(failedModel, { callId: blockedCall.call_id });
         if (alertRes.sentAt) {
           const freshDb = readDb();
           const idx = (freshDb.calls || []).findIndex((x: CallRecord) => x.call_id === blockedCall.call_id);
@@ -2994,12 +3200,24 @@ setInterval(async () => {
     }
 
     // Обрабатываем строго последовательно — по одному звонку за проход через общий семафор ASR
-    for (const dueCall of dueCalls) {
+    for (const { call: dueCall, retryClass } of dueCalls) {
       try {
+        const classLabel =
+          retryClass === 'service_unavailable_404'
+            ? options?.forceImmediateServiceUnavailable
+              ? 'service_unavailable (восстановление ASR)'
+              : `service_unavailable ${asrPostRecoveryResetActive ? '15→30→60→180' : '30→60→180'} мин`
+            : retryClass === 'http_404_backoff'
+            ? `404-backoff 30→60→180 мин${dueCall.asr_catalog_verdict ? `, каталог=${dueCall.asr_catalog_verdict}` : ''}`
+            : `transient (${dueCall.asr_fail_reason || 'unknown'})`;
+        const attemptLabel =
+          retryClass === 'service_unavailable_404'
+            ? `попытка ${(dueCall.pending_asr_attempts || 0) + 1}`
+            : `попытка ${(dueCall.pending_asr_attempts || 0) + 1}/${PENDING_ASR_MAX_DEFERRED_ATTEMPTS}`;
         appendLog(
           'info',
           'speechkit',
-          `[GigaASR Scheduler] Автоматический повтор расшифровки звонка ${dueCall.call_id} (попытка ${(dueCall.pending_asr_attempts || 0) + 1}/${PENDING_ASR_MAX_DEFERRED_ATTEMPTS}, причина: ${dueCall.asr_fail_reason || 'transient'}, WAV готов: ${dueCall.pending_asr_wav_ready ? 'да' : 'нет'})...`
+          `[GigaASR Scheduler] Автоматический повтор расшифровки звонка ${dueCall.call_id} (${attemptLabel}, класс: ${classLabel}, WAV готов: ${dueCall.pending_asr_wav_ready ? 'да' : 'нет'})...`
         );
         await performCallReanalysis(dueCall.call_id, undefined, { forceRetranscribe: true });
       } catch (retryErr: any) {
@@ -3011,7 +3229,54 @@ setInterval(async () => {
   } finally {
     pendingAsrSchedulerBusy = false;
   }
+}
+
+setInterval(() => {
+  void processPendingAsrQueue();
 }, 60000);
+
+// Ежечасная фоновая проверка доступности ASR одним дешёвым POST (1-секундный silence WAV).
+// Логирует «ASR check: OK» / «ASR check: 404 (x-request-id: …)» и при восстановлении сразу запускает очередь.
+let asrHealthCheckBusy = false;
+
+async function runScheduledAsrHealthCheck(): Promise<void> {
+  if (asrHealthCheckBusy) return;
+  if (!isGigaAmConfigured()) return;
+  asrHealthCheckBusy = true;
+  try {
+    const probe = await runAsrHealthCheckProbe();
+    appendLog(probe.ok ? 'success' : 'warning', 'speechkit', probe.logLine);
+    if (probe.status === 404 && probe.requestId) {
+      lastAsr404RequestId = probe.requestId;
+    }
+    if (probe.ok) {
+      markAsrServiceRecovered('hourly_healthcheck');
+      const db = readDb();
+      const pendingWaitingCount = (db.calls || []).filter(
+        (c: CallRecord) =>
+          c.status === 'needs_transcription' ||
+          c.asr_fail_reason === 'service_unavailable' ||
+          c.transcription_status === ASR_SERVICE_UNAVAILABLE_STATUS_LABEL
+      ).length;
+      if (pendingWaitingCount > 0) {
+        appendLog(
+          'info',
+          'speechkit',
+          `[GigaASR HealthCheck] Сервис ASR восстановлен (ASR check: OK). Немедленный запуск очереди расшифровки (звонков в ожидании: ${pendingWaitingCount})...`
+        );
+        await processPendingAsrQueue({ forceImmediateServiceUnavailable: true });
+      }
+    }
+  } catch (hcErr: any) {
+    console.warn('[GigaASR HealthCheck] Ошибка ежечасной проверки:', hcErr?.message || hcErr);
+  } finally {
+    asrHealthCheckBusy = false;
+  }
+}
+
+setInterval(() => {
+  void runScheduledAsrHealthCheck();
+}, ASR_HEALTHCHECK_INTERVAL_MS);
 
 // REST API ROUTES
 
@@ -5588,6 +5853,11 @@ async function performCallReanalysis(
               transcription_status: undefined,
               asr_fail_reason: undefined,
               asr_failed_model: undefined,
+              asr_last_request_id: undefined,
+              asr_endpoint_path: undefined,
+              asr_catalog_verdict: undefined,
+              asr_catalog_summary: undefined,
+              asr_404_consecutive_failures: undefined,
               pending_asr_alert_sent_at: undefined,
               pending_asr_s3_key: undefined,
               pending_asr_local_path: undefined,

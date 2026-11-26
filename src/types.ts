@@ -21,6 +21,7 @@ export type GigaamModelVariant =
   | (string & {});
 
 export type AsrFailReason =
+  | 'service_unavailable'
   | 'model_not_found'
   | 'rate_limit'
   | 'auth_error'
@@ -29,6 +30,11 @@ export type AsrFailReason =
   | 'bad_request'
   | 'empty_audio'
   | 'unknown';
+
+export type AsrCatalogVerdict =
+  | 'model_present_endpoint_issue'
+  | 'model_missing_catalog_issue'
+  | 'catalog_probe_failed';
 
 export type UserRole = 'admin' | 'manager' | 'operator' | 'viewer';
 
@@ -280,6 +286,11 @@ export interface CallRecord {
   pending_asr_last_error?: string;
   asr_fail_reason?: AsrFailReason | string;
   asr_failed_model?: string;
+  asr_last_request_id?: string;
+  asr_endpoint_path?: string;
+  asr_catalog_verdict?: AsrCatalogVerdict | string;
+  asr_catalog_summary?: string;
+  asr_404_consecutive_failures?: number;
   pending_asr_alert_sent_at?: string;
   
   // TTL & S3 Archive Data (152-ФЗ)

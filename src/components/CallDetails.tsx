@@ -1159,6 +1159,157 @@ export function CallDetails({
     }
   };
 
+  const isAsrServiceUnavailable =
+    call.asr_fail_reason === 'service_unavailable' ||
+    call.transcription_status === 'Ожидает расшифровки (сервис ASR недоступен)';
+
+  if (isAsrServiceUnavailable) {
+    return (
+      <div className="bg-white border border-slate-100 rounded-2xl shadow-xs overflow-hidden flex flex-col h-full text-left" id="call-details-panel">
+        <div className="p-5 border-b border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <div className="flex flex-wrap items-center gap-2 mb-1">
+              <span className="text-xs font-mono font-medium text-slate-400 uppercase tracking-wide">
+                {call.call_id}
+              </span>
+              <span
+                id={`asr-service-unavailable-badge-${call.call_id}`}
+                className="text-[11px] px-2.5 py-0.5 rounded-full font-semibold border bg-amber-50 text-amber-800 border-amber-200 inline-flex items-center gap-1"
+              >
+                <Clock className="w-3 h-3 text-amber-600 shrink-0" />
+                <span>Ожидает расшифровки (сервис ASR недоступен)</span>
+              </span>
+              {call.tags && call.tags.length > 0 && call.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className={`text-[11px] px-2 py-0.5 rounded-full font-semibold border inline-flex items-center gap-1 shadow-3xs ${getTagBadgeStyle(tag)}`}
+                >
+                  <Tag className="w-3 h-3 opacity-70" />
+                  <span>{tag}</span>
+                </span>
+              ))}
+            </div>
+            <h1 className="text-lg font-bold text-slate-800">
+              {call.client_phone_masked || call.client_name || 'Клиент'} ↔ {resolveCallAdministratorName(call).name}
+            </h1>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div className="text-xs text-slate-500 font-medium">
+              {new Date(call.timestamp).toLocaleString('ru-RU', {
+                year: 'numeric',
+                month: 'long',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+                timeZone: 'Europe/Samara'
+              })}
+            </div>
+            {onDeleteCall && (userRole === 'admin' || userRole === 'manager') && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (window.confirm(`Вы уверены, что хотите удалить звонок ${call.call_id} из базы данных?`)) {
+                    onDeleteCall(call.call_id);
+                  }
+                }}
+                className="text-xs font-semibold px-3 py-1.5 rounded-lg border border-rose-200 bg-white hover:bg-rose-50 text-rose-700 flex items-center gap-1.5 transition-all cursor-pointer shadow-3xs"
+                title="Удалить запись звонка"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                <span>Удалить</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-8 flex flex-col items-center justify-center text-center max-w-lg mx-auto space-y-6">
+          <div className="p-4 rounded-full border shadow-xs bg-amber-50 text-amber-700 border-amber-200">
+            <Clock className="w-10 h-10" />
+          </div>
+
+          <div className="space-y-2" id="asr-service-unavailable-notice">
+            <h2 className="text-base font-bold text-slate-800">
+              Ожидает расшифровки (сервис ASR недоступен)
+            </h2>
+            <p className="text-sm text-slate-600 leading-relaxed font-normal">
+              Звонок будет обработан после восстановления сервиса расшифровки
+            </p>
+          </div>
+
+          {!call.audio_deleted && call.audio_url && (
+            <div className="w-full border border-slate-100 rounded-2xl p-4 bg-slate-50/70 text-left space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                  <Volume2 className="w-4 h-4 text-indigo-500" /> Аудиозапись звонка
+                </span>
+                <a
+                  href={`${proxiedAudioSrc}${proxiedAudioSrc.includes('?') ? '&' : '?'}download=1`}
+                  download={`call-${call.call_id}.mp3`}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/80 rounded-md transition-colors"
+                >
+                  <Download className="w-3 h-3" />
+                  Скачать
+                </a>
+              </div>
+              <audio
+                key={`${call.call_id}-${audioReloadKey}`}
+                src={proxiedAudioSrc}
+                controls
+                className="w-full h-9 rounded-lg"
+                preload="metadata"
+              />
+            </div>
+          )}
+
+          <div className="w-full bg-slate-50 rounded-2xl p-4 border border-slate-100/80 text-left">
+            <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Теги вызова:</span>
+            <div className="flex flex-wrap gap-1.5 mb-2.5">
+              {call.tags && call.tags.length > 0 ? (
+                call.tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-md border ${getTagBadgeStyle(tag)}`}
+                  >
+                    <span>{tag}</span>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveTag(tag)}
+                      disabled={isTagSubmitting}
+                      className="hover:opacity-70 p-0.5"
+                    >
+                      <X className="w-2.5 h-2.5" />
+                    </button>
+                  </span>
+                ))
+              ) : (
+                <span className="text-[11px] text-slate-400 italic">Теги не установлены</span>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {['Перезвонить', 'Спам', 'Жалоба', 'Срочно'].map((preset) => {
+                const hasTag = call.tags?.includes(preset);
+                return (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => hasTag ? handleRemoveTag(preset) : handleAddTag(preset)}
+                    disabled={isTagSubmitting}
+                    className={`text-[11px] font-medium px-2 py-0.5 rounded-md border transition-all ${
+                      hasTag ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-700 hover:bg-slate-50 border-slate-200'
+                    }`}
+                  >
+                    {hasTag ? `✓ ${preset}` : `+ ${preset}`}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const isUnsuccessful = call.status !== 'completed' && STATUS_DETAILS[call.status];
 
   if (isUnsuccessful) {

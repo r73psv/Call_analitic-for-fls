@@ -29,6 +29,10 @@ export interface TranscriptionResult {
   asrFailReason?: AsrFailReason | string;
   failedModel?: string;
   fallbackModelsTried?: string[];
+  requestId?: string;
+  endpointPath?: string;
+  catalogVerdict?: string;
+  catalogSummary?: string;
 }
 
 export interface TranscribeAudioOptions {
@@ -189,6 +193,10 @@ export async function transcribeAudio(
         asrFailReason,
         failedModel,
         fallbackModelsTried: Array.isArray(err?.asrFallbackModelsTried) ? err.asrFallbackModelsTried : undefined,
+        requestId: typeof err?.asrRequestId === 'string' ? err.asrRequestId : undefined,
+        endpointPath: typeof err?.asrEndpointPath === 'string' ? err.asrEndpointPath : undefined,
+        catalogVerdict: typeof err?.asrCatalogVerdict === 'string' ? err.asrCatalogVerdict : undefined,
+        catalogSummary: typeof err?.asrCatalogSummary === 'string' ? err.asrCatalogSummary : undefined,
       };
     }
   }

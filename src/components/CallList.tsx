@@ -1797,27 +1797,55 @@ export function CallList({ calls, selectedCallId, onSelectCall, onClearDemoCalls
                     </h3>
                   </div>
                   
-                  {call.status === 'processing' ? (
-                    <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-blue-100 text-blue-700 animate-pulse flex items-center gap-1 shrink-0">
-                      <RefreshCw className="w-2.5 h-2.5 animate-spin" /> Анализ...
-                    </span>
-                  ) : call.status === 'failed' ? (
-                    <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-red-100 text-red-700 flex items-center gap-1 shrink-0">
-                      <XCircle className="w-2.5 h-2.5" /> Сбой
-                    </span>
-                  ) : STATUS_BADGES[call.status] ? (
-                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold border shrink-0 ${STATUS_BADGES[call.status].className}`} id={`status-badge-${call.status}-${call.call_id}`}>
-                      {STATUS_BADGES[call.status].label}
-                    </span>
-                  ) : (
-                    <span className={`text-xs px-2.5 py-0.5 rounded-full border font-bold shrink-0 ${getScoreColor(call.operator_score)}`}>
-                      {call.operator_score !== null && call.operator_score !== undefined ? `${call.operator_score}/10` : '—'}
-                    </span>
-                  )}
+                  {(() => {
+                    const isAsrServiceUnavailable =
+                      call.asr_fail_reason === 'service_unavailable' ||
+                      call.transcription_status === 'Ожидает расшифровки (сервис ASR недоступен)';
+                    if (call.status === 'processing') {
+                      return (
+                        <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-blue-100 text-blue-700 animate-pulse flex items-center gap-1 shrink-0">
+                          <RefreshCw className="w-2.5 h-2.5 animate-spin" /> Анализ...
+                        </span>
+                      );
+                    }
+                    if (isAsrServiceUnavailable) {
+                      return (
+                        <span
+                          className="text-[10px] px-2 py-0.5 rounded-full font-semibold border bg-amber-50 text-amber-800 border-amber-200 shrink-0 max-w-[180px] truncate"
+                          id={`status-badge-asr-waiting-${call.call_id}`}
+                          title="Ожидает расшифровки (сервис ASR недоступен)"
+                        >
+                          Ожидает расшифровки (сервис ASR недоступен)
+                        </span>
+                      );
+                    }
+                    if (call.status === 'failed') {
+                      return (
+                        <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-red-100 text-red-700 flex items-center gap-1 shrink-0">
+                          <XCircle className="w-2.5 h-2.5" /> Сбой
+                        </span>
+                      );
+                    }
+                    if (STATUS_BADGES[call.status]) {
+                      return (
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold border shrink-0 ${STATUS_BADGES[call.status].className}`} id={`status-badge-${call.status}-${call.call_id}`}>
+                          {STATUS_BADGES[call.status].label}
+                        </span>
+                      );
+                    }
+                    return (
+                      <span className={`text-xs px-2.5 py-0.5 rounded-full border font-bold shrink-0 ${getScoreColor(call.operator_score)}`}>
+                        {call.operator_score !== null && call.operator_score !== undefined ? `${call.operator_score}/10` : '—'}
+                      </span>
+                    );
+                  })()}
                 </div>
 
                 <div className="text-xs text-slate-500 line-clamp-2 mb-2">
-                  {call.summary || call.transcript || 'Загрузка...'}
+                  {call.asr_fail_reason === 'service_unavailable' ||
+                  call.transcription_status === 'Ожидает расшифровки (сервис ASR недоступен)'
+                    ? 'Звонок будет обработан после восстановления сервиса расшифровки'
+                    : call.summary || call.transcript || 'Загрузка...'}
                 </div>
 
                 {/* Categorical Tags Badges in Call Card */}
